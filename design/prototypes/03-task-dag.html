@@ -1,0 +1,1307 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Swarm Commander — Task DAG</title>
+<style>
+:root {
+  --bg-primary: #FFFFFF;
+  --bg-secondary: #F5F5F7;
+  --bg-tertiary: #E8E8ED;
+  --bg-elevated: #FFFFFF;
+  --bg-canvas: #FAFAFA;
+  --text-primary: #1D1D1F;
+  --text-secondary: #6E6E73;
+  --text-tertiary: #AEAEB2;
+  --border: rgba(0,0,0,0.08);
+  --border-strong: rgba(0,0,0,0.15);
+  --accent: #007AFF;
+  --accent-hover: #0066D6;
+  --green: #34C759;
+  --red: #FF3B30;
+  --orange: #FF9500;
+  --yellow: #FFCC00;
+  --purple: #AF52DE;
+  --surface-hover: rgba(0,0,0,0.04);
+  --surface-active: rgba(0,0,0,0.08);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.08);
+  --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
+  --shadow-window: 0 0 0 0.5px rgba(0,0,0,0.1), 0 12px 40px rgba(0,0,0,0.15), 0 40px 80px rgba(0,0,0,0.1);
+  --shadow-node: 0 1px 4px rgba(0,0,0,0.08), 0 0 0 0.5px rgba(0,0,0,0.06);
+  --shadow-node-hover: 0 4px 16px rgba(0,0,0,0.12), 0 0 0 0.5px rgba(0,0,0,0.08);
+  --shadow-node-selected: 0 0 0 2px var(--accent), 0 4px 16px rgba(0,122,255,0.15);
+  --ease-out: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --duration-fast: 150ms;
+  --duration-normal: 250ms;
+  --topbar-height: 52px;
+  --sidebar-width: 280px;
+  --summary-height: 36px;
+  --grid-dot: rgba(0,0,0,0.06);
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --bg-primary: #1C1C1E;
+  --bg-secondary: #2C2C2E;
+  --bg-tertiary: #3A3A3C;
+  --bg-elevated: #2C2C2E;
+  --bg-canvas: #1A1A1C;
+  --text-primary: #F5F5F7;
+  --text-secondary: #98989D;
+  --text-tertiary: #636366;
+  --border: rgba(255,255,255,0.08);
+  --border-strong: rgba(255,255,255,0.15);
+  --accent: #0A84FF;
+  --accent-hover: #409CFF;
+  --green: #30D158;
+  --red: #FF453A;
+  --orange: #FF9F0A;
+  --yellow: #FFD60A;
+  --purple: #BF5AF2;
+  --surface-hover: rgba(255,255,255,0.06);
+  --surface-active: rgba(255,255,255,0.1);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.2);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.3);
+  --shadow-lg: 0 8px 30px rgba(0,0,0,0.4);
+  --shadow-window: 0 0 0 0.5px rgba(255,255,255,0.05), 0 12px 40px rgba(0,0,0,0.4), 0 40px 80px rgba(0,0,0,0.3);
+  --shadow-node: 0 1px 4px rgba(0,0,0,0.3), 0 0 0 0.5px rgba(255,255,255,0.06);
+  --shadow-node-hover: 0 4px 16px rgba(0,0,0,0.4), 0 0 0 0.5px rgba(255,255,255,0.08);
+  --shadow-node-selected: 0 0 0 2px var(--accent), 0 4px 16px rgba(10,132,255,0.2);
+  --grid-dot: rgba(255,255,255,0.04);
+  color-scheme: dark;
+}
+
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+               "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  line-height: 1.38;
+  background: #707070;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+}
+
+.window {
+  width: 1280px;
+  height: 820px;
+  background: var(--bg-primary);
+  border-radius: 10px;
+  box-shadow: var(--shadow-window);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+
+/* ============ TOP BAR ============ */
+.topbar {
+  height: var(--topbar-height);
+  background: var(--bg-secondary);
+  border-bottom: 0.5px solid var(--border-strong);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  gap: 12px;
+  flex-shrink: 0;
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  position: relative;
+  z-index: 10;
+}
+
+.traffic-lights {
+  display: flex;
+  gap: 8px;
+  margin-right: 8px;
+}
+
+.traffic-light {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  position: relative;
+}
+
+.traffic-light.close { background: #FF5F57; }
+.traffic-light.minimize { background: #FEBC2E; }
+.traffic-light.maximize { background: #28C840; }
+
+.traffic-lights:hover .traffic-light::after {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 9px;
+  font-weight: 700;
+  color: rgba(0,0,0,0.5);
+}
+.traffic-lights:hover .close::after { content: "×"; font-size: 11px; }
+.traffic-lights:hover .minimize::after { content: "−"; }
+.traffic-lights:hover .maximize::after { content: "+"; }
+
+.topbar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.topbar-subtitle {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-left: -4px;
+}
+
+.topbar-spacer { flex: 1; }
+
+.toolbar-group {
+  display: flex;
+  gap: 2px;
+  background: var(--surface-active);
+  border-radius: 6px;
+  padding: 2px;
+}
+
+.toolbar-btn {
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  border-radius: 5px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  transition: background var(--duration-fast) var(--ease-out);
+  white-space: nowrap;
+}
+
+.toolbar-btn:hover { background: var(--surface-hover); }
+.toolbar-btn:active { background: var(--surface-active); }
+.toolbar-btn.active { background: var(--bg-primary); box-shadow: var(--shadow-sm); }
+
+.toolbar-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.toolbar-btn-standalone {
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  transition: all var(--duration-fast) var(--ease-out);
+}
+
+.toolbar-btn-standalone:hover { filter: brightness(1.1); }
+.toolbar-btn-standalone:active { filter: brightness(0.95); }
+
+.toolbar-btn-standalone svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.theme-toggle {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--duration-fast) var(--ease-out);
+}
+
+.theme-toggle:hover { background: var(--surface-hover); color: var(--text-primary); }
+
+.theme-toggle svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ============ MAIN AREA ============ */
+.main-area {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  position: relative;
+}
+
+.canvas-container {
+  flex: 1;
+  position: relative;
+  background: var(--bg-canvas);
+  overflow: hidden;
+  cursor: default;
+}
+
+.canvas-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    radial-gradient(circle, var(--grid-dot) 1px, transparent 1px);
+  background-size: 24px 24px;
+  pointer-events: none;
+}
+
+.canvas-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.canvas-svg line,
+.canvas-svg path,
+.canvas-svg polyline {
+  pointer-events: none;
+}
+
+/* ============ DAG NODES ============ */
+.dag-node {
+  position: absolute;
+  min-width: 180px;
+  background: var(--bg-elevated);
+  border: 1.5px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 12px 14px;
+  cursor: grab;
+  box-shadow: var(--shadow-node);
+  transition: box-shadow var(--duration-fast) var(--ease-out),
+              border-color var(--duration-fast) var(--ease-out);
+  z-index: 2;
+}
+
+.dag-node:hover {
+  box-shadow: var(--shadow-node-hover);
+  z-index: 3;
+}
+
+.dag-node.selected {
+  box-shadow: var(--shadow-node-selected);
+  z-index: 4;
+}
+
+.dag-node.dragging {
+  cursor: grabbing;
+  z-index: 100;
+  box-shadow: var(--shadow-lg);
+  opacity: 0.95;
+}
+
+.dag-node.status-completed { border-color: var(--green); }
+.dag-node.status-running { border-color: var(--accent); }
+.dag-node.status-pending { border-color: var(--text-tertiary); }
+.dag-node.status-failed { border-color: var(--red); }
+
+.dag-node.status-running {
+  animation: nodePulse 2.5s ease-in-out infinite;
+}
+
+@keyframes nodePulse {
+  0%, 100% { box-shadow: var(--shadow-node), 0 0 0 0 rgba(0,122,255,0); }
+  50% { box-shadow: var(--shadow-node), 0 0 0 4px rgba(0,122,255,0.12); }
+}
+
+[data-theme="dark"] .dag-node.status-running {
+  animation: nodePulseDark 2.5s ease-in-out infinite;
+}
+
+@keyframes nodePulseDark {
+  0%, 100% { box-shadow: var(--shadow-node), 0 0 0 0 rgba(10,132,255,0); }
+  50% { box-shadow: var(--shadow-node), 0 0 0 4px rgba(10,132,255,0.15); }
+}
+
+.dag-node.selected.status-running { animation: none; }
+
+.node-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.node-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-completed .node-status-dot { background: var(--green); }
+.status-running .node-status-dot { background: var(--accent); animation: dotPulse 1.5s ease-in-out infinite; }
+.status-pending .node-status-dot { background: var(--text-tertiary); }
+.status-failed .node-status-dot { background: var(--red); }
+
+@keyframes dotPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.node-id {
+  font-family: "SF Mono", Menlo, Monaco, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.node-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.node-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.node-agent {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.agent-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.node-tag {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.tag-backend { background: rgba(175,82,222,0.12); color: var(--purple); }
+.tag-test { background: rgba(255,149,0,0.12); color: var(--orange); }
+
+.node-score {
+  font-family: "SF Mono", Menlo, Monaco, monospace;
+  font-size: 11px;
+  color: var(--green);
+  font-weight: 600;
+}
+
+.node-cost {
+  font-family: "SF Mono", Menlo, Monaco, monospace;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.node-waiting {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-style: italic;
+  margin-top: 4px;
+}
+
+/* edge flow animation */
+@keyframes flowDot {
+  0% { stroke-dashoffset: 16; }
+  100% { stroke-dashoffset: 0; }
+}
+
+.edge-flow {
+  stroke-dasharray: 4 12;
+  animation: flowDot 0.8s linear infinite;
+}
+
+/* ============ RIGHT SIDEBAR ============ */
+.right-sidebar {
+  width: var(--sidebar-width);
+  background: var(--bg-secondary);
+  border-left: 0.5px solid var(--border-strong);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  transition: width var(--duration-normal) var(--ease-out),
+              opacity var(--duration-normal) var(--ease-out);
+  overflow: hidden;
+}
+
+.right-sidebar.collapsed {
+  width: 0;
+  opacity: 0;
+  border-left: none;
+}
+
+.sidebar-header {
+  height: 44px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 0.5px solid var(--border);
+  flex-shrink: 0;
+}
+
+.sidebar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.sidebar-close {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  transition: all var(--duration-fast) var(--ease-out);
+}
+
+.sidebar-close:hover { background: var(--surface-hover); color: var(--text-primary); }
+
+.sidebar-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.sidebar-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  gap: 8px;
+}
+
+.sidebar-empty svg {
+  width: 32px;
+  height: 32px;
+  stroke: var(--text-tertiary);
+  fill: none;
+  stroke-width: 1;
+  opacity: 0.5;
+}
+
+.detail-section {
+  margin-bottom: 20px;
+}
+
+.detail-section:last-child { margin-bottom: 0; }
+
+.detail-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.detail-task-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.detail-task-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.badge-completed { background: rgba(52,199,89,0.12); color: var(--green); }
+.badge-running { background: rgba(0,122,255,0.12); color: var(--accent); }
+.badge-pending { background: var(--surface-active); color: var(--text-secondary); }
+.badge-failed { background: rgba(255,59,48,0.12); color: var(--red); }
+
+[data-theme="dark"] .badge-completed { background: rgba(48,209,88,0.15); }
+[data-theme="dark"] .badge-running { background: rgba(10,132,255,0.15); }
+[data-theme="dark"] .badge-failed { background: rgba(255,69,58,0.15); }
+
+.detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  font-size: 12px;
+  border-bottom: 0.5px solid var(--border);
+}
+
+.detail-row:last-child { border-bottom: none; }
+
+.detail-label { color: var(--text-secondary); }
+.detail-value { color: var(--text-primary); font-weight: 500; }
+.detail-value.mono {
+  font-family: "SF Mono", Menlo, Monaco, monospace;
+  font-size: 11px;
+}
+
+.dep-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dep-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--surface-hover);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.dep-item .dep-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.detail-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.detail-action-btn {
+  height: 28px;
+  padding: 0 12px;
+  border: 0.5px solid var(--border-strong);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+}
+
+.detail-action-btn:hover { background: var(--surface-hover); }
+
+.detail-action-btn.danger {
+  color: var(--red);
+  border-color: rgba(255,59,48,0.3);
+}
+
+.detail-action-btn.danger:hover {
+  background: rgba(255,59,48,0.08);
+}
+
+/* ============ SUMMARY BAR ============ */
+.summary-bar {
+  height: var(--summary-height);
+  background: var(--bg-secondary);
+  border-top: 0.5px solid var(--border-strong);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.summary-stats {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.summary-stat {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.summary-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.summary-cost {
+  font-family: "SF Mono", Menlo, Monaco, monospace;
+  font-size: 11px;
+}
+
+.cost-bar-track {
+  width: 80px;
+  height: 4px;
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-left: 6px;
+}
+
+.cost-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width var(--duration-normal) var(--ease-out);
+}
+
+/* ============ CONTEXT MENU ============ */
+.context-menu {
+  position: fixed;
+  background: var(--bg-elevated);
+  border: 0.5px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+  padding: 4px;
+  min-width: 180px;
+  z-index: 1000;
+  display: none;
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+
+.context-menu.visible { display: block; }
+
+.ctx-item {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-primary);
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.ctx-item:hover { background: var(--accent); color: #fff; }
+
+.ctx-separator {
+  height: 0.5px;
+  background: var(--border);
+  margin: 4px 8px;
+}
+
+.ctx-item svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ============ ZOOM INDICATOR ============ */
+.zoom-label {
+  font-family: "SF Mono", Menlo, Monaco, monospace;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  min-width: 36px;
+  text-align: center;
+}
+</style>
+</head>
+<body>
+<div class="window" id="window">
+  <!-- TOP BAR -->
+  <div class="topbar">
+    <div class="traffic-lights">
+      <div class="traffic-light close"></div>
+      <div class="traffic-light minimize"></div>
+      <div class="traffic-light maximize"></div>
+    </div>
+    <span class="topbar-title">Task DAG</span>
+    <span class="topbar-subtitle">— 用户认证系统</span>
+    <div class="topbar-spacer"></div>
+
+    <button class="toolbar-btn-standalone" onclick="handleAddTask()">
+      <svg viewBox="0 0 16 16"><line x1="8" y1="3" x2="8" y2="13"/><line x1="3" y1="8" x2="13" y2="8"/></svg>
+      Add Task
+    </button>
+
+    <button class="toolbar-btn" onclick="autoLayout()" title="Auto Layout">
+      <svg viewBox="0 0 16 16"><rect x="2" y="2" width="4" height="4" rx="1"/><rect x="10" y="2" width="4" height="4" rx="1"/><rect x="6" y="10" width="4" height="4" rx="1"/><line x1="4" y1="6" x2="8" y2="10"/><line x1="12" y1="6" x2="8" y2="10"/></svg>
+      Auto Layout
+    </button>
+
+    <div class="toolbar-group">
+      <button class="toolbar-btn" onclick="zoomCanvas(-0.15)" title="Zoom Out">
+        <svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="5"/><line x1="11" y1="11" x2="14" y2="14"/><line x1="5" y1="7" x2="9" y2="7"/></svg>
+      </button>
+      <span class="zoom-label" id="zoomLabel">100%</span>
+      <button class="toolbar-btn" onclick="zoomCanvas(0.15)" title="Zoom In">
+        <svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="5"/><line x1="11" y1="11" x2="14" y2="14"/><line x1="7" y1="5" x2="7" y2="9"/><line x1="5" y1="7" x2="9" y2="7"/></svg>
+      </button>
+    </div>
+
+    <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+      <svg id="themeIcon" viewBox="0 0 16 16">
+        <circle cx="8" cy="8" r="3.5"/>
+        <line x1="8" y1="1" x2="8" y2="3"/><line x1="8" y1="13" x2="8" y2="15"/>
+        <line x1="1" y1="8" x2="3" y2="8"/><line x1="13" y1="8" x2="15" y2="8"/>
+        <line x1="3.05" y1="3.05" x2="4.46" y2="4.46"/>
+        <line x1="11.54" y1="11.54" x2="12.95" y2="12.95"/>
+        <line x1="3.05" y1="12.95" x2="4.46" y2="11.54"/>
+        <line x1="11.54" y1="4.46" x2="12.95" y2="3.05"/>
+      </svg>
+    </button>
+  </div>
+
+  <!-- MAIN AREA -->
+  <div class="main-area">
+    <div class="canvas-container" id="canvasContainer">
+      <div class="canvas-grid"></div>
+      <svg class="canvas-svg" id="edgeSvg">
+        <defs>
+          <marker id="arrowGreen" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <path d="M0,0 L8,3 L0,6" fill="var(--green)" />
+          </marker>
+          <marker id="arrowBlue" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <path d="M0,0 L8,3 L0,6" fill="var(--accent)" />
+          </marker>
+          <marker id="arrowGray" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <path d="M0,0 L8,3 L0,6" fill="var(--text-tertiary)" />
+          </marker>
+        </defs>
+      </svg>
+      <div id="nodeLayer" style="position:absolute;inset:0;"></div>
+    </div>
+
+    <!-- RIGHT SIDEBAR -->
+    <div class="right-sidebar" id="rightSidebar">
+      <div class="sidebar-header">
+        <span class="sidebar-title" id="sidebarTitle">Task Details</span>
+        <button class="sidebar-close" onclick="closeSidebar()">×</button>
+      </div>
+      <div class="sidebar-body" id="sidebarBody">
+        <div class="sidebar-empty" id="sidebarEmpty">
+          <svg viewBox="0 0 32 32"><rect x="4" y="4" width="24" height="24" rx="4"/><line x1="10" y1="12" x2="22" y2="12"/><line x1="10" y1="17" x2="18" y2="17"/><line x1="10" y1="22" x2="15" y2="22"/></svg>
+          <span>点击节点查看详情</span>
+        </div>
+        <div id="sidebarContent" style="display:none;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SUMMARY BAR -->
+  <div class="summary-bar">
+    <div class="summary-stats">
+      <span>6 tasks:</span>
+      <div class="summary-stat"><div class="summary-dot" style="background:var(--green)"></div>1 completed</div>
+      <div class="summary-stat"><div class="summary-dot" style="background:var(--accent)"></div>3 running</div>
+      <div class="summary-stat"><div class="summary-dot" style="background:var(--text-tertiary)"></div>2 pending</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span class="summary-cost">Cost: $3.85 / $30</span>
+      <div class="cost-bar-track"><div class="cost-bar-fill" style="width:12.8%"></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- CONTEXT MENU -->
+<div class="context-menu" id="contextMenu">
+  <div class="ctx-item" onclick="ctxAction('details')">
+    <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><line x1="8" y1="7" x2="8" y2="11"/><circle cx="8" cy="5" r="0.5" fill="currentColor"/></svg>
+    View Details
+  </div>
+  <div class="ctx-item" onclick="ctxAction('reassign')">
+    <svg viewBox="0 0 16 16"><path d="M12 2l2 2-2 2"/><path d="M4 7H13a1 1 0 0 0 0-2h-1"/><path d="M4 14l-2-2 2-2"/><path d="M12 9H3a1 1 0 0 0 0 2h1"/></svg>
+    Reassign Agent
+  </div>
+  <div class="ctx-separator"></div>
+  <div class="ctx-item" onclick="ctxAction('dependency')">
+    <svg viewBox="0 0 16 16"><path d="M6 3v4l-2 2"/><path d="M10 3v4l2 2"/><circle cx="8" cy="13" r="2"/></svg>
+    Add Dependency
+  </div>
+  <div class="ctx-separator"></div>
+  <div class="ctx-item" style="color:var(--red)" onclick="ctxAction('cancel')">
+    <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><line x1="5.5" y1="5.5" x2="10.5" y2="10.5"/><line x1="10.5" y1="5.5" x2="5.5" y2="10.5"/></svg>
+    Cancel Task
+  </div>
+</div>
+
+<script>
+const tasks = [
+  {
+    id: 'T1', name: 'User Model', type: 'backend', status: 'completed',
+    agent: 'Agent-1', score: 9, cost: 0.42, duration: '2m 15s',
+    description: '定义用户数据模型，包含用户名、邮箱、密码哈希、创建时间等字段。实现 ORM 映射与数据验证。',
+    deps: [], downstream: ['T2', 'T3', 'T5'],
+    startedAt: '14:02:30', completedAt: '14:04:45',
+  },
+  {
+    id: 'T2', name: 'Register API', type: 'backend', status: 'running',
+    agent: 'Agent-1', score: null, cost: 0.68, duration: null,
+    description: '实现用户注册端点 POST /api/auth/register，包含输入验证、密码加密、重复检测与错误处理。',
+    deps: ['T1'], downstream: ['T4'],
+    startedAt: '14:05:10', estimatedCompletion: '~3 min',
+  },
+  {
+    id: 'T3', name: 'Login + JWT', type: 'backend', status: 'running',
+    agent: 'Agent-2', score: null, cost: 1.15, duration: null,
+    description: '实现登录端点 POST /api/auth/login，验证凭据后签发 JWT access token 与 refresh token。',
+    deps: ['T1'], downstream: ['T4'],
+    startedAt: '14:05:12', estimatedCompletion: '~4 min',
+  },
+  {
+    id: 'T5', name: 'Password Reset', type: 'backend', status: 'running',
+    agent: 'Agent-4', score: null, cost: 0.92, duration: null,
+    description: '实现密码重置流程：发送重置邮件、验证 token、更新密码。包含速率限制与安全措施。',
+    deps: ['T1'], downstream: [],
+    startedAt: '14:05:15', estimatedCompletion: '~5 min',
+  },
+  {
+    id: 'T4', name: 'Auth Middleware', type: 'backend', status: 'pending',
+    agent: null, score: null, cost: 0, duration: null,
+    description: 'JWT 验证中间件，解析请求头中的 Bearer token，验证签名并注入用户上下文。支持角色权限检查。',
+    deps: ['T2', 'T3'], downstream: ['T6'],
+    startedAt: null, estimatedCompletion: '等待依赖完成',
+  },
+  {
+    id: 'T6', name: 'E2E Tests', type: 'test', status: 'pending',
+    agent: null, score: null, cost: 0, duration: null,
+    description: '端到端测试：覆盖注册、登录、Token 刷新、密码重置、权限拦截等完整认证流程。',
+    deps: ['T4'], downstream: [],
+    startedAt: null, estimatedCompletion: '等待依赖完成',
+  },
+];
+
+const nodePositions = {
+  T1: { x: 360, y: 40 },
+  T2: { x: 120, y: 190 },
+  T3: { x: 360, y: 190 },
+  T5: { x: 600, y: 190 },
+  T4: { x: 240, y: 350 },
+  T6: { x: 240, y: 500 },
+};
+
+let currentZoom = 1;
+let selectedTaskId = null;
+let contextTaskId = null;
+let isDragging = false;
+let dragNode = null;
+let dragOffset = { x: 0, y: 0 };
+
+function getTask(id) { return tasks.find(t => t.id === id); }
+
+function statusClass(s) { return 'status-' + s; }
+
+function renderNodes() {
+  const layer = document.getElementById('nodeLayer');
+  layer.innerHTML = '';
+  tasks.forEach(task => {
+    const pos = nodePositions[task.id];
+    const el = document.createElement('div');
+    el.className = `dag-node ${statusClass(task.status)}${selectedTaskId === task.id ? ' selected' : ''}`;
+    el.id = 'node-' + task.id;
+    el.style.left = pos.x + 'px';
+    el.style.top = pos.y + 'px';
+    el.setAttribute('data-task', task.id);
+
+    let metaHTML = '';
+    if (task.agent) {
+      metaHTML += `<div class="node-agent"><div class="agent-dot"></div>${task.agent}</div>`;
+    }
+    metaHTML += `<span class="node-tag tag-${task.type}">${task.type}</span>`;
+    if (task.score !== null) {
+      metaHTML += `<span class="node-score">${task.score}/10</span>`;
+    }
+    if (task.cost > 0) {
+      metaHTML += `<span class="node-cost">$${task.cost.toFixed(2)}</span>`;
+    }
+
+    let waitingHTML = '';
+    if (task.status === 'pending' && task.deps.length > 0) {
+      waitingHTML = `<div class="node-waiting">Waiting: ${task.deps.join(', ')}</div>`;
+    }
+
+    el.innerHTML = `
+      <div class="node-header">
+        <div class="node-status-dot"></div>
+        <span class="node-id">${task.id}</span>
+      </div>
+      <div class="node-name">${task.name}</div>
+      <div class="node-meta">${metaHTML}</div>
+      ${waitingHTML}
+    `;
+
+    el.addEventListener('mousedown', onNodeMouseDown);
+    el.addEventListener('click', (e) => { if (!isDragging) selectTask(task.id); });
+    el.addEventListener('contextmenu', (e) => { e.preventDefault(); showContextMenu(e, task.id); });
+
+    layer.appendChild(el);
+  });
+}
+
+function getNodeCenter(taskId) {
+  const el = document.getElementById('node-' + taskId);
+  if (!el) return { x: 0, y: 0 };
+  const pos = nodePositions[taskId];
+  return {
+    x: pos.x + el.offsetWidth / 2,
+    y: pos.y + el.offsetHeight / 2,
+  };
+}
+
+function getNodePort(taskId, side) {
+  const el = document.getElementById('node-' + taskId);
+  if (!el) return { x: 0, y: 0 };
+  const pos = nodePositions[taskId];
+  const w = el.offsetWidth;
+  const h = el.offsetHeight;
+  if (side === 'bottom') return { x: pos.x + w / 2, y: pos.y + h };
+  if (side === 'top') return { x: pos.x + w / 2, y: pos.y };
+  return getNodeCenter(taskId);
+}
+
+function renderEdges() {
+  const svg = document.getElementById('edgeSvg');
+  while (svg.children.length > 1) svg.removeChild(svg.lastChild);
+
+  tasks.forEach(task => {
+    task.deps.forEach(depId => {
+      const depTask = getTask(depId);
+      const from = getNodePort(depId, 'bottom');
+      const to = getNodePort(task.id, 'top');
+
+      let edgeColor, markerEnd, dashArray = 'none', flowClass = '';
+
+      if (depTask.status === 'completed' && task.status === 'completed') {
+        edgeColor = 'var(--green)';
+        markerEnd = 'url(#arrowGreen)';
+      } else if (depTask.status === 'completed' && task.status === 'running') {
+        edgeColor = 'var(--accent)';
+        markerEnd = 'url(#arrowBlue)';
+        flowClass = 'edge-flow';
+      } else if (depTask.status === 'running' && task.status === 'running') {
+        edgeColor = 'var(--accent)';
+        markerEnd = 'url(#arrowBlue)';
+        flowClass = 'edge-flow';
+      } else {
+        edgeColor = 'var(--text-tertiary)';
+        markerEnd = 'url(#arrowGray)';
+        dashArray = '4 4';
+      }
+
+      const midY = (from.y + to.y) / 2;
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', `M${from.x},${from.y} C${from.x},${midY} ${to.x},${midY} ${to.x},${to.y}`);
+      path.setAttribute('stroke', edgeColor);
+      path.setAttribute('stroke-width', '1.5');
+      path.setAttribute('fill', 'none');
+      path.setAttribute('marker-end', markerEnd);
+      if (dashArray !== 'none') path.setAttribute('stroke-dasharray', dashArray);
+      svg.appendChild(path);
+
+      if (flowClass) {
+        const flowPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        flowPath.setAttribute('d', `M${from.x},${from.y} C${from.x},${midY} ${to.x},${midY} ${to.x},${to.y}`);
+        flowPath.setAttribute('stroke', edgeColor);
+        flowPath.setAttribute('stroke-width', '3');
+        flowPath.setAttribute('fill', 'none');
+        flowPath.setAttribute('opacity', '0.3');
+        flowPath.classList.add(flowClass);
+        svg.appendChild(flowPath);
+      }
+    });
+  });
+}
+
+function onNodeMouseDown(e) {
+  if (e.button !== 0) return;
+  const el = e.currentTarget;
+  const taskId = el.getAttribute('data-task');
+  const pos = nodePositions[taskId];
+  const containerRect = document.getElementById('canvasContainer').getBoundingClientRect();
+
+  dragNode = taskId;
+  dragOffset.x = (e.clientX - containerRect.left) / currentZoom - pos.x;
+  dragOffset.y = (e.clientY - containerRect.top) / currentZoom - pos.y;
+  isDragging = false;
+
+  const onMove = (ev) => {
+    isDragging = true;
+    const nx = (ev.clientX - containerRect.left) / currentZoom - dragOffset.x;
+    const ny = (ev.clientY - containerRect.top) / currentZoom - dragOffset.y;
+    nodePositions[dragNode].x = nx;
+    nodePositions[dragNode].y = ny;
+    const nodeEl = document.getElementById('node-' + dragNode);
+    nodeEl.style.left = nx + 'px';
+    nodeEl.style.top = ny + 'px';
+    nodeEl.classList.add('dragging');
+    renderEdges();
+  };
+
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    if (dragNode) {
+      const nodeEl = document.getElementById('node-' + dragNode);
+      if (nodeEl) nodeEl.classList.remove('dragging');
+    }
+    setTimeout(() => { isDragging = false; }, 10);
+    dragNode = null;
+  };
+
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+
+function selectTask(taskId) {
+  selectedTaskId = taskId;
+  document.querySelectorAll('.dag-node').forEach(n => n.classList.remove('selected'));
+  const el = document.getElementById('node-' + taskId);
+  if (el) el.classList.add('selected');
+  renderSidebar(taskId);
+  const sidebar = document.getElementById('rightSidebar');
+  sidebar.classList.remove('collapsed');
+}
+
+function closeSidebar() {
+  selectedTaskId = null;
+  document.querySelectorAll('.dag-node').forEach(n => n.classList.remove('selected'));
+  document.getElementById('sidebarEmpty').style.display = 'flex';
+  document.getElementById('sidebarContent').style.display = 'none';
+}
+
+function renderSidebar(taskId) {
+  const task = getTask(taskId);
+  if (!task) return;
+  document.getElementById('sidebarEmpty').style.display = 'none';
+  const content = document.getElementById('sidebarContent');
+  content.style.display = 'block';
+
+  const badgeClass = 'badge-' + task.status;
+  const statusLabels = { completed: '已完成', running: '运行中', pending: '等待中', failed: '失败' };
+
+  let depsHTML = '';
+  if (task.deps.length > 0) {
+    depsHTML = '<div class="detail-section"><div class="detail-section-title">上游依赖</div><div class="dep-list">';
+    task.deps.forEach(d => {
+      const dt = getTask(d);
+      const dotColor = dt.status === 'completed' ? 'var(--green)' : dt.status === 'running' ? 'var(--accent)' : 'var(--text-tertiary)';
+      depsHTML += `<div class="dep-item"><div class="dep-dot" style="background:${dotColor}"></div>${d}: ${dt.name}</div>`;
+    });
+    depsHTML += '</div></div>';
+  }
+
+  let downHTML = '';
+  if (task.downstream.length > 0) {
+    downHTML = '<div class="detail-section"><div class="detail-section-title">下游任务</div><div class="dep-list">';
+    task.downstream.forEach(d => {
+      const dt = getTask(d);
+      const dotColor = dt.status === 'completed' ? 'var(--green)' : dt.status === 'running' ? 'var(--accent)' : 'var(--text-tertiary)';
+      downHTML += `<div class="dep-item"><div class="dep-dot" style="background:${dotColor}"></div>${d}: ${dt.name}</div>`;
+    });
+    downHTML += '</div></div>';
+  }
+
+  let scoreHTML = '';
+  if (task.score !== null) {
+    scoreHTML = `<div class="detail-row"><span class="detail-label">评分</span><span class="detail-value" style="color:var(--green);font-weight:600">${task.score} / 10</span></div>`;
+  }
+
+  content.innerHTML = `
+    <div class="detail-section">
+      <div class="detail-task-name">${task.id}: ${task.name}</div>
+      <div class="detail-task-desc">${task.description}</div>
+      <span class="status-badge ${badgeClass}">
+        <span style="width:6px;height:6px;border-radius:50%;background:currentColor;display:inline-block"></span>
+        ${statusLabels[task.status]}
+      </span>
+    </div>
+
+    <div class="detail-section">
+      <div class="detail-section-title">详细信息</div>
+      <div class="detail-row"><span class="detail-label">分配 Agent</span><span class="detail-value">${task.agent || '未分配'}</span></div>
+      <div class="detail-row"><span class="detail-label">类型</span><span class="detail-value">${task.type}</span></div>
+      <div class="detail-row"><span class="detail-label">开始时间</span><span class="detail-value mono">${task.startedAt || '—'}</span></div>
+      ${task.completedAt ? `<div class="detail-row"><span class="detail-label">完成时间</span><span class="detail-value mono">${task.completedAt}</span></div>` : ''}
+      ${task.estimatedCompletion ? `<div class="detail-row"><span class="detail-label">预计完成</span><span class="detail-value">${task.estimatedCompletion}</span></div>` : ''}
+      ${task.duration ? `<div class="detail-row"><span class="detail-label">耗时</span><span class="detail-value mono">${task.duration}</span></div>` : ''}
+      <div class="detail-row"><span class="detail-label">费用</span><span class="detail-value mono">$${task.cost.toFixed(2)}</span></div>
+      ${scoreHTML}
+    </div>
+
+    ${depsHTML}
+    ${downHTML}
+
+    <div class="detail-section">
+      <div class="detail-section-title">操作</div>
+      <div class="detail-actions">
+        <button class="detail-action-btn" onclick="handleReassign('${task.id}')">Reassign</button>
+        ${task.status === 'running' ? `<button class="detail-action-btn" onclick="handlePause('${task.id}')">Pause</button>` : ''}
+        ${task.status !== 'completed' ? `<button class="detail-action-btn danger" onclick="handleCancel('${task.id}')">Cancel</button>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+function showContextMenu(e, taskId) {
+  contextTaskId = taskId;
+  const menu = document.getElementById('contextMenu');
+  menu.style.left = e.clientX + 'px';
+  menu.style.top = e.clientY + 'px';
+  menu.classList.add('visible');
+}
+
+function hideContextMenu() {
+  document.getElementById('contextMenu').classList.remove('visible');
+  contextTaskId = null;
+}
+
+function ctxAction(action) {
+  hideContextMenu();
+  if (!contextTaskId) return;
+  if (action === 'details') selectTask(contextTaskId);
+}
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.context-menu')) hideContextMenu();
+});
+
+document.getElementById('canvasContainer').addEventListener('click', (e) => {
+  if (!e.target.closest('.dag-node')) {
+    selectedTaskId = null;
+    document.querySelectorAll('.dag-node').forEach(n => n.classList.remove('selected'));
+    document.getElementById('sidebarEmpty').style.display = 'flex';
+    document.getElementById('sidebarContent').style.display = 'none';
+  }
+});
+
+function zoomCanvas(delta) {
+  currentZoom = Math.max(0.4, Math.min(2, currentZoom + delta));
+  const layer = document.getElementById('nodeLayer');
+  const svg = document.getElementById('edgeSvg');
+  layer.style.transform = `scale(${currentZoom})`;
+  layer.style.transformOrigin = '0 0';
+  svg.style.transform = `scale(${currentZoom})`;
+  svg.style.transformOrigin = '0 0';
+  document.getElementById('zoomLabel').textContent = Math.round(currentZoom * 100) + '%';
+}
+
+function autoLayout() {
+  const baseX = 320;
+  const gapY = 160;
+  const rowGap = 240;
+
+  const layout = {
+    T1: { x: baseX, y: 40 },
+    T2: { x: baseX - rowGap, y: 40 + gapY },
+    T3: { x: baseX, y: 40 + gapY },
+    T5: { x: baseX + rowGap, y: 40 + gapY },
+    T4: { x: baseX - rowGap / 2, y: 40 + gapY * 2 },
+    T6: { x: baseX - rowGap / 2, y: 40 + gapY * 3 },
+  };
+
+  Object.keys(layout).forEach(id => {
+    const start = { ...nodePositions[id] };
+    const end = layout[id];
+    const duration = 400;
+    const startTime = performance.now();
+
+    function animate(now) {
+      const elapsed = now - startTime;
+      const t = Math.min(1, elapsed / duration);
+      const ease = 1 - Math.pow(1 - t, 3);
+      nodePositions[id].x = start.x + (end.x - start.x) * ease;
+      nodePositions[id].y = start.y + (end.y - start.y) * ease;
+      const el = document.getElementById('node-' + id);
+      if (el) {
+        el.style.left = nodePositions[id].x + 'px';
+        el.style.top = nodePositions[id].y + 'px';
+      }
+      renderEdges();
+      if (t < 1) requestAnimationFrame(animate);
+    }
+    requestAnimationFrame(animate);
+  });
+}
+
+function toggleTheme() {
+  const html = document.documentElement;
+  const current = html.getAttribute('data-theme');
+  const next = current === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  const icon = document.getElementById('themeIcon');
+  if (next === 'dark') {
+    icon.innerHTML = '<path d="M13.5 3.5a6 6 0 1 0 0 9 5 5 0 0 1 0-9z"/>';
+  } else {
+    icon.innerHTML = '<circle cx="8" cy="8" r="3.5"/><line x1="8" y1="1" x2="8" y2="3"/><line x1="8" y1="13" x2="8" y2="15"/><line x1="1" y1="8" x2="3" y2="8"/><line x1="13" y1="8" x2="15" y2="8"/><line x1="3.05" y1="3.05" x2="4.46" y2="4.46"/><line x1="11.54" y1="11.54" x2="12.95" y2="12.95"/><line x1="3.05" y1="12.95" x2="4.46" y2="11.54"/><line x1="11.54" y1="4.46" x2="12.95" y2="3.05"/>';
+  }
+}
+
+function handleAddTask() {}
+function handleReassign(id) {}
+function handlePause(id) {}
+function handleCancel(id) {}
+
+renderNodes();
+requestAnimationFrame(() => renderEdges());
+</script>
+</body>
+</html>

@@ -1,0 +1,1508 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Swarm Commander — Shell</title>
+<style>
+/* ============================================================
+   CSS VARIABLES — Apple Design Language
+   ============================================================ */
+:root {
+  --bg-primary: #FFFFFF;
+  --bg-secondary: #F5F5F7;
+  --bg-tertiary: #E8E8ED;
+  --bg-elevated: #FFFFFF;
+  --bg-sidebar: rgba(246, 246, 246, 0.82);
+  --text-primary: #1D1D1F;
+  --text-secondary: #6E6E73;
+  --text-tertiary: #AEAEB2;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.15);
+  --accent: #007AFF;
+  --accent-hover: #0066D6;
+  --green: #34C759;
+  --red: #FF3B30;
+  --orange: #FF9500;
+  --yellow: #FFCC00;
+  --purple: #AF52DE;
+  --surface-hover: rgba(0, 0, 0, 0.04);
+  --surface-active: rgba(0, 0, 0, 0.08);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.08);
+  --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
+  --shadow-window: 0 0 0 0.5px rgba(0,0,0,0.1), 0 12px 40px rgba(0,0,0,0.15), 0 40px 80px rgba(0,0,0,0.1);
+  --ease-out: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --duration-fast: 150ms;
+  --duration-normal: 250ms;
+  --duration-slow: 400ms;
+  --sidebar-width: 240px;
+  --topbar-height: 52px;
+  --approval-height: 140px;
+  color-scheme: light dark;
+}
+
+[data-theme="dark"] {
+  --bg-primary: #1C1C1E;
+  --bg-secondary: #2C2C2E;
+  --bg-tertiary: #3A3A3C;
+  --bg-elevated: #2C2C2E;
+  --bg-sidebar: rgba(30, 30, 30, 0.82);
+  --text-primary: #F5F5F7;
+  --text-secondary: #98989D;
+  --text-tertiary: #636366;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.15);
+  --accent: #0A84FF;
+  --accent-hover: #409CFF;
+  --green: #30D158;
+  --red: #FF453A;
+  --orange: #FF9F0A;
+  --yellow: #FFD60A;
+  --purple: #BF5AF2;
+  --surface-hover: rgba(255, 255, 255, 0.06);
+  --surface-active: rgba(255, 255, 255, 0.1);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.2);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.3);
+  --shadow-lg: 0 8px 30px rgba(0,0,0,0.4);
+  --shadow-window: 0 0 0 0.5px rgba(255,255,255,0.05), 0 12px 40px rgba(0,0,0,0.4), 0 40px 80px rgba(0,0,0,0.3);
+}
+
+/* ============================================================
+   RESET & BASE
+   ============================================================ */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+               "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  line-height: 1.38;
+  color: var(--text-primary);
+  background: #707070;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.01em;
+}
+
+/* ============================================================
+   WINDOW FRAME
+   ============================================================ */
+.window {
+  width: 1280px;
+  height: 820px;
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: var(--shadow-window);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+  position: relative;
+}
+
+/* ============================================================
+   TOP BAR
+   ============================================================ */
+.topbar {
+  height: var(--topbar-height);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  background: var(--bg-sidebar);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 0.5px solid var(--border);
+  flex-shrink: 0;
+  gap: 12px;
+  -webkit-app-region: drag;
+  position: relative;
+  z-index: 10;
+}
+
+.traffic-lights {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  -webkit-app-region: no-drag;
+  padding-right: 8px;
+}
+
+.traffic-light {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8px;
+  color: transparent;
+  transition: color var(--duration-fast) var(--ease-out);
+}
+.traffic-light:hover { color: rgba(0,0,0,0.5); }
+.tl-close { background: #FF5F57; }
+.tl-minimize { background: #FEBC2E; }
+.tl-maximize { background: #28C840; }
+
+.topbar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex-shrink: 0;
+}
+
+.topbar-spacer { flex: 1; }
+
+.topbar-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  -webkit-app-region: no-drag;
+}
+
+.meta-badge {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  background: var(--surface-hover);
+  border-radius: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.meta-badge .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.theme-toggle {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: none;
+  background: var(--surface-hover);
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  transition: background var(--duration-fast) var(--ease-out);
+  -webkit-app-region: no-drag;
+}
+.theme-toggle:hover { background: var(--surface-active); }
+
+/* ============================================================
+   BODY LAYOUT
+   ============================================================ */
+.body-wrap {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+/* ============================================================
+   SIDEBAR
+   ============================================================ */
+.sidebar {
+  width: var(--sidebar-width);
+  background: var(--bg-sidebar);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border-right: 0.5px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  overflow-y: auto;
+  padding: 12px 0;
+}
+
+.sidebar::-webkit-scrollbar { width: 6px; }
+.sidebar::-webkit-scrollbar-thumb {
+  background: var(--text-tertiary);
+  border-radius: 3px;
+}
+
+.sidebar-section { margin-bottom: 8px; }
+
+.sidebar-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 8px 16px 4px;
+}
+
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  cursor: pointer;
+  border-radius: 0;
+  margin: 0 8px;
+  border-radius: 6px;
+  transition: background var(--duration-fast) var(--ease-out);
+  font-size: 13px;
+  color: var(--text-primary);
+  position: relative;
+}
+
+.sidebar-item:hover { background: var(--surface-hover); }
+.sidebar-item.active {
+  background: var(--surface-active);
+  font-weight: 500;
+}
+
+.sidebar-item .icon {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+.sidebar-item.active .icon { opacity: 1; }
+
+.sidebar-item .badge {
+  margin-left: auto;
+  font-size: 11px;
+  background: var(--accent);
+  color: #fff;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-weight: 500;
+}
+
+.sidebar-divider {
+  height: 0.5px;
+  background: var(--border);
+  margin: 8px 16px;
+}
+
+/* Agent list items */
+.agent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 16px;
+  margin: 0 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+.agent-row:hover { background: var(--surface-hover); }
+
+.agent-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.agent-status.running { background: var(--green); }
+.agent-status.idle { background: var(--text-tertiary); }
+.agent-status.paused { background: var(--yellow); }
+.agent-status.waiting { background: var(--orange); }
+
+.agent-name { font-weight: 500; color: var(--text-primary); }
+.agent-task {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ============================================================
+   MAIN CONTENT
+   ============================================================ */
+.main-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+
+.content-header {
+  padding: 16px 20px 12px;
+  border-bottom: 0.5px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.content-title {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.view-tabs {
+  display: flex;
+  gap: 2px;
+  margin-left: 16px;
+  background: var(--bg-tertiary);
+  padding: 2px;
+  border-radius: 8px;
+}
+
+.view-tab {
+  padding: 4px 12px;
+  font-size: 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  transition: all var(--duration-fast) var(--ease-out);
+  font-weight: 500;
+}
+.view-tab:hover { color: var(--text-primary); }
+.view-tab.active {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-sm);
+}
+
+.content-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+
+.btn {
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  border: 0.5px solid var(--border-strong);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  transition: all var(--duration-fast) var(--ease-out);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+}
+.btn:hover { background: var(--surface-hover); }
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+}
+.btn-primary:hover { background: var(--accent-hover); }
+
+.btn-danger {
+  color: var(--red);
+  border-color: var(--red);
+}
+.btn-danger:hover {
+  background: var(--red);
+  color: #fff;
+}
+
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  font-size: 10px;
+  background: var(--surface-hover);
+  border-radius: 3px;
+  border: 0.5px solid var(--border);
+  color: var(--text-tertiary);
+  font-family: inherit;
+  margin-left: 4px;
+}
+
+/* ============================================================
+   CONTENT PANELS (view switching)
+   ============================================================ */
+.content-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+}
+
+.content-body::-webkit-scrollbar { width: 6px; }
+.content-body::-webkit-scrollbar-thumb {
+  background: var(--text-tertiary);
+  border-radius: 3px;
+}
+
+.view-panel { display: none; }
+.view-panel.active {
+  display: block;
+  animation: fadeIn var(--duration-normal) var(--ease-out);
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ---- DAG Placeholder ---- */
+.dag-canvas {
+  width: 100%;
+  height: 100%;
+  min-height: 400px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border: 0.5px solid var(--border);
+  position: relative;
+  overflow: hidden;
+}
+
+.dag-node {
+  position: absolute;
+  padding: 10px 16px;
+  background: var(--bg-elevated);
+  border: 0.5px solid var(--border-strong);
+  border-radius: 8px;
+  font-size: 12px;
+  box-shadow: var(--shadow-sm);
+  cursor: grab;
+  transition: box-shadow var(--duration-fast) var(--ease-out);
+  min-width: 140px;
+}
+.dag-node:hover { box-shadow: var(--shadow-md); }
+
+.dag-node .node-title { font-weight: 600; margin-bottom: 4px; }
+.dag-node .node-meta { font-size: 11px; color: var(--text-secondary); }
+.dag-node .node-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  position: absolute;
+  top: 10px;
+  right: 10px;
+}
+
+.node-done .node-status { background: var(--green); }
+.node-active .node-status { background: var(--accent); }
+.node-pending .node-status { background: var(--text-tertiary); }
+.node-failed .node-status { background: var(--red); }
+
+/* ---- Agent Stream Placeholder ---- */
+.agent-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  height: 100%;
+  min-height: 400px;
+}
+
+.agent-pane {
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border: 0.5px solid var(--border);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-pane-header {
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 0.5px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--bg-elevated);
+}
+
+.agent-pane-body {
+  flex: 1;
+  padding: 12px;
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  overflow-y: auto;
+}
+
+.terminal-line { margin-bottom: 2px; }
+.terminal-line .prompt { color: var(--accent); }
+.terminal-line .cmd { color: var(--text-primary); }
+.terminal-line .out { color: var(--text-secondary); }
+.terminal-line .err { color: var(--red); }
+.terminal-line .ok { color: var(--green); }
+
+/* ---- Review Placeholder ---- */
+.review-list { display: flex; flex-direction: column; gap: 12px; }
+
+.review-card {
+  background: var(--bg-elevated);
+  border: 0.5px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.review-card-header {
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 0.5px solid var(--border);
+}
+
+.review-file {
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.review-score {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.score-pass { background: rgba(52,199,89,0.12); color: var(--green); }
+.score-warn { background: rgba(255,149,0,0.12); color: var(--orange); }
+.score-fail { background: rgba(255,59,48,0.12); color: var(--red); }
+
+.diff-block {
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.7;
+  padding: 0;
+}
+.diff-line {
+  padding: 0 16px;
+  display: flex;
+  gap: 12px;
+}
+.diff-num {
+  color: var(--text-tertiary);
+  width: 32px;
+  text-align: right;
+  flex-shrink: 0;
+  user-select: none;
+}
+.diff-add { background: rgba(52,199,89,0.08); }
+.diff-add .diff-text { color: var(--green); }
+.diff-del { background: rgba(255,59,48,0.08); }
+.diff-del .diff-text { color: var(--red); }
+.diff-ctx .diff-text { color: var(--text-secondary); }
+
+/* ---- Report Placeholder ---- */
+.report-section {
+  margin-bottom: 24px;
+}
+.report-section h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.decision-card {
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  border-left: 3px solid var(--accent);
+}
+.decision-card h4 {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.decision-card p {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-bottom: 4px;
+}
+
+/* ---- Dashboard Placeholder ---- */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.dash-card {
+  background: var(--bg-elevated);
+  border: 0.5px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.dash-card-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 12px;
+}
+
+.dash-big-number {
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin-bottom: 4px;
+}
+
+.dash-sub { font-size: 12px; color: var(--text-secondary); }
+
+.chart-placeholder {
+  width: 100%;
+  height: 120px;
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  margin-top: 12px;
+  position: relative;
+  overflow: hidden;
+}
+
+.chart-bar {
+  position: absolute;
+  bottom: 0;
+  width: 8%;
+  background: var(--accent);
+  border-radius: 3px 3px 0 0;
+  opacity: 0.7;
+  transition: opacity var(--duration-fast);
+}
+.chart-bar:hover { opacity: 1; }
+
+/* ============================================================
+   APPROVAL QUEUE
+   ============================================================ */
+.approval-bar {
+  height: var(--approval-height);
+  border-top: 0.5px solid var(--border);
+  background: var(--bg-secondary);
+  padding: 12px 20px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.approval-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.approval-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.approval-title .count {
+  background: var(--orange);
+  color: #fff;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+
+.approval-actions { display: flex; gap: 6px; }
+
+.approval-list {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  flex: 1;
+  align-items: stretch;
+}
+
+.approval-item {
+  background: var(--bg-elevated);
+  border: 0.5px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 10px 14px;
+  min-width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+  transition: box-shadow var(--duration-fast) var(--ease-out);
+}
+.approval-item:hover { box-shadow: var(--shadow-sm); }
+
+.approval-item-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.approval-item-body {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 11px;
+}
+
+.approval-item-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: auto;
+}
+
+.btn-xs {
+  padding: 3px 8px;
+  font-size: 11px;
+  border-radius: 4px;
+  border: 0.5px solid var(--border-strong);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-family: inherit;
+  font-weight: 500;
+  transition: all var(--duration-fast) var(--ease-out);
+}
+.btn-xs:hover { background: var(--surface-active); }
+.btn-xs.approve { color: var(--green); border-color: var(--green); }
+.btn-xs.approve:hover { background: var(--green); color: #fff; }
+.btn-xs.reject { color: var(--red); border-color: var(--red); }
+.btn-xs.reject:hover { background: var(--red); color: #fff; }
+
+/* ============================================================
+   COMMAND INPUT
+   ============================================================ */
+.command-bar {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(0.95);
+  width: 560px;
+  background: var(--bg-elevated);
+  border-radius: 12px;
+  box-shadow: 0 0 0 0.5px var(--border-strong), 0 8px 40px rgba(0,0,0,0.2), 0 20px 60px rgba(0,0,0,0.15);
+  z-index: 100;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--duration-normal) var(--ease-out),
+              transform var(--duration-normal) var(--ease-out);
+  overflow: hidden;
+}
+
+.command-bar.open {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+  pointer-events: all;
+}
+
+.command-bar-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.15);
+  z-index: 99;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--duration-normal) var(--ease-out);
+}
+.command-bar-overlay.open { opacity: 1; pointer-events: all; }
+
+[data-theme="dark"] .command-bar-overlay { background: rgba(0,0,0,0.4); }
+
+.command-input {
+  width: 100%;
+  padding: 14px 16px;
+  border: none;
+  background: transparent;
+  font-size: 15px;
+  font-family: inherit;
+  color: var(--text-primary);
+  outline: none;
+  letter-spacing: -0.01em;
+}
+.command-input::placeholder { color: var(--text-tertiary); }
+
+.command-hints {
+  border-top: 0.5px solid var(--border);
+  padding: 8px;
+}
+
+.command-hint {
+  padding: 8px 12px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+.command-hint:hover, .command-hint.selected {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+.command-hint .hint-icon { font-size: 16px; width: 20px; text-align: center; }
+.command-hint .hint-kbd { margin-left: auto; }
+
+/* ============================================================
+   UTILITIES
+   ============================================================ */
+.text-green { color: var(--green); }
+.text-red { color: var(--red); }
+.text-orange { color: var(--orange); }
+.text-accent { color: var(--accent); }
+.text-secondary { color: var(--text-secondary); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+</style>
+</head>
+<body>
+
+<div class="window" id="app">
+  <!-- ======== TOP BAR ======== -->
+  <div class="topbar">
+    <div class="traffic-lights">
+      <div class="traffic-light tl-close">×</div>
+      <div class="traffic-light tl-minimize">−</div>
+      <div class="traffic-light tl-maximize">+</div>
+    </div>
+    <div class="topbar-title">Swarm Commander</div>
+    <div class="topbar-spacer"></div>
+    <div class="topbar-meta">
+      <div class="meta-badge">
+        <div class="dot" style="background:var(--green)"></div>
+        Agents: <strong>4 / 6</strong>
+      </div>
+      <div class="meta-badge">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 5v3.5l2.5 1.5"/></svg>
+        8m 42s
+      </div>
+      <div class="meta-badge">
+        <span style="color:var(--green)">$</span>
+        <strong>3.85</strong> / $30
+      </div>
+      <button class="theme-toggle" onclick="toggleTheme()" title="Toggle Light/Dark">◐</button>
+    </div>
+  </div>
+
+  <!-- ======== BODY ======== -->
+  <div class="body-wrap">
+    <!-- ======== SIDEBAR ======== -->
+    <div class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-label">Mission</div>
+        <div class="sidebar-item active" data-view="overview">
+          <span class="icon">◎</span> Overview
+        </div>
+        <div class="sidebar-item" data-view="preflight">
+          <span class="icon">◇</span> Pre-flight
+        </div>
+        <div class="sidebar-item" data-view="contract">
+          <span class="icon">⊟</span> Contract
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-label">Workspace</div>
+        <div class="sidebar-item" data-view="dag">
+          <span class="icon">⊞</span> Task DAG
+        </div>
+        <div class="sidebar-item" data-view="agents">
+          <span class="icon">⊡</span> Agent Stream
+        </div>
+        <div class="sidebar-item" data-view="review">
+          <span class="icon">⧉</span> Code Review
+          <span class="badge">3</span>
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-label">Insights</div>
+        <div class="sidebar-item" data-view="report">
+          <span class="icon">▤</span> Mission Report
+        </div>
+        <div class="sidebar-item" data-view="dashboard">
+          <span class="icon">◫</span> Dashboard
+        </div>
+      </div>
+
+      <div class="sidebar-divider"></div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-label">Agents</div>
+        <div class="agent-row">
+          <div class="agent-status running"></div>
+          <span class="agent-name">Agent-1</span>
+          <span class="agent-task">T2: Register API</span>
+        </div>
+        <div class="agent-row">
+          <div class="agent-status running"></div>
+          <span class="agent-name">Agent-2</span>
+          <span class="agent-task">T3: Login + JWT</span>
+        </div>
+        <div class="agent-row">
+          <div class="agent-status waiting"></div>
+          <span class="agent-name">Agent-3</span>
+          <span class="agent-task">T4: Middleware</span>
+        </div>
+        <div class="agent-row">
+          <div class="agent-status running"></div>
+          <span class="agent-name">Agent-4</span>
+          <span class="agent-task">T5: Pwd Reset</span>
+        </div>
+        <div class="agent-row">
+          <div class="agent-status idle"></div>
+          <span class="agent-name">Agent-5</span>
+          <span class="agent-task">idle</span>
+        </div>
+        <div class="agent-row">
+          <div class="agent-status idle"></div>
+          <span class="agent-name">Agent-6</span>
+          <span class="agent-task">idle</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ======== MAIN CONTENT ======== -->
+    <div class="main-area">
+      <!-- -- OVERVIEW -- -->
+      <div class="view-panel active" id="view-overview">
+        <div class="content-header">
+          <div class="content-title">用户认证系统</div>
+          <div class="view-tabs">
+            <button class="view-tab active">Summary</button>
+            <button class="view-tab">Timeline</button>
+          </div>
+          <div class="content-actions">
+            <button class="btn" onclick="openCommand()">New Mission <span class="kbd">⌘N</span></button>
+            <button class="btn btn-primary">Merge All</button>
+          </div>
+        </div>
+        <div class="content-body">
+          <div class="dashboard-grid">
+            <div class="dash-card">
+              <div class="dash-card-title">Tasks</div>
+              <div class="dash-big-number">4<span style="font-size:17px;color:var(--text-tertiary);font-weight:400"> / 6</span></div>
+              <div class="dash-sub">2 pending &middot; 3 running &middot; 1 completed</div>
+              <div class="chart-placeholder">
+                <div class="chart-bar" style="left:5%;height:90%;background:var(--green)"></div>
+                <div class="chart-bar" style="left:16%;height:60%;background:var(--accent)"></div>
+                <div class="chart-bar" style="left:27%;height:45%;background:var(--accent)"></div>
+                <div class="chart-bar" style="left:38%;height:30%;background:var(--accent)"></div>
+                <div class="chart-bar" style="left:49%;height:15%;background:var(--text-tertiary)"></div>
+                <div class="chart-bar" style="left:60%;height:10%;background:var(--text-tertiary)"></div>
+              </div>
+            </div>
+            <div class="dash-card">
+              <div class="dash-card-title">Cost</div>
+              <div class="dash-big-number" style="color:var(--green)">$3.85</div>
+              <div class="dash-sub">Budget: $30.00 &middot; 12.8% used</div>
+              <div class="chart-placeholder">
+                <div class="chart-bar" style="left:5%;height:20%"></div>
+                <div class="chart-bar" style="left:16%;height:35%"></div>
+                <div class="chart-bar" style="left:27%;height:28%"></div>
+                <div class="chart-bar" style="left:38%;height:50%"></div>
+                <div class="chart-bar" style="left:49%;height:65%"></div>
+                <div class="chart-bar" style="left:60%;height:40%"></div>
+                <div class="chart-bar" style="left:71%;height:72%"></div>
+                <div class="chart-bar" style="left:82%;height:55%"></div>
+              </div>
+            </div>
+            <div class="dash-card">
+              <div class="dash-card-title">Quality</div>
+              <div class="dash-big-number">8.2<span style="font-size:17px;color:var(--text-tertiary);font-weight:400"> / 10</span></div>
+              <div class="dash-sub">1 auto-fixed &middot; 0 rejected</div>
+            </div>
+            <div class="dash-card">
+              <div class="dash-card-title">Review Reduction</div>
+              <div class="dash-big-number" style="color:var(--green)">83%</div>
+              <div class="dash-sub">5/6 tasks auto-approved &middot; 1 needs review</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- -- TASK DAG -- -->
+      <div class="view-panel" id="view-dag">
+        <div class="content-header">
+          <div class="content-title">Task DAG</div>
+          <div class="content-actions">
+            <button class="btn">+ Add Task</button>
+            <button class="btn">Auto Layout</button>
+          </div>
+        </div>
+        <div class="content-body" style="padding:16px;">
+          <div class="dag-canvas">
+            <svg style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:0">
+              <line x1="195" y1="55" x2="290" y2="145" stroke="var(--green)" stroke-width="1.5" stroke-dasharray="4,3"/>
+              <line x1="195" y1="55" x2="170" y2="145" stroke="var(--accent)" stroke-width="1.5"/>
+              <line x1="195" y1="55" x2="540" y2="145" stroke="var(--accent)" stroke-width="1.5"/>
+              <line x1="340" y1="175" x2="440" y2="265" stroke="var(--text-tertiary)" stroke-width="1.5" stroke-dasharray="4,3"/>
+              <line x1="170" y1="175" x2="440" y2="265" stroke="var(--text-tertiary)" stroke-width="1.5" stroke-dasharray="4,3"/>
+              <line x1="490" y1="295" x2="560" y2="375" stroke="var(--text-tertiary)" stroke-width="1.5" stroke-dasharray="4,3"/>
+            </svg>
+            <div class="dag-node node-done" style="left:120px;top:30px">
+              <div class="node-status"></div>
+              <div class="node-title">T1: User Model</div>
+              <div class="node-meta">Agent-1 &middot; 9/10 &middot; $0.42</div>
+            </div>
+            <div class="dag-node node-active" style="left:80px;top:130px">
+              <div class="node-status"></div>
+              <div class="node-title">T2: Register API</div>
+              <div class="node-meta">Agent-1 &middot; running</div>
+            </div>
+            <div class="dag-node node-active" style="left:260px;top:130px">
+              <div class="node-status"></div>
+              <div class="node-title">T3: Login + JWT</div>
+              <div class="node-meta">Agent-2 &middot; running</div>
+            </div>
+            <div class="dag-node node-active" style="left:470px;top:130px">
+              <div class="node-status"></div>
+              <div class="node-title">T5: Pwd Reset</div>
+              <div class="node-meta">Agent-4 &middot; running</div>
+            </div>
+            <div class="dag-node node-pending" style="left:370px;top:250px">
+              <div class="node-status"></div>
+              <div class="node-title">T4: Auth Middleware</div>
+              <div class="node-meta">waiting T2, T3</div>
+            </div>
+            <div class="dag-node node-pending" style="left:490px;top:360px">
+              <div class="node-status"></div>
+              <div class="node-title">T6: E2E Tests</div>
+              <div class="node-meta">waiting T4</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- -- AGENT STREAM -- -->
+      <div class="view-panel" id="view-agents">
+        <div class="content-header">
+          <div class="content-title">Agent Stream</div>
+          <div class="view-tabs">
+            <button class="view-tab active">Grid</button>
+            <button class="view-tab">Focus</button>
+          </div>
+          <div class="content-actions">
+            <button class="btn">Broadcast <span class="kbd">⌘B</span></button>
+          </div>
+        </div>
+        <div class="content-body" style="padding:12px;">
+          <div class="agent-grid">
+            <div class="agent-pane">
+              <div class="agent-pane-header">
+                <div class="agent-status running"></div>
+                Agent-1 &middot; T2: Register API
+              </div>
+              <div class="agent-pane-body">
+                <div class="terminal-line"><span class="prompt">$</span> <span class="cmd">Edit src/routes/auth.ts</span></div>
+                <div class="terminal-line"><span class="out">+ Adding POST /register endpoint</span></div>
+                <div class="terminal-line"><span class="out">+ Implementing bcrypt password hashing</span></div>
+                <div class="terminal-line"><span class="out">+ Adding email validation with zod schema</span></div>
+                <div class="terminal-line"><span class="prompt">$</span> <span class="cmd">Run: npx tsc --noEmit</span></div>
+                <div class="terminal-line"><span class="ok">✓ No type errors found</span></div>
+                <div class="terminal-line"><span class="prompt">$</span> <span class="cmd">Edit src/routes/auth.test.ts</span></div>
+                <div class="terminal-line"><span class="out">+ Writing registration tests...</span></div>
+              </div>
+            </div>
+            <div class="agent-pane">
+              <div class="agent-pane-header">
+                <div class="agent-status running"></div>
+                Agent-2 &middot; T3: Login + JWT
+              </div>
+              <div class="agent-pane-body">
+                <div class="terminal-line"><span class="prompt">$</span> <span class="cmd">Edit src/utils/jwt.ts</span></div>
+                <div class="terminal-line"><span class="out">+ Generating JWT helper: sign, verify, refresh</span></div>
+                <div class="terminal-line"><span class="out">+ Access token: 15min, Refresh: 7d</span></div>
+                <div class="terminal-line"><span class="prompt">$</span> <span class="cmd">Edit src/routes/auth.ts</span></div>
+                <div class="terminal-line"><span class="out">+ Adding POST /login endpoint</span></div>
+                <div class="terminal-line"><span class="out">+ Implementing credential verification</span></div>
+              </div>
+            </div>
+            <div class="agent-pane">
+              <div class="agent-pane-header">
+                <div class="agent-status running"></div>
+                Agent-4 &middot; T5: Password Reset
+              </div>
+              <div class="agent-pane-body">
+                <div class="terminal-line"><span class="prompt">$</span> <span class="cmd">Edit src/services/email.ts</span></div>
+                <div class="terminal-line"><span class="out">+ Creating email service with SendGrid</span></div>
+                <div class="terminal-line"><span class="out">+ Reset token generation (1h expiry)</span></div>
+                <div class="terminal-line"><span class="prompt">$</span> <span class="cmd">Read .env</span></div>
+                <div class="terminal-line"><span class="ok">✓ SENDGRID_API_KEY found</span></div>
+              </div>
+            </div>
+            <div class="agent-pane">
+              <div class="agent-pane-header">
+                <div class="agent-status waiting" style="background:var(--orange)"></div>
+                Agent-3 &middot; T4: Auth Middleware
+                <span style="margin-left:auto;font-size:11px;color:var(--orange);font-weight:400">waiting</span>
+              </div>
+              <div class="agent-pane-body">
+                <div class="terminal-line"><span class="out" style="opacity:0.5">Waiting for T2 (Register API) and T3 (Login + JWT) to complete...</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- -- CODE REVIEW -- -->
+      <div class="view-panel" id="view-review">
+        <div class="content-header">
+          <div class="content-title">Code Review</div>
+          <div class="content-actions">
+            <button class="btn">Approve All <span class="kbd">⌘⇧A</span></button>
+          </div>
+        </div>
+        <div class="content-body">
+          <div class="review-list">
+            <div class="review-card">
+              <div class="review-card-header">
+                <div class="agent-status running" style="width:6px;height:6px"></div>
+                <span style="font-size:11px;color:var(--text-secondary)">Agent-1 &middot; T1</span>
+                <span class="review-file">src/models/user.ts</span>
+                <span class="review-score score-pass">9/10 ✓</span>
+              </div>
+              <div class="diff-block">
+                <div class="diff-line diff-add"><span class="diff-num">12</span><span class="diff-text">+ export interface User {</span></div>
+                <div class="diff-line diff-add"><span class="diff-num">13</span><span class="diff-text">+   id: string;</span></div>
+                <div class="diff-line diff-add"><span class="diff-num">14</span><span class="diff-text">+   email: string;</span></div>
+                <div class="diff-line diff-add"><span class="diff-num">15</span><span class="diff-text">+   password_hash: string;</span></div>
+                <div class="diff-line diff-add"><span class="diff-num">16</span><span class="diff-text">+   verified: boolean;</span></div>
+                <div class="diff-line diff-add"><span class="diff-num">17</span><span class="diff-text">+   created_at: Date;</span></div>
+                <div class="diff-line diff-add"><span class="diff-num">18</span><span class="diff-text">+ }</span></div>
+              </div>
+            </div>
+            <div class="review-card">
+              <div class="review-card-header">
+                <div class="agent-status" style="width:6px;height:6px;background:var(--orange)"></div>
+                <span style="font-size:11px;color:var(--text-secondary)">Agent-1 &middot; T2</span>
+                <span class="review-file">src/routes/auth.ts</span>
+                <span class="review-score score-warn">6.5/10 ⚠</span>
+              </div>
+              <div class="diff-block">
+                <div class="diff-line diff-ctx"><span class="diff-num">28</span><span class="diff-text">  const user = await createUser(email, hash);</span></div>
+                <div class="diff-line diff-del"><span class="diff-num">29</span><span class="diff-text">- return res.json({ user });</span></div>
+                <div class="diff-line diff-add"><span class="diff-num">29</span><span class="diff-text">+ return res.json({ id: user.id, email: user.email });</span></div>
+                <div class="diff-line diff-ctx"><span class="diff-num">30</span><span class="diff-text">  } catch (err) {</span></div>
+              </div>
+              <div style="padding:8px 16px;font-size:11px;color:var(--orange);background:rgba(255,149,0,0.06);border-top:0.5px solid var(--border)">
+                <strong>Evaluator:</strong> JWT expiration hardcoded to 24h — should be configurable via env var.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- -- MISSION REPORT -- -->
+      <div class="view-panel" id="view-report">
+        <div class="content-header">
+          <div class="content-title">Mission Report</div>
+          <div class="content-actions">
+            <button class="btn">Export PDF</button>
+          </div>
+        </div>
+        <div class="content-body">
+          <div class="report-section">
+            <h3>◆ Architecture Decisions & Trade-offs</h3>
+            <div class="decision-card">
+              <h4>Decision 1: JWT (stateless) over Session (stateful)</h4>
+              <p><strong>Rationale:</strong> Stateless design, zero-cost horizontal scaling, no Redis required.</p>
+              <p><strong>Trade-off:</strong> Tokens cannot be immediately revoked after issuance.</p>
+              <p style="color:var(--orange)"><strong>⚠ Note:</strong> If forced-logout is needed later, implement token blacklist.</p>
+            </div>
+            <div class="decision-card" style="border-left-color:var(--green)">
+              <h4>Decision 2: bcrypt (cost=12) over argon2id</h4>
+              <p><strong>Rationale:</strong> Mature ecosystem, no native compilation dependency.</p>
+              <p><strong>Trade-off:</strong> ~40% slower than argon2 at equivalent security level.</p>
+              <p style="color:var(--text-secondary)">📝 argon2id considered but node-argon2 has build issues on Alpine Linux.</p>
+            </div>
+          </div>
+          <div class="report-section">
+            <h3>◆ Evaluator Review Summary</h3>
+            <div style="background:var(--bg-secondary);border-radius:8px;padding:14px 16px;font-size:12px;line-height:1.8">
+              <div><span class="text-red">❌</span> Register API returned password_hash in response — <span class="text-green">auto-fixed</span></div>
+              <div><span class="text-red">❌</span> JWT expiration hardcoded 24h — <span class="text-green">auto-fixed</span> (now configurable)</div>
+              <div><span class="text-orange">⚠️</span> Password strength only checks length — <em>flagged as suggestion</em></div>
+              <div style="margin-top:8px;color:var(--green)"><strong>Round 2 review: all passed ✓</strong></div>
+            </div>
+          </div>
+          <div class="report-section">
+            <h3>◆ Known Limitations</h3>
+            <div style="background:var(--bg-secondary);border-radius:8px;padding:14px 16px;font-size:12px;line-height:1.8;color:var(--text-secondary)">
+              <div>• Rate limiting not implemented (recommended before production)</div>
+              <div>• CSRF protection not added (needed if SSR frontend)</div>
+              <div>• No load testing performed for bcrypt cost=12 under high concurrency</div>
+              <div>• OAuth third-party login excluded per Mission Contract</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- -- DASHBOARD -- -->
+      <div class="view-panel" id="view-dashboard">
+        <div class="content-header">
+          <div class="content-title">Harness Dashboard</div>
+          <div class="view-tabs">
+            <button class="view-tab active">Live</button>
+            <button class="view-tab">History</button>
+          </div>
+        </div>
+        <div class="content-body">
+          <div class="dashboard-grid">
+            <div class="dash-card">
+              <div class="dash-card-title">Token Consumption</div>
+              <div class="dash-big-number">48.2K</div>
+              <div class="dash-sub">Claude Sonnet 4: 38.1K &middot; Haiku 4: 10.1K</div>
+              <div class="chart-placeholder">
+                <div class="chart-bar" style="left:3%;height:15%"></div>
+                <div class="chart-bar" style="left:11%;height:22%"></div>
+                <div class="chart-bar" style="left:19%;height:38%"></div>
+                <div class="chart-bar" style="left:27%;height:55%"></div>
+                <div class="chart-bar" style="left:35%;height:42%"></div>
+                <div class="chart-bar" style="left:43%;height:68%"></div>
+                <div class="chart-bar" style="left:51%;height:82%"></div>
+                <div class="chart-bar" style="left:59%;height:75%"></div>
+                <div class="chart-bar" style="left:67%;height:90%"></div>
+                <div class="chart-bar" style="left:75%;height:60%"></div>
+                <div class="chart-bar" style="left:83%;height:45%"></div>
+              </div>
+            </div>
+            <div class="dash-card">
+              <div class="dash-card-title">Quality Scores</div>
+              <div class="dash-big-number">8.2<span style="font-size:17px;color:var(--text-tertiary);font-weight:400"> avg</span></div>
+              <div class="dash-sub">Pass: 5 &middot; Warn: 1 &middot; Fail: 0</div>
+              <div class="chart-placeholder">
+                <div class="chart-bar" style="left:10%;height:90%;background:var(--green)"></div>
+                <div class="chart-bar" style="left:25%;height:85%;background:var(--green)"></div>
+                <div class="chart-bar" style="left:40%;height:80%;background:var(--green)"></div>
+                <div class="chart-bar" style="left:55%;height:65%;background:var(--orange)"></div>
+                <div class="chart-bar" style="left:70%;height:80%;background:var(--green)"></div>
+                <div class="chart-bar" style="left:85%;height:90%;background:var(--green)"></div>
+              </div>
+            </div>
+            <div class="dash-card">
+              <div class="dash-card-title">Agent Utilization</div>
+              <div class="dash-big-number">67%</div>
+              <div class="dash-sub">4 active &middot; 2 idle &middot; 6 total</div>
+            </div>
+            <div class="dash-card">
+              <div class="dash-card-title">Anomalies</div>
+              <div class="dash-big-number text-orange">1</div>
+              <div class="dash-sub">Agent-4 cost spike: 3.2x median — paused</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Placeholder panels for contract and preflight -->
+      <div class="view-panel" id="view-preflight">
+        <div class="content-header"><div class="content-title">Pre-flight Clarification</div></div>
+        <div class="content-body" style="display:flex;align-items:center;justify-content:center;color:var(--text-tertiary)">
+          <div style="text-align:center">
+            <div style="font-size:40px;margin-bottom:12px;opacity:0.3">◇</div>
+            <div style="font-size:15px;margin-bottom:4px">No active pre-flight</div>
+            <div style="font-size:12px">Start a new mission to begin requirement clarification.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="view-panel" id="view-contract">
+        <div class="content-header"><div class="content-title">Mission Contract</div></div>
+        <div class="content-body">
+          <div style="background:var(--bg-secondary);border-radius:8px;padding:20px;font-size:13px;line-height:1.8;max-width:640px">
+            <div style="font-size:17px;font-weight:700;margin-bottom:16px;letter-spacing:-0.02em">Mission Contract: 用户认证系统</div>
+            <div style="margin-bottom:16px">
+              <div style="font-weight:600;color:var(--green);margin-bottom:6px">【用户明确要求的】</div>
+              <div style="color:var(--text-secondary);padding-left:12px">
+                ✓ 注册后发验证邮件，点链接激活<br>
+                ✓ JWT 鉴权，access token 15min + refresh token 7d<br>
+                ✓ 允许多设备同时登录<br>
+                ✓ 密码重置走邮件链接，1h 过期
+              </div>
+            </div>
+            <div style="margin-bottom:16px">
+              <div style="font-weight:600;color:var(--accent);margin-bottom:6px">【Agent 自主决策】</div>
+              <div style="color:var(--text-secondary);padding-left:12px">
+                ◇ 密码策略的具体规则<br>
+                ◇ 登录失败锁定策略<br>
+                ◇ 错误消息的具体措辞
+              </div>
+            </div>
+            <div style="margin-bottom:16px">
+              <div style="font-weight:600;color:var(--red);margin-bottom:6px">【明确不做的】</div>
+              <div style="color:var(--text-secondary);padding-left:12px">
+                ✗ OAuth 第三方登录<br>
+                ✗ 双因素认证<br>
+                ✗ 用户角色/权限体系
+              </div>
+            </div>
+            <div style="border-top:0.5px solid var(--border);padding-top:12px;font-size:12px;color:var(--text-secondary)">
+              Budget: $30 &middot; Quality Gate: ≥ 7/10 &middot; Max Duration: 4h
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======== APPROVAL QUEUE ======== -->
+  <div class="approval-bar">
+    <div class="approval-header">
+      <div class="approval-title">
+        Approval Queue <span class="count">3</span>
+      </div>
+      <div class="approval-actions">
+        <button class="btn-xs approve">Approve All</button>
+        <button class="btn-xs reject">Reject All</button>
+      </div>
+    </div>
+    <div class="approval-list">
+      <div class="approval-item">
+        <div class="approval-item-header">
+          <div class="agent-status running" style="width:6px;height:6px"></div>
+          Agent-1
+        </div>
+        <div class="approval-item-body">delete src/models/user_old.ts</div>
+        <div class="approval-item-actions">
+          <button class="btn-xs approve">Approve</button>
+          <button class="btn-xs reject">Reject</button>
+        </div>
+      </div>
+      <div class="approval-item">
+        <div class="approval-item-header">
+          <div class="agent-status running" style="width:6px;height:6px"></div>
+          Agent-2
+        </div>
+        <div class="approval-item-body">run npm install jsonwebtoken bcrypt</div>
+        <div class="approval-item-actions">
+          <button class="btn-xs approve">Approve</button>
+          <button class="btn-xs reject">Reject</button>
+        </div>
+      </div>
+      <div class="approval-item">
+        <div class="approval-item-header">
+          <div class="agent-status running" style="width:6px;height:6px"></div>
+          Agent-4
+        </div>
+        <div class="approval-item-body">modify src/config/database.ts</div>
+        <div class="approval-item-actions">
+          <button class="btn-xs approve">Approve</button>
+          <button class="btn-xs reject">Reject</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======== COMMAND PALETTE ======== -->
+  <div class="command-bar-overlay" id="cmdOverlay" onclick="closeCommand()"></div>
+  <div class="command-bar" id="cmdBar">
+    <input class="command-input" placeholder="Describe your mission or search..." id="cmdInput" autocomplete="off">
+    <div class="command-hints">
+      <div class="command-hint selected">
+        <span class="hint-icon">🚀</span> New Mission
+        <span class="hint-kbd"><span class="kbd">⌘N</span></span>
+      </div>
+      <div class="command-hint">
+        <span class="hint-icon">📎</span> Send Breadcrumb to Agent
+        <span class="hint-kbd"><span class="kbd">⌘B</span></span>
+      </div>
+      <div class="command-hint">
+        <span class="hint-icon">⏸</span> Pause Agent
+        <span class="hint-kbd"><span class="kbd">⌘⇧P</span></span>
+      </div>
+      <div class="command-hint">
+        <span class="hint-icon">⑂</span> Fork Agent
+        <span class="hint-kbd"><span class="kbd">⌘⇧F</span></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ---- Theme Toggle ---- */
+function toggleTheme() {
+  const app = document.getElementById('app');
+  const isDark = app.getAttribute('data-theme') === 'dark';
+  app.setAttribute('data-theme', isDark ? '' : 'dark');
+  document.querySelector('.theme-toggle').textContent = isDark ? '◐' : '◑';
+}
+
+/* ---- Sidebar Navigation ---- */
+document.querySelectorAll('.sidebar-item[data-view]').forEach(item => {
+  item.addEventListener('click', () => {
+    document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
+    item.classList.add('active');
+    const viewId = 'view-' + item.dataset.view;
+    document.querySelectorAll('.view-panel').forEach(p => p.classList.remove('active'));
+    const target = document.getElementById(viewId);
+    if (target) target.classList.add('active');
+  });
+});
+
+/* ---- Command Palette ---- */
+function openCommand() {
+  document.getElementById('cmdBar').classList.add('open');
+  document.getElementById('cmdOverlay').classList.add('open');
+  document.getElementById('cmdInput').focus();
+}
+
+function closeCommand() {
+  document.getElementById('cmdBar').classList.remove('open');
+  document.getElementById('cmdOverlay').classList.remove('open');
+  document.getElementById('cmdInput').value = '';
+}
+
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+    e.preventDefault();
+    openCommand();
+  }
+  if (e.key === 'Escape') closeCommand();
+  if ((e.metaKey || e.ctrlKey) && e.key === 'n') {
+    e.preventDefault();
+    openCommand();
+  }
+});
+
+/* ---- View Tab Switching (within content headers) ---- */
+document.querySelectorAll('.view-tabs').forEach(tabGroup => {
+  tabGroup.querySelectorAll('.view-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      tabGroup.querySelectorAll('.view-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+    });
+  });
+});
+</script>
+</body>
+</html>

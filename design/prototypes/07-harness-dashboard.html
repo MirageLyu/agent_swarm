@@ -1,0 +1,1271 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Harness Dashboard — Swarm Commander</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", sans-serif;
+  --font-mono: "SF Mono", "Menlo", "Monaco", monospace;
+  --ease-out: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --radius-window: 10px;
+  --radius-card: 8px;
+  --radius-btn: 6px;
+}
+
+[data-theme="light"] {
+  --bg-primary: #FFFFFF;
+  --bg-secondary: #F5F5F7;
+  --bg-tertiary: #E8E8ED;
+  --text-primary: #1D1D1F;
+  --text-secondary: #6E6E73;
+  --text-tertiary: #AEAEB2;
+  --accent: #007AFF;
+  --green: #34C759;
+  --red: #FF3B30;
+  --orange: #FF9500;
+  --yellow: #FFCC00;
+  --purple: #AF52DE;
+  --border: rgba(0,0,0,0.08);
+  --border-strong: rgba(0,0,0,0.12);
+  --shadow-card: 0 0.5px 0 rgba(0,0,0,0.05), 0 1px 3px rgba(0,0,0,0.06);
+  --shadow-window: 0 22px 70px rgba(0,0,0,0.18), 0 0 0 0.5px rgba(0,0,0,0.08);
+  --chart-line: #007AFF;
+  --chart-fill: rgba(0,122,255,0.08);
+  --bar-bg: #E8E8ED;
+  --tooltip-bg: rgba(29,29,31,0.92);
+  --tooltip-text: #F5F5F7;
+  --gantt-track: #F0F0F2;
+}
+
+[data-theme="dark"] {
+  --bg-primary: #1C1C1E;
+  --bg-secondary: #2C2C2E;
+  --bg-tertiary: #3A3A3C;
+  --text-primary: #F5F5F7;
+  --text-secondary: #98989D;
+  --text-tertiary: #636366;
+  --accent: #0A84FF;
+  --green: #30D158;
+  --red: #FF453A;
+  --orange: #FF9F0A;
+  --yellow: #FFD60A;
+  --purple: #BF5AF2;
+  --border: rgba(255,255,255,0.08);
+  --border-strong: rgba(255,255,255,0.12);
+  --shadow-card: 0 0.5px 0 rgba(0,0,0,0.2), 0 1px 3px rgba(0,0,0,0.3);
+  --shadow-window: 0 22px 70px rgba(0,0,0,0.5), 0 0 0 0.5px rgba(255,255,255,0.06);
+  --chart-line: #0A84FF;
+  --chart-fill: rgba(10,132,255,0.12);
+  --bar-bg: #3A3A3C;
+  --tooltip-bg: rgba(245,245,247,0.92);
+  --tooltip-text: #1D1D1F;
+  --gantt-track: #2C2C2E;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.38;
+  background: #707070;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+.window {
+  width: 1280px;
+  height: 820px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-window);
+  box-shadow: var(--shadow-window);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Top Bar ── */
+.topbar {
+  height: 52px;
+  background: var(--bg-primary);
+  border-bottom: 0.5px solid var(--border-strong);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  gap: 16px;
+  flex-shrink: 0;
+  -webkit-app-region: drag;
+}
+
+.traffic-lights {
+  display: flex;
+  gap: 8px;
+  padding-right: 8px;
+}
+.traffic-light {
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  -webkit-app-region: no-drag;
+  cursor: default;
+}
+.tl-close { background: #FF5F57; }
+.tl-minimize { background: #FEBD2E; }
+.tl-maximize { background: #28C840; }
+
+.topbar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.topbar-tabs {
+  display: flex;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-btn);
+  padding: 2px;
+  gap: 1px;
+  -webkit-app-region: no-drag;
+}
+.topbar-tab {
+  padding: 4px 14px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.2s var(--ease-out);
+  border: none;
+  background: transparent;
+  font-family: inherit;
+}
+.topbar-tab.active {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  box-shadow: 0 0.5px 1px rgba(0,0,0,0.06);
+}
+.topbar-tab:hover:not(.active) { color: var(--text-primary); }
+
+.time-range {
+  display: flex;
+  gap: 2px;
+  margin-left: auto;
+  -webkit-app-region: no-drag;
+}
+.time-btn {
+  padding: 4px 10px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  transition: all 0.2s var(--ease-out);
+}
+.time-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+.time-btn:hover:not(.active) { background: var(--bg-tertiary); }
+
+.theme-toggle {
+  width: 32px; height: 32px;
+  border-radius: var(--radius-btn);
+  border: 0.5px solid var(--border-strong);
+  background: var(--bg-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  -webkit-app-region: no-drag;
+  transition: background 0.2s var(--ease-out);
+}
+.theme-toggle:hover { background: var(--bg-tertiary); }
+
+/* ── Dashboard Grid ── */
+.dashboard {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 1px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.panel {
+  background: var(--bg-primary);
+  padding: 20px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: all 0.3s var(--ease-out);
+}
+.panel::-webkit-scrollbar { width: 6px; }
+.panel::-webkit-scrollbar-track { background: transparent; }
+.panel::-webkit-scrollbar-thumb { background: var(--text-tertiary); border-radius: 3px; }
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  cursor: pointer;
+  user-select: none;
+}
+.panel-icon {
+  width: 28px; height: 28px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.panel-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.panel-chevron {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  transition: transform 0.2s var(--ease-out);
+}
+.panel.collapsed .panel-chevron { transform: rotate(-90deg); }
+.panel.collapsed .panel-body { display: none; }
+
+.panel-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Panel icon colors */
+.icon-cost { background: rgba(0,122,255,0.12); color: var(--accent); }
+.icon-quality { background: rgba(52,199,89,0.12); color: var(--green); }
+.icon-efficiency { background: rgba(175,82,222,0.12); color: var(--purple); }
+.icon-anomaly { background: rgba(255,149,0,0.12); color: var(--orange); }
+
+/* ── Shared Components ── */
+.big-number {
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.5px;
+  line-height: 1.1;
+}
+.big-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.metric-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+/* Progress Bar */
+.progress-container {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.progress-track {
+  flex: 1;
+  height: 8px;
+  background: var(--bar-bg);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.6s var(--ease-out);
+}
+.progress-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+/* Mini table */
+.mini-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.mini-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  padding: 4px 8px 4px 0;
+  border-bottom: 0.5px solid var(--border);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.mini-table td {
+  padding: 5px 8px 5px 0;
+  color: var(--text-primary);
+  border-bottom: 0.5px solid var(--border);
+}
+.mini-table td:last-child, .mini-table th:last-child { text-align: right; }
+.mono { font-family: var(--font-mono); font-size: 11px; }
+
+/* Bar Chart (horizontal) */
+.bar-group { display: flex; flex-direction: column; gap: 6px; }
+.bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  position: relative;
+}
+.bar-label {
+  width: 58px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-align: right;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+}
+.bar-track {
+  flex: 1;
+  height: 16px;
+  background: var(--bar-bg);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+}
+.bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.5s var(--ease-out);
+  position: relative;
+}
+.bar-value {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-left: 6px;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+/* Tooltip */
+.tooltip {
+  position: fixed;
+  padding: 5px 9px;
+  background: var(--tooltip-bg);
+  color: var(--tooltip-text);
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  pointer-events: none;
+  z-index: 1000;
+  opacity: 0;
+  transition: opacity 0.15s;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+  font-family: var(--font-mono);
+}
+.tooltip.visible { opacity: 1; }
+
+/* SVG Line Chart */
+.line-chart-wrap {
+  width: 100%;
+  height: 72px;
+  position: relative;
+}
+.line-chart-wrap svg {
+  width: 100%;
+  height: 100%;
+}
+.line-chart-wrap .chart-dot {
+  cursor: pointer;
+}
+
+/* Stacked bar */
+.stacked-bar {
+  display: flex;
+  height: 20px;
+  border-radius: 5px;
+  overflow: hidden;
+  gap: 1px;
+}
+.stacked-segment {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  transition: flex 0.3s var(--ease-out);
+}
+
+/* Vertical Bar Chart */
+.vbar-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  height: 80px;
+  padding-top: 4px;
+}
+.vbar-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  height: 100%;
+  justify-content: flex-end;
+  position: relative;
+}
+.vbar {
+  width: 100%;
+  max-width: 32px;
+  border-radius: 4px 4px 2px 2px;
+  transition: height 0.5s var(--ease-out);
+  cursor: pointer;
+  position: relative;
+}
+.vbar:hover { opacity: 0.85; }
+.vbar-label {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+}
+
+/* Log entries */
+.log-list { display: flex; flex-direction: column; gap: 4px; }
+.log-entry {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 5px 8px;
+  background: var(--bg-secondary);
+  border-radius: 5px;
+  line-height: 1.4;
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+}
+.log-dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+
+/* Circular progress */
+.agent-circles {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.circle-agent {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.circle-ring {
+  width: 40px; height: 40px;
+  position: relative;
+}
+.circle-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+.circle-ring circle {
+  fill: none;
+  stroke-width: 3.5;
+  stroke-linecap: round;
+}
+.circle-bg { stroke: var(--bar-bg); }
+.circle-fg { transition: stroke-dashoffset 0.6s var(--ease-out); }
+.circle-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+.circle-name {
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+/* Gantt chart */
+.gantt {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  position: relative;
+}
+.gantt-header {
+  display: flex;
+  gap: 0;
+  margin-left: 58px;
+  margin-bottom: 2px;
+}
+.gantt-tick {
+  font-size: 9px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+}
+.gantt-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 18px;
+}
+.gantt-agent-label {
+  width: 50px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  text-align: right;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+}
+.gantt-track {
+  flex: 1;
+  height: 14px;
+  background: var(--gantt-track);
+  border-radius: 3px;
+  position: relative;
+  overflow: hidden;
+}
+.gantt-bar {
+  position: absolute;
+  top: 1px;
+  height: 12px;
+  border-radius: 3px;
+  font-size: 8px;
+  font-weight: 600;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.gantt-bar:hover { opacity: 0.85; }
+
+/* Anomaly panel glow */
+.panel-anomaly.has-anomalies {
+  box-shadow: inset 0 0 0 1.5px var(--orange), 0 0 16px rgba(255,149,0,0.08);
+}
+
+/* Anomaly card */
+.anomaly-card {
+  background: var(--bg-secondary);
+  border-radius: var(--radius-card);
+  padding: 12px;
+  border-left: 3px solid var(--orange);
+}
+.anomaly-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.anomaly-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(255,149,0,0.15);
+  color: var(--orange);
+}
+.anomaly-detail {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+.anomaly-detail strong { color: var(--text-primary); font-weight: 500; }
+
+/* Anomaly timeline */
+.anomaly-timeline {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin-top: 8px;
+  padding: 6px 0;
+}
+.atl-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  position: relative;
+  z-index: 1;
+}
+.atl-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--bg-primary);
+  box-shadow: 0 0 0 1px var(--border-strong);
+}
+.atl-label {
+  font-size: 8px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.2px;
+}
+.atl-connector {
+  flex: 1;
+  height: 2px;
+  background: var(--border-strong);
+  min-width: 12px;
+  margin-top: -10px;
+}
+
+/* Anomaly type distribution */
+.anom-types {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.anom-type-chip {
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.anom-type-chip.active { background: rgba(255,149,0,0.15); color: var(--orange); font-weight: 600; }
+
+/* Section label */
+.section-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-top: 2px;
+}
+
+/* Auto-fix badge */
+.autofix-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(52,199,89,0.12);
+  color: var(--green);
+}
+
+/* Stat row */
+.stat-row {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.stat-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+.stat-label {
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+/* Speedup callout */
+.speedup-callout {
+  background: var(--bg-secondary);
+  border-radius: var(--radius-card);
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.speedup-number {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--purple);
+  font-family: var(--font-mono);
+}
+
+/* Live indicator */
+.live-dot {
+  width: 6px; height: 6px;
+  background: var(--green);
+  border-radius: 50%;
+  animation: livePulse 2s ease-in-out infinite;
+}
+@keyframes livePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* Compact metrics (shown when collapsed) */
+.compact-metrics {
+  display: none;
+  gap: 16px;
+  align-items: center;
+  margin-left: 4px;
+}
+.panel.collapsed .compact-metrics { display: flex; }
+.compact-stat {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+
+/* Animations */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-in { animation: fadeInUp 0.3s var(--ease-out) both; }
+
+@keyframes progressGrow {
+  from { width: 0; }
+}
+.progress-fill { animation: progressGrow 0.8s var(--ease-out); }
+
+</style>
+</head>
+<body>
+
+<div class="window">
+  <!-- Top Bar -->
+  <div class="topbar">
+    <div class="traffic-lights">
+      <div class="traffic-light tl-close"></div>
+      <div class="traffic-light tl-minimize"></div>
+      <div class="traffic-light tl-maximize"></div>
+    </div>
+    <span class="topbar-title">Harness Dashboard</span>
+
+    <div class="topbar-tabs">
+      <button class="topbar-tab active" data-mode="live" onclick="setMode(this)">
+        <span style="display:inline-flex;align-items:center;gap:4px;"><span class="live-dot"></span> Live</span>
+      </button>
+      <button class="topbar-tab" data-mode="history" onclick="setMode(this)">History</button>
+    </div>
+
+    <div class="time-range">
+      <button class="time-btn active" onclick="setTimeRange(this, '10m')">Last 10m</button>
+      <button class="time-btn" onclick="setTimeRange(this, '30m')">Last 30m</button>
+      <button class="time-btn" onclick="setTimeRange(this, '1h')">Last 1h</button>
+      <button class="time-btn" onclick="setTimeRange(this, 'all')">All</button>
+    </div>
+
+    <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+      <span id="themeIcon">🌙</span>
+    </button>
+  </div>
+
+  <!-- Dashboard Grid -->
+  <div class="dashboard">
+
+    <!-- Panel 1: Cost -->
+    <div class="panel" id="panelCost">
+      <div class="panel-header" onclick="togglePanel('panelCost')">
+        <div class="panel-icon icon-cost">$</div>
+        <span class="panel-title">Cost</span>
+        <div class="compact-metrics">
+          <span class="compact-stat" id="costCompact">$3.85</span>
+          <span style="font-size:11px;color:var(--text-tertiary)">12.8% of budget</span>
+        </div>
+        <span class="panel-chevron">▼</span>
+      </div>
+      <div class="panel-body">
+        <div>
+          <div class="big-number" id="totalCost">$3.85</div>
+          <div class="big-label">Total cost this session</div>
+        </div>
+
+        <div>
+          <div class="section-label">Budget Usage</div>
+          <div class="progress-container" style="margin-top:4px;">
+            <div class="progress-track">
+              <div class="progress-fill" id="budgetFill" style="width:12.8%;background:var(--green);"></div>
+            </div>
+            <span class="progress-label" id="budgetLabel">12.8% of $30</span>
+          </div>
+        </div>
+
+        <div>
+          <div class="section-label">Token Consumption</div>
+          <div class="line-chart-wrap" id="tokenChart"></div>
+        </div>
+
+        <div>
+          <div class="section-label">Model Breakdown</div>
+          <table class="mini-table">
+            <thead><tr><th>Model</th><th>Tokens</th><th>Cost</th></tr></thead>
+            <tbody>
+              <tr><td>Claude Sonnet 4</td><td class="mono">38,100</td><td class="mono">$3.05</td></tr>
+              <tr><td>Claude Haiku 4</td><td class="mono">10,100</td><td class="mono">$0.80</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div>
+          <div class="section-label">Per-Agent Cost</div>
+          <div class="bar-group" id="agentCostBars"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Panel 2: Quality -->
+    <div class="panel" id="panelQuality">
+      <div class="panel-header" onclick="togglePanel('panelQuality')">
+        <div class="panel-icon icon-quality">✓</div>
+        <span class="panel-title">Quality</span>
+        <div class="compact-metrics">
+          <span class="compact-stat">8.2</span>
+          <span style="font-size:11px;color:var(--green)">5 pass</span>
+          <span style="font-size:11px;color:var(--orange)">1 warn</span>
+        </div>
+        <span class="panel-chevron">▼</span>
+      </div>
+      <div class="panel-body">
+        <div>
+          <div class="big-number" id="avgScore">8.2</div>
+          <div class="big-label">Average quality score</div>
+        </div>
+
+        <div>
+          <div class="section-label">Distribution</div>
+          <div class="stacked-bar" style="margin-top:4px;">
+            <div class="stacked-segment" style="flex:5;background:var(--green);" data-tip="5 Pass">5</div>
+            <div class="stacked-segment" style="flex:1;background:var(--orange);" data-tip="1 Warn">1</div>
+            <div class="stacked-segment" style="flex:0.3;background:var(--bar-bg);min-width:24px;" data-tip="0 Fail">
+              <span style="color:var(--text-tertiary);font-size:9px;">0</span>
+            </div>
+          </div>
+          <div style="display:flex;gap:12px;margin-top:4px;">
+            <span style="font-size:10px;color:var(--green);font-weight:500;">● Pass: 5</span>
+            <span style="font-size:10px;color:var(--orange);font-weight:500;">● Warn: 1</span>
+            <span style="font-size:10px;color:var(--red);font-weight:500;">● Fail: 0</span>
+          </div>
+        </div>
+
+        <div>
+          <div class="section-label">Per-Task Scores</div>
+          <div class="vbar-chart" id="taskScoreChart"></div>
+        </div>
+
+        <div>
+          <div class="section-label">Evaluator Activity</div>
+          <div class="log-list" id="evalLog"></div>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div class="section-label" style="margin:0;">Auto-Fix Success</div>
+          <div class="autofix-badge">✓ 100% (2/2)</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Panel 3: Efficiency -->
+    <div class="panel" id="panelEfficiency">
+      <div class="panel-header" onclick="togglePanel('panelEfficiency')">
+        <div class="panel-icon icon-efficiency">⚡</div>
+        <span class="panel-title">Efficiency</span>
+        <div class="compact-metrics">
+          <span class="compact-stat">67%</span>
+          <span style="font-size:11px;color:var(--text-tertiary)">4/6 active · 3.2x speedup</span>
+        </div>
+        <span class="panel-chevron">▼</span>
+      </div>
+      <div class="panel-body">
+        <div class="stat-row">
+          <div class="stat-item">
+            <div class="stat-value" id="utilPct">67%</div>
+            <div class="stat-label">Agent Utilization</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-value" style="font-size:14px;">4 / 6</div>
+            <div class="stat-label">Active Agents</div>
+          </div>
+        </div>
+
+        <div>
+          <div class="section-label">Agent Activity</div>
+          <div class="agent-circles" id="agentCircles"></div>
+        </div>
+
+        <div>
+          <div class="section-label">Parallelism Timeline</div>
+          <div class="gantt" id="ganttChart"></div>
+        </div>
+
+        <div class="speedup-callout">
+          <div>
+            <div style="font-size:11px;color:var(--text-tertiary);">Serial → Parallel</div>
+            <div style="margin-top:2px;">28m → <strong style="color:var(--text-primary)">8m 42s</strong></div>
+          </div>
+          <div style="margin-left:auto;text-align:right;">
+            <div class="speedup-number">3.2×</div>
+            <div style="font-size:10px;color:var(--text-tertiary);">speedup</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Panel 4: Anomalies -->
+    <div class="panel panel-anomaly has-anomalies" id="panelAnomalies">
+      <div class="panel-header" onclick="togglePanel('panelAnomalies')">
+        <div class="panel-icon icon-anomaly">⚠</div>
+        <span class="panel-title">Anomalies</span>
+        <div class="compact-metrics">
+          <span class="compact-stat" style="color:var(--orange);">1</span>
+          <span style="font-size:11px;color:var(--text-tertiary)">cost spike detected</span>
+        </div>
+        <span class="panel-chevron">▼</span>
+      </div>
+      <div class="panel-body">
+        <div>
+          <div class="big-number" style="color:var(--orange);" id="anomCount">1</div>
+          <div class="big-label">Anomaly detected</div>
+        </div>
+
+        <div class="anomaly-card">
+          <div class="anomaly-title">
+            Agent-4 Cost Spike
+            <span class="anomaly-badge">3.2× median</span>
+          </div>
+          <div class="anomaly-detail">
+            <strong>Task:</strong> T5-type task<br>
+            <strong>Detected at:</strong> 3m 22s<br>
+            <strong>Action:</strong> auto-paused<br>
+            <strong>Resolution:</strong> user sent breadcrumb → resumed → completed normally
+          </div>
+          <div class="anomaly-timeline" id="anomTimeline"></div>
+        </div>
+
+        <div>
+          <div class="section-label">Anomaly Types</div>
+          <div class="anom-types">
+            <span class="anom-type-chip active">Cost Spike (1)</span>
+            <span class="anom-type-chip">Timeout (0)</span>
+            <span class="anom-type-chip">Quality Drop (0)</span>
+            <span class="anom-type-chip">Loop Detection (0)</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+// ── Theme ──
+function toggleTheme() {
+  const html = document.documentElement;
+  const isDark = html.getAttribute('data-theme') === 'dark';
+  html.setAttribute('data-theme', isDark ? 'light' : 'dark');
+  document.getElementById('themeIcon').textContent = isDark ? '🌙' : '☀️';
+  renderTokenChart();
+}
+
+// ── Mode Toggle ──
+function setMode(btn) {
+  document.querySelectorAll('.topbar-tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  const isLive = btn.dataset.mode === 'live';
+  document.querySelector('.live-dot').style.display = isLive ? '' : 'none';
+  if (isLive) startLiveSimulation(); else stopLiveSimulation();
+}
+
+// ── Time Range ──
+function setTimeRange(btn, range) {
+  document.querySelectorAll('.time-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  const labels = { '10m': 'Last 10 min', '30m': 'Last 30 min', '1h': 'Last 1 hour', 'all': 'Full Session' };
+  document.querySelector('.topbar-title').textContent = 'Harness Dashboard — ' + labels[range];
+}
+
+// ── Panel Toggle ──
+function togglePanel(id) {
+  document.getElementById(id).classList.toggle('collapsed');
+}
+
+// ── Tooltip ──
+const tip = document.getElementById('tooltip');
+function showTip(e, text) {
+  tip.textContent = text;
+  tip.classList.add('visible');
+  moveTip(e);
+}
+function moveTip(e) {
+  tip.style.left = (e.clientX + 10) + 'px';
+  tip.style.top = (e.clientY - 30) + 'px';
+}
+function hideTip() { tip.classList.remove('visible'); }
+document.addEventListener('mousemove', (e) => { if (tip.classList.contains('visible')) moveTip(e); });
+
+// ── Token Line Chart (SVG) ──
+const tokenData = [120, 280, 520, 850, 1100, 1450, 1780, 2100, 2340, 2680, 2890, 3150, 3320, 3580, 3850];
+function renderTokenChart() {
+  const wrap = document.getElementById('tokenChart');
+  const w = wrap.clientWidth || 540;
+  const h = 72;
+  const max = Math.max(...tokenData) * 1.1;
+  const pts = tokenData.map((v, i) => {
+    const x = (i / (tokenData.length - 1)) * (w - 8) + 4;
+    const y = h - 4 - ((v / max) * (h - 12));
+    return { x, y, v };
+  });
+  const polyline = pts.map(p => `${p.x},${p.y}`).join(' ');
+  const fillPoly = `4,${h - 4} ${polyline} ${pts[pts.length-1].x},${h - 4}`;
+  const cs = getComputedStyle(document.documentElement);
+  const lineColor = cs.getPropertyValue('--chart-line').trim();
+  const fillColor = cs.getPropertyValue('--chart-fill').trim();
+
+  let dotsHtml = pts.map((p, i) => `
+    <circle class="chart-dot" cx="${p.x}" cy="${p.y}" r="3.5" fill="${lineColor}" stroke="var(--bg-primary)" stroke-width="1.5"
+      onmouseenter="showTip(event, '${(p.v/100).toFixed(0)}k tokens · $${(p.v/1000).toFixed(2)}')"
+      onmouseleave="hideTip()" />
+  `).join('');
+
+  wrap.innerHTML = `
+    <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+      <polygon points="${fillPoly}" fill="${fillColor}" />
+      <polyline points="${polyline}" fill="none" stroke="${lineColor}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" />
+      ${dotsHtml}
+    </svg>`;
+}
+
+// ── Agent Cost Bars ──
+function renderAgentCostBars() {
+  const agents = [
+    { name: 'Agent-1', cost: 1.07 },
+    { name: 'Agent-2', cost: 0.78 },
+    { name: 'Agent-3', cost: 0.52 },
+    { name: 'Agent-4', cost: 0.92 },
+    { name: 'Agent-5', cost: 0.56 },
+  ];
+  const maxCost = Math.max(...agents.map(a => a.cost));
+  const el = document.getElementById('agentCostBars');
+  el.innerHTML = agents.map(a => {
+    const pct = (a.cost / maxCost * 100).toFixed(1);
+    return `
+      <div class="bar-row">
+        <span class="bar-label">${a.name}</span>
+        <div class="bar-track">
+          <div class="bar-fill" style="width:${pct}%;background:var(--accent);"
+            onmouseenter="showTip(event, '${a.name}: $${a.cost.toFixed(2)}')"
+            onmouseleave="hideTip()"></div>
+        </div>
+        <span class="bar-value">$${a.cost.toFixed(2)}</span>
+      </div>`;
+  }).join('');
+}
+
+// ── Per-Task Score Bars ──
+function renderTaskScores() {
+  const scores = [
+    { task: 'T1', score: 9, color: 'var(--green)' },
+    { task: 'T2', score: 8.5, color: 'var(--green)' },
+    { task: 'T3', score: 8, color: 'var(--green)' },
+    { task: 'T4', score: 6.5, color: 'var(--orange)' },
+    { task: 'T5', score: 8, color: 'var(--green)' },
+    { task: 'T6', score: 9, color: 'var(--green)' },
+  ];
+  const el = document.getElementById('taskScoreChart');
+  el.innerHTML = scores.map(s => {
+    const pct = (s.score / 10 * 100);
+    return `
+      <div class="vbar-col">
+        <div class="vbar" style="height:${pct}%;background:${s.color};"
+          onmouseenter="showTip(event, '${s.task}: ${s.score}/10')"
+          onmouseleave="hideTip()"></div>
+        <span class="vbar-label">${s.task}</span>
+      </div>`;
+  }).join('');
+}
+
+// ── Evaluator Log ──
+function renderEvalLog() {
+  const entries = [
+    { color: 'var(--red)', text: 'T2: Security issue found → auto-fixed (password_hash leak)' },
+    { color: 'var(--orange)', text: 'T2: Flexibility issue → auto-fixed (JWT expiry configurable)' },
+    { color: 'var(--yellow)', text: 'T4: Suggestion: add common password check' },
+  ];
+  const el = document.getElementById('evalLog');
+  el.innerHTML = entries.map(e => `
+    <div class="log-entry animate-in">
+      <span class="log-dot" style="background:${e.color};"></span>
+      <span>${e.text}</span>
+    </div>`).join('');
+}
+
+// ── Agent Circles ──
+function renderAgentCircles() {
+  const agents = [
+    { name: 'A-1', pct: 85 },
+    { name: 'A-2', pct: 92 },
+    { name: 'A-3', pct: 35 },
+    { name: 'A-4', pct: 78 },
+    { name: 'A-5', pct: 40 },
+    { name: 'A-6', pct: 0 },
+  ];
+  const r = 15, c = Math.PI * 2 * r;
+  const el = document.getElementById('agentCircles');
+  el.innerHTML = agents.map(a => {
+    const offset = c - (a.pct / 100 * c);
+    const color = a.pct > 70 ? 'var(--purple)' : a.pct > 30 ? 'var(--accent)' : 'var(--text-tertiary)';
+    return `
+      <div class="circle-agent">
+        <div class="circle-ring">
+          <svg viewBox="0 0 40 40">
+            <circle class="circle-bg" cx="20" cy="20" r="${r}" />
+            <circle class="circle-fg" cx="20" cy="20" r="${r}" stroke="${color}"
+              stroke-dasharray="${c}" stroke-dashoffset="${offset}" />
+          </svg>
+          <div class="circle-label">${a.pct}%</div>
+        </div>
+        <span class="circle-name">${a.name}</span>
+      </div>`;
+  }).join('');
+}
+
+// ── Gantt Chart ──
+function renderGantt() {
+  const totalMin = 10;
+  const rows = [
+    { agent: 'A-1', bars: [{ start: 0, end: 2, label: 'T1', color: 'var(--accent)' }, { start: 2, end: 5, label: 'T2', color: 'var(--green)' }] },
+    { agent: 'A-2', bars: [{ start: 0, end: 5, label: 'T3', color: 'var(--purple)' }] },
+    { agent: 'A-3', bars: [{ start: 5, end: 7, label: 'T4', color: 'var(--orange)' }] },
+    { agent: 'A-4', bars: [{ start: 0, end: 5, label: 'T5', color: 'var(--red)' }] },
+    { agent: 'A-5', bars: [{ start: 7, end: 9, label: 'T6', color: 'var(--accent)' }] },
+  ];
+  const el = document.getElementById('ganttChart');
+  const ticks = Array.from({ length: totalMin + 1 }, (_, i) => i);
+  const tickHtml = `<div class="gantt-header">${ticks.map(t =>
+    `<span class="gantt-tick" style="width:${100/totalMin}%;text-align:center;">${t}m</span>`
+  ).join('')}</div>`;
+
+  const rowsHtml = rows.map(r => {
+    const barsHtml = r.bars.map(b => {
+      const left = (b.start / totalMin * 100).toFixed(1);
+      const width = ((b.end - b.start) / totalMin * 100).toFixed(1);
+      return `<div class="gantt-bar" style="left:${left}%;width:${width}%;background:${b.color};"
+        onmouseenter="showTip(event, '${r.agent}: ${b.label} (${b.start}m–${b.end}m)')"
+        onmouseleave="hideTip()">${b.label}</div>`;
+    }).join('');
+    return `<div class="gantt-row">
+      <span class="gantt-agent-label">${r.agent}</span>
+      <div class="gantt-track">${barsHtml}</div>
+    </div>`;
+  }).join('');
+
+  el.innerHTML = tickHtml + rowsHtml;
+}
+
+// ── Anomaly Timeline ──
+function renderAnomalyTimeline() {
+  const steps = [
+    { label: 'Normal', color: 'var(--green)' },
+    { label: 'Spike', color: 'var(--red)' },
+    { label: 'Pause', color: 'var(--orange)' },
+    { label: 'Crumb', color: 'var(--accent)' },
+    { label: 'Resume', color: 'var(--purple)' },
+    { label: 'Done', color: 'var(--green)' },
+  ];
+  const el = document.getElementById('anomTimeline');
+  el.innerHTML = steps.map((s, i) => {
+    const connector = i < steps.length - 1 ? '<div class="atl-connector"></div>' : '';
+    return `
+      <div class="atl-node">
+        <div class="atl-dot" style="background:${s.color};"></div>
+        <span class="atl-label">${s.label}</span>
+      </div>${connector}`;
+  }).join('');
+}
+
+// ── Stacked bar tooltips ──
+function initStackedBarTips() {
+  document.querySelectorAll('.stacked-segment[data-tip]').forEach(seg => {
+    seg.addEventListener('mouseenter', e => showTip(e, seg.dataset.tip));
+    seg.addEventListener('mouseleave', hideTip);
+  });
+}
+
+// ── Live Simulation ──
+let liveInterval = null;
+let costValue = 3.85;
+function startLiveSimulation() {
+  if (liveInterval) return;
+  liveInterval = setInterval(() => {
+    const increment = Math.random() * 0.03;
+    costValue += increment;
+    const budgetPct = (costValue / 30 * 100).toFixed(1);
+    document.getElementById('totalCost').textContent = '$' + costValue.toFixed(2);
+    document.getElementById('costCompact').textContent = '$' + costValue.toFixed(2);
+    document.getElementById('budgetFill').style.width = budgetPct + '%';
+    document.getElementById('budgetLabel').textContent = budgetPct + '% of $30';
+
+    if (budgetPct > 50) {
+      document.getElementById('budgetFill').style.background = 'var(--orange)';
+    } else if (budgetPct > 80) {
+      document.getElementById('budgetFill').style.background = 'var(--red)';
+    }
+  }, 3000);
+}
+function stopLiveSimulation() {
+  clearInterval(liveInterval);
+  liveInterval = null;
+}
+
+// ── Init ──
+function init() {
+  renderTokenChart();
+  renderAgentCostBars();
+  renderTaskScores();
+  renderEvalLog();
+  renderAgentCircles();
+  renderGantt();
+  renderAnomalyTimeline();
+  initStackedBarTips();
+  startLiveSimulation();
+
+  window.addEventListener('resize', () => { renderTokenChart(); });
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>

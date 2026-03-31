@@ -1,0 +1,1158 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mission Report — Swarm Commander</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg-primary:#FFFFFF;--bg-secondary:#F5F5F7;--bg-tertiary:#E8E8ED;
+  --text-primary:#1D1D1F;--text-secondary:#6E6E73;--text-tertiary:#AEAEB2;
+  --accent:#007AFF;--green:#34C759;--red:#FF3B30;--orange:#FF9500;--yellow:#FFCC00;
+  --purple:#AF52DE;
+  --separator:rgba(0,0,0,0.08);--separator-strong:rgba(0,0,0,0.14);
+  --window-shadow:0 22px 70px 4px rgba(0,0,0,0.28),0 0 0 0.5px rgba(0,0,0,0.12);
+  --card-shadow:0 1px 3px rgba(0,0,0,0.06),0 0 0 0.5px rgba(0,0,0,0.04);
+  --popover-shadow:0 5px 30px rgba(0,0,0,0.15),0 0 0 0.5px rgba(0,0,0,0.08);
+  --blur:saturate(180%) blur(20px);
+  --font-ui:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Helvetica Neue",sans-serif;
+  --font-mono:"SF Mono","Menlo","Monaco",monospace;
+  --ease:cubic-bezier(0.25,0.46,0.45,0.94);
+  --vote-agree-bg:rgba(52,199,89,0.1);--vote-agree-border:rgba(52,199,89,0.3);
+  --vote-disagree-bg:rgba(255,59,48,0.1);--vote-disagree-border:rgba(255,59,48,0.3);
+  --bar-bg:rgba(0,0,0,0.06);
+  --toc-hover:rgba(0,0,0,0.04);--toc-active-bg:rgba(0,122,255,0.08);
+  --badge-green-bg:rgba(52,199,89,0.12);--badge-green-text:#1B8A36;
+  --badge-red-bg:rgba(255,59,48,0.12);--badge-red-text:#D12D22;
+  --badge-orange-bg:rgba(255,149,0,0.12);--badge-orange-text:#B36A00;
+  --compare-bg:#F0FFF4;--compare-border:rgba(52,199,89,0.2);
+}
+[data-theme="dark"]{
+  --bg-primary:#1C1C1E;--bg-secondary:#2C2C2E;--bg-tertiary:#3A3A3C;
+  --text-primary:#F5F5F7;--text-secondary:#98989D;--text-tertiary:#636366;
+  --accent:#0A84FF;--green:#30D158;--red:#FF453A;--orange:#FF9F0A;--yellow:#FFD60A;
+  --purple:#BF5AF2;
+  --separator:rgba(255,255,255,0.08);--separator-strong:rgba(255,255,255,0.14);
+  --window-shadow:0 22px 70px 4px rgba(0,0,0,0.55),0 0 0 0.5px rgba(255,255,255,0.06);
+  --card-shadow:0 1px 3px rgba(0,0,0,0.2),0 0 0 0.5px rgba(255,255,255,0.04);
+  --popover-shadow:0 5px 30px rgba(0,0,0,0.4),0 0 0 0.5px rgba(255,255,255,0.06);
+  --vote-agree-bg:rgba(48,209,88,0.12);--vote-agree-border:rgba(48,209,88,0.3);
+  --vote-disagree-bg:rgba(255,69,58,0.12);--vote-disagree-border:rgba(255,69,58,0.3);
+  --bar-bg:rgba(255,255,255,0.08);
+  --toc-hover:rgba(255,255,255,0.04);--toc-active-bg:rgba(10,132,255,0.12);
+  --badge-green-bg:rgba(48,209,88,0.15);--badge-green-text:#30D158;
+  --badge-red-bg:rgba(255,69,58,0.15);--badge-red-text:#FF453A;
+  --badge-orange-bg:rgba(255,159,10,0.15);--badge-orange-text:#FF9F0A;
+  --compare-bg:rgba(48,209,88,0.06);--compare-border:rgba(48,209,88,0.15);
+}
+html{font-size:13px;line-height:1.38}
+body{
+  font-family:var(--font-ui);color:var(--text-primary);
+  background:#707070;display:flex;align-items:center;justify-content:center;
+  min-height:100vh;padding:24px;-webkit-font-smoothing:antialiased;
+}
+
+/* === WINDOW === */
+.window{
+  width:1280px;height:820px;border-radius:10px;overflow:hidden;
+  background:var(--bg-primary);box-shadow:var(--window-shadow);
+  display:flex;flex-direction:column;position:relative;
+}
+
+/* === TITLEBAR === */
+.titlebar{
+  height:52px;flex-shrink:0;display:flex;align-items:center;
+  padding:0 16px;gap:12px;border-bottom:0.5px solid var(--separator-strong);
+  background:var(--bg-secondary);position:relative;z-index:20;
+  -webkit-app-region:drag;user-select:none;
+}
+.traffic-lights{display:flex;gap:8px;flex-shrink:0;padding-right:8px}
+.traffic-light{
+  width:12px;height:12px;border-radius:50%;position:relative;
+  transition:opacity 150ms var(--ease);cursor:default;
+}
+.traffic-light::after{
+  content:'';position:absolute;inset:0;border-radius:50%;
+  box-shadow:inset 0 0 0 0.5px rgba(0,0,0,0.12);
+}
+.tl-close{background:#FF5F57}.tl-minimize{background:#FEBC2E}.tl-maximize{background:#28C840}
+.titlebar-title{
+  font-size:13px;font-weight:600;color:var(--text-primary);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.titlebar-title span{color:var(--text-secondary);font-weight:400}
+.titlebar-spacer{flex:1}
+
+.tb-btn{
+  display:flex;align-items:center;gap:5px;
+  padding:5px 12px;border-radius:6px;border:none;cursor:pointer;
+  font-family:var(--font-ui);font-size:11px;font-weight:500;
+  color:var(--text-secondary);background:var(--bg-tertiary);
+  transition:all 150ms var(--ease);-webkit-app-region:no-drag;white-space:nowrap;
+}
+.tb-btn:hover{color:var(--text-primary);background:var(--bg-tertiary);filter:brightness(0.96)}
+.tb-btn.primary{color:#fff;background:var(--accent)}
+.tb-btn.primary:hover{filter:brightness(1.1)}
+.tb-btn svg{width:13px;height:13px;flex-shrink:0}
+
+.tb-toggle{
+  display:flex;align-items:center;gap:6px;font-size:11px;
+  color:var(--text-secondary);-webkit-app-region:no-drag;cursor:pointer;user-select:none;
+  white-space:nowrap;
+}
+.tb-toggle input{display:none}
+.toggle-track{
+  width:32px;height:18px;border-radius:9px;background:var(--bg-tertiary);
+  position:relative;transition:background 200ms var(--ease);flex-shrink:0;
+}
+.toggle-track::after{
+  content:'';position:absolute;top:2px;left:2px;width:14px;height:14px;
+  border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.2);
+  transition:transform 200ms var(--ease);
+}
+.tb-toggle input:checked+.toggle-track{background:var(--accent)}
+.tb-toggle input:checked+.toggle-track::after{transform:translateX(14px)}
+
+.btn-theme{
+  width:30px;height:30px;border-radius:6px;border:none;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  background:transparent;color:var(--text-secondary);
+  transition:all 150ms var(--ease);-webkit-app-region:no-drag;
+}
+.btn-theme:hover{background:var(--bg-tertiary);color:var(--text-primary)}
+.btn-theme svg{width:16px;height:16px}
+
+/* === MAIN LAYOUT === */
+.main-content{flex:1;overflow:hidden;display:flex;position:relative}
+
+/* === TOC SIDEBAR === */
+.toc-sidebar{
+  width:220px;flex-shrink:0;border-right:0.5px solid var(--separator-strong);
+  background:var(--bg-secondary);overflow-y:auto;padding:16px 0;
+  display:flex;flex-direction:column;
+}
+.toc-header{
+  font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;
+  color:var(--text-tertiary);padding:0 16px 8px;
+}
+.toc-list{list-style:none}
+.toc-item{
+  display:block;padding:6px 16px 6px 20px;font-size:12px;
+  color:var(--text-secondary);cursor:pointer;border-left:2px solid transparent;
+  transition:all 150ms var(--ease);text-decoration:none;line-height:1.4;
+}
+.toc-item:hover{background:var(--toc-hover);color:var(--text-primary)}
+.toc-item.active{
+  color:var(--accent);border-left-color:var(--accent);
+  background:var(--toc-active-bg);font-weight:500;
+}
+.toc-item .toc-num{
+  font-family:var(--font-mono);font-size:10px;color:var(--text-tertiary);
+  margin-right:6px;
+}
+.toc-divider{height:1px;background:var(--separator);margin:8px 16px}
+.toc-meta{
+  margin-top:auto;padding:12px 16px 0;border-top:0.5px solid var(--separator);
+  font-size:11px;color:var(--text-tertiary);line-height:1.6;
+}
+.toc-meta strong{color:var(--text-secondary);font-weight:500}
+
+/* === REPORT BODY === */
+.report-body{
+  flex:1;overflow-y:auto;overflow-x:hidden;padding:0;
+  scroll-behavior:smooth;position:relative;
+}
+.report-inner{
+  max-width:780px;margin:0 auto;padding:32px 40px 64px;
+}
+
+/* Sections */
+.report-section{margin-bottom:40px}
+.section-header{
+  display:flex;align-items:center;gap:8px;cursor:pointer;
+  padding:8px 0;user-select:none;position:relative;
+}
+.section-header:hover .section-chevron{color:var(--text-secondary)}
+.section-chevron{
+  width:16px;height:16px;color:var(--text-tertiary);
+  transition:transform 200ms var(--ease),color 150ms var(--ease);
+  flex-shrink:0;
+}
+.section-header.collapsed .section-chevron{transform:rotate(-90deg)}
+.section-num{
+  font-family:var(--font-mono);font-size:11px;color:var(--text-tertiary);
+  font-weight:500;
+}
+.section-title{
+  font-size:16px;font-weight:600;color:var(--text-primary);
+  letter-spacing:-0.2px;
+}
+.section-body{overflow:hidden;transition:max-height 350ms var(--ease),opacity 250ms var(--ease)}
+.section-body.collapsed{max-height:0!important;opacity:0;pointer-events:none}
+
+/* === EXECUTIVE SUMMARY === */
+.exec-card{
+  background:var(--bg-secondary);border-radius:8px;
+  box-shadow:var(--card-shadow);overflow:hidden;
+}
+.exec-top{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:20px 24px;border-bottom:0.5px solid var(--separator);
+}
+.exec-mission-name{font-size:20px;font-weight:700;letter-spacing:-0.3px}
+.exec-status{
+  display:flex;align-items:center;gap:6px;
+  font-size:12px;font-weight:600;color:var(--green);
+}
+.exec-status .dot{width:8px;height:8px;border-radius:50%;background:var(--green)}
+.exec-metrics{
+  display:grid;grid-template-columns:repeat(6,1fr);
+  gap:0;
+}
+.metric-cell{
+  padding:16px 20px;text-align:center;
+  border-right:0.5px solid var(--separator);
+  position:relative;
+}
+.metric-cell:last-child{border-right:none}
+.metric-label{
+  font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:0.3px;
+  color:var(--text-tertiary);margin-bottom:6px;
+}
+.metric-value{
+  font-size:22px;font-weight:700;letter-spacing:-0.5px;
+  color:var(--text-primary);line-height:1.1;
+}
+.metric-value.green{color:var(--green)}
+.metric-value.accent{color:var(--accent)}
+.metric-sub{font-size:10px;color:var(--text-tertiary);margin-top:3px}
+
+/* === DECISIONS === */
+.decision-card{
+  background:var(--bg-secondary);border-radius:8px;box-shadow:var(--card-shadow);
+  margin-bottom:16px;overflow:hidden;
+}
+.decision-header{
+  display:flex;align-items:center;gap:10px;
+  padding:14px 20px;border-bottom:0.5px solid var(--separator);
+}
+.decision-num{
+  font-family:var(--font-mono);font-size:10px;font-weight:600;
+  color:var(--accent);background:rgba(0,122,255,0.08);
+  padding:2px 7px;border-radius:4px;
+}
+.decision-title{font-size:14px;font-weight:600;flex:1}
+.decision-chose{
+  font-size:11px;font-weight:600;color:var(--green);
+  background:var(--badge-green-bg);padding:3px 8px;border-radius:4px;
+}
+.decision-body{padding:16px 20px}
+.decision-row{
+  display:flex;gap:12px;margin-bottom:10px;font-size:12px;line-height:1.5;
+}
+.decision-row:last-child{margin-bottom:0}
+.decision-row-label{
+  font-weight:600;color:var(--text-secondary);min-width:70px;flex-shrink:0;
+}
+.decision-row-value{color:var(--text-primary)}
+
+.decision-footer{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 20px;border-top:0.5px solid var(--separator);
+  background:var(--bg-primary);
+}
+.vote-label{font-size:11px;color:var(--text-tertiary)}
+.vote-buttons{display:flex;gap:8px}
+.vote-btn{
+  display:flex;align-items:center;gap:4px;
+  padding:4px 12px;border-radius:6px;border:1px solid var(--separator-strong);
+  background:var(--bg-primary);cursor:pointer;
+  font-family:var(--font-ui);font-size:11px;font-weight:500;
+  color:var(--text-secondary);transition:all 200ms var(--ease);
+}
+.vote-btn:hover{border-color:var(--text-tertiary)}
+.vote-btn.agree.voted{
+  background:var(--vote-agree-bg);border-color:var(--vote-agree-border);
+  color:var(--green);
+}
+.vote-btn.disagree.voted{
+  background:var(--vote-disagree-bg);border-color:var(--vote-disagree-border);
+  color:var(--red);
+}
+.vote-btn svg{width:12px;height:12px}
+.vote-btn .vote-count{
+  font-family:var(--font-mono);font-size:10px;
+  opacity:0;transform:scale(0.8);transition:all 200ms var(--ease);
+}
+.vote-btn.voted .vote-count{opacity:1;transform:scale(1)}
+
+/* === EVALUATOR TIMELINE === */
+.eval-timeline{position:relative;padding-left:24px}
+.eval-timeline::before{
+  content:'';position:absolute;left:7px;top:4px;bottom:4px;
+  width:2px;background:var(--separator-strong);border-radius:1px;
+}
+.eval-round{margin-bottom:20px;position:relative}
+.eval-round:last-child{margin-bottom:0}
+.eval-round-dot{
+  position:absolute;left:-24px;top:2px;width:16px;height:16px;
+  border-radius:50%;border:2px solid var(--bg-primary);
+  display:flex;align-items:center;justify-content:center;
+}
+.eval-round-dot.pass{background:var(--green)}
+.eval-round-dot.issues{background:var(--orange)}
+.eval-round-dot svg{width:10px;height:10px;color:#fff}
+.eval-round-title{font-size:13px;font-weight:600;margin-bottom:8px}
+.eval-item{
+  display:flex;align-items:flex-start;gap:8px;
+  padding:8px 12px;margin-bottom:4px;border-radius:6px;
+  font-size:12px;line-height:1.5;background:var(--bg-secondary);
+}
+.eval-icon{flex-shrink:0;font-size:13px;line-height:1.5}
+.eval-detail{flex:1}
+.eval-desc{color:var(--text-primary)}
+.eval-tag{
+  display:inline-block;font-size:10px;font-weight:600;
+  padding:1px 6px;border-radius:3px;margin-left:6px;
+}
+.eval-tag.fix{background:var(--badge-green-bg);color:var(--badge-green-text)}
+.eval-tag.flagged{background:var(--badge-orange-bg);color:var(--badge-orange-text)}
+.eval-tag.security{background:var(--badge-red-bg);color:var(--badge-red-text)}
+
+/* === TASK TABLE === */
+.task-table{
+  width:100%;border-collapse:collapse;font-size:12px;
+  background:var(--bg-secondary);border-radius:8px;
+  overflow:hidden;box-shadow:var(--card-shadow);
+}
+.task-table thead{background:var(--bg-tertiary)}
+.task-table th{
+  padding:10px 14px;font-weight:600;font-size:10px;
+  text-transform:uppercase;letter-spacing:0.3px;
+  color:var(--text-tertiary);text-align:left;
+}
+.task-table td{
+  padding:10px 14px;border-top:0.5px solid var(--separator);
+  color:var(--text-primary);vertical-align:middle;
+}
+.task-table tr:hover td{background:var(--toc-hover)}
+.task-name{font-weight:500}
+.task-agent{
+  font-family:var(--font-mono);font-size:11px;color:var(--accent);
+}
+.task-score{font-weight:600;font-family:var(--font-mono)}
+.task-score.high{color:var(--green)}
+.task-score.mid{color:var(--orange)}
+.task-cost{font-family:var(--font-mono);color:var(--text-secondary)}
+.task-duration{font-family:var(--font-mono);color:var(--text-secondary)}
+.task-status{display:flex;align-items:center;gap:4px;font-weight:500;font-size:11px}
+.task-status.approved{color:var(--green)}
+.task-status.reviewed{color:var(--orange)}
+
+/* === LIMITATIONS === */
+.limitation-list{list-style:none}
+.limitation-item{
+  display:flex;align-items:flex-start;gap:10px;
+  padding:10px 14px;border-radius:6px;margin-bottom:4px;
+  background:var(--bg-secondary);font-size:12px;line-height:1.5;
+}
+.limitation-icon{
+  flex-shrink:0;width:20px;height:20px;border-radius:50%;
+  background:var(--badge-orange-bg);color:var(--badge-orange-text);
+  display:flex;align-items:center;justify-content:center;
+  font-size:11px;font-weight:700;
+}
+.limitation-text{color:var(--text-primary)}
+.limitation-note{color:var(--text-tertiary);font-size:11px;margin-top:2px}
+
+/* === COST BREAKDOWN === */
+.cost-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.cost-card{
+  background:var(--bg-secondary);border-radius:8px;
+  box-shadow:var(--card-shadow);padding:16px 20px;
+}
+.cost-card-title{
+  font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.3px;
+  color:var(--text-tertiary);margin-bottom:12px;
+}
+.cost-model-row{
+  display:flex;align-items:center;justify-content:space-between;
+  margin-bottom:10px;font-size:12px;
+}
+.cost-model-name{font-weight:500;display:flex;align-items:center;gap:6px}
+.cost-model-name .dot{width:8px;height:8px;border-radius:50%}
+.cost-model-tokens{color:var(--text-tertiary);font-family:var(--font-mono);font-size:11px}
+.cost-model-amount{font-weight:600;font-family:var(--font-mono)}
+
+.bar-chart{display:flex;flex-direction:column;gap:8px}
+.bar-row{display:flex;align-items:center;gap:10px;font-size:11px}
+.bar-label{width:70px;text-align:right;color:var(--text-secondary);font-weight:500}
+.bar-track{flex:1;height:20px;background:var(--bar-bg);border-radius:4px;overflow:hidden;position:relative}
+.bar-fill{
+  height:100%;border-radius:4px;transition:width 600ms var(--ease);
+  display:flex;align-items:center;justify-content:flex-end;padding-right:6px;
+  font-family:var(--font-mono);font-size:10px;font-weight:600;color:#fff;
+  min-width:fit-content;
+}
+.bar-fill.c1{background:var(--accent)}
+.bar-fill.c2{background:var(--green)}
+.bar-fill.c3{background:var(--orange)}
+.bar-fill.c4{background:var(--purple)}
+.bar-fill.c5{background:var(--red)}
+.bar-fill.c6{background:var(--yellow);color:var(--text-primary)}
+
+.budget-meter{margin-top:16px}
+.budget-label{
+  display:flex;justify-content:space-between;font-size:11px;
+  color:var(--text-secondary);margin-bottom:6px;
+}
+.budget-track{
+  height:8px;background:var(--bar-bg);border-radius:4px;overflow:hidden;
+}
+.budget-fill{
+  height:100%;border-radius:4px;background:var(--green);
+  transition:width 800ms var(--ease);
+}
+
+/* === LEARNING FLYWHEEL === */
+.flywheel-card{
+  background:var(--bg-secondary);border-radius:8px;
+  box-shadow:var(--card-shadow);padding:20px 24px;
+  border-left:3px solid var(--purple);
+}
+.flywheel-title{
+  font-size:13px;font-weight:600;margin-bottom:8px;
+  display:flex;align-items:center;gap:8px;
+}
+.flywheel-title svg{width:16px;height:16px;color:var(--purple)}
+.flywheel-patterns{margin-bottom:12px}
+.flywheel-pattern{
+  display:flex;align-items:center;gap:8px;padding:6px 0;
+  font-size:12px;color:var(--text-primary);
+}
+.flywheel-pattern .check{color:var(--green);font-size:14px}
+.flywheel-insight{
+  font-size:12px;line-height:1.6;color:var(--text-secondary);
+  padding:12px 16px;background:var(--bg-primary);border-radius:6px;
+  font-style:italic;
+}
+
+/* === CONTRACT COMPARISON === */
+.compare-overlay{
+  display:none;position:absolute;top:0;right:0;bottom:0;
+  width:340px;background:var(--bg-primary);border-left:0.5px solid var(--separator-strong);
+  z-index:10;overflow-y:auto;box-shadow:-4px 0 20px rgba(0,0,0,0.06);
+  transition:transform 300ms var(--ease);
+}
+.compare-overlay.visible{display:block}
+.compare-header{
+  position:sticky;top:0;z-index:2;
+  padding:16px 20px;background:var(--bg-secondary);
+  border-bottom:0.5px solid var(--separator-strong);
+  font-size:13px;font-weight:600;
+  display:flex;align-items:center;justify-content:space-between;
+}
+.compare-close{
+  width:24px;height:24px;border-radius:6px;border:none;cursor:pointer;
+  background:var(--bg-tertiary);color:var(--text-secondary);
+  display:flex;align-items:center;justify-content:center;
+  font-size:14px;transition:all 150ms var(--ease);
+}
+.compare-close:hover{background:var(--separator-strong);color:var(--text-primary)}
+.compare-body{padding:16px 20px}
+.compare-item{
+  padding:10px 14px;margin-bottom:8px;border-radius:6px;
+  background:var(--compare-bg);border:1px solid var(--compare-border);
+  font-size:12px;line-height:1.5;
+}
+.compare-item-header{
+  display:flex;align-items:center;gap:6px;font-weight:600;margin-bottom:4px;
+}
+.compare-check{color:var(--green);font-size:14px}
+.compare-item-detail{color:var(--text-secondary)}
+.compare-scope{
+  margin-top:16px;padding:12px 14px;border-radius:6px;
+  background:var(--bg-secondary);font-size:11px;color:var(--text-tertiary);
+  line-height:1.6;
+}
+.compare-scope strong{color:var(--text-secondary)}
+
+/* === EXPORT TOAST === */
+.toast{
+  position:fixed;bottom:32px;left:50%;transform:translateX(-50%) translateY(20px);
+  background:var(--text-primary);color:var(--bg-primary);
+  padding:10px 20px;border-radius:8px;font-size:12px;font-weight:500;
+  box-shadow:0 8px 30px rgba(0,0,0,0.3);opacity:0;
+  transition:all 300ms var(--ease);pointer-events:none;z-index:100;
+}
+.toast.visible{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* Scrollbar */
+.report-body::-webkit-scrollbar,.toc-sidebar::-webkit-scrollbar,.compare-overlay::-webkit-scrollbar{width:6px}
+.report-body::-webkit-scrollbar-thumb,.toc-sidebar::-webkit-scrollbar-thumb,.compare-overlay::-webkit-scrollbar-thumb{
+  background:var(--separator-strong);border-radius:3px;
+}
+.report-body::-webkit-scrollbar-track,.toc-sidebar::-webkit-scrollbar-track,.compare-overlay::-webkit-scrollbar-track{
+  background:transparent;
+}
+</style>
+</head>
+<body>
+<div class="window">
+  <!-- TITLEBAR -->
+  <div class="titlebar">
+    <div class="traffic-lights">
+      <div class="traffic-light tl-close"></div>
+      <div class="traffic-light tl-minimize"></div>
+      <div class="traffic-light tl-maximize"></div>
+    </div>
+    <div class="titlebar-title">Mission Report <span>— 用户认证系统</span></div>
+    <div class="titlebar-spacer"></div>
+
+    <label class="tb-toggle" id="compareToggle">
+      <input type="checkbox">
+      <div class="toggle-track"></div>
+      Compare with Contract
+    </label>
+
+    <button class="tb-btn primary" id="exportBtn">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v8m0 0l-3-3m3 3l3-3"/><path d="M2 11v2a1 1 0 001 1h10a1 1 0 001-1v-2"/></svg>
+      Export PDF
+    </button>
+    <button class="btn-theme" id="themeToggle" title="Toggle theme">
+      <svg class="icon-sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="8" cy="8" r="3"/><path d="M8 1v2m0 10v2M1 8h2m10 0h2m-2.5-5.5L11 4m-6 8l-1.5 1.5M13.5 13.5L12 12M4 4L2.5 2.5"/></svg>
+      <svg class="icon-moon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" style="display:none"><path d="M13.5 8.5a5.5 5.5 0 01-7-7 6 6 0 107 7z"/></svg>
+    </button>
+  </div>
+
+  <!-- MAIN CONTENT -->
+  <div class="main-content">
+
+    <!-- TOC SIDEBAR -->
+    <nav class="toc-sidebar">
+      <div class="toc-header">Table of Contents</div>
+      <ul class="toc-list">
+        <li><a class="toc-item active" href="#sec-summary" data-section="sec-summary"><span class="toc-num">1</span>Executive Summary</a></li>
+        <li><a class="toc-item" href="#sec-decisions" data-section="sec-decisions"><span class="toc-num">2</span>Architecture Decisions</a></li>
+        <li><a class="toc-item" href="#sec-evaluator" data-section="sec-evaluator"><span class="toc-num">3</span>Evaluator Review</a></li>
+        <li><a class="toc-item" href="#sec-tasks" data-section="sec-tasks"><span class="toc-num">4</span>Task Completion</a></li>
+        <li><a class="toc-item" href="#sec-limitations" data-section="sec-limitations"><span class="toc-num">5</span>Known Limitations</a></li>
+        <li><a class="toc-item" href="#sec-cost" data-section="sec-cost"><span class="toc-num">6</span>Cost Breakdown</a></li>
+        <li><a class="toc-item" href="#sec-flywheel" data-section="sec-flywheel"><span class="toc-num">7</span>Learning Flywheel</a></li>
+      </ul>
+      <div class="toc-divider"></div>
+      <div class="toc-meta">
+        <strong>Generated</strong><br>2026-03-31 14:28:05<br>
+        <strong>Contract</strong><br>auth-system-v2.yaml<br>
+        <strong>Report ID</strong><br><span style="font-family:var(--font-mono);font-size:10px">RPT-2026-0331-A7F2</span>
+      </div>
+    </nav>
+
+    <!-- REPORT BODY -->
+    <div class="report-body" id="reportBody">
+      <div class="report-inner">
+
+        <!-- 1. Executive Summary -->
+        <div class="report-section" id="sec-summary">
+          <div class="section-header" data-target="sec-summary-body">
+            <svg class="section-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4l4 4-4 4"/></svg>
+            <span class="section-num">01</span>
+            <span class="section-title">Executive Summary</span>
+          </div>
+          <div class="section-body" id="sec-summary-body">
+            <div class="exec-card">
+              <div class="exec-top">
+                <div class="exec-mission-name">用户认证系统</div>
+                <div class="exec-status"><span class="dot"></span>Completed</div>
+              </div>
+              <div class="exec-metrics">
+                <div class="metric-cell">
+                  <div class="metric-label">Duration</div>
+                  <div class="metric-value">8m 42s</div>
+                </div>
+                <div class="metric-cell">
+                  <div class="metric-label">Cost</div>
+                  <div class="metric-value accent">$3.85</div>
+                  <div class="metric-sub">of $30 budget</div>
+                </div>
+                <div class="metric-cell">
+                  <div class="metric-label">Quality</div>
+                  <div class="metric-value green">8.2/10</div>
+                  <div class="metric-sub">avg score</div>
+                </div>
+                <div class="metric-cell">
+                  <div class="metric-label">Review Reduction</div>
+                  <div class="metric-value green">83%</div>
+                  <div class="metric-sub">5/6 auto-approved</div>
+                </div>
+                <div class="metric-cell">
+                  <div class="metric-label">Auto-fixes</div>
+                  <div class="metric-value">2</div>
+                  <div class="metric-sub">by Evaluator</div>
+                </div>
+                <div class="metric-cell">
+                  <div class="metric-label">Tasks</div>
+                  <div class="metric-value">6/6</div>
+                  <div class="metric-sub">completed</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 2. Architecture Decisions -->
+        <div class="report-section" id="sec-decisions">
+          <div class="section-header" data-target="sec-decisions-body">
+            <svg class="section-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4l4 4-4 4"/></svg>
+            <span class="section-num">02</span>
+            <span class="section-title">Architecture Decisions &amp; Trade-offs</span>
+          </div>
+          <div class="section-body" id="sec-decisions-body">
+
+            <!-- Decision 1 -->
+            <div class="decision-card">
+              <div class="decision-header">
+                <span class="decision-num">D-1</span>
+                <span class="decision-title">JWT (stateless) vs Session (stateful)</span>
+                <span class="decision-chose">Chose: JWT</span>
+              </div>
+              <div class="decision-body">
+                <div class="decision-row">
+                  <span class="decision-row-label">Rationale</span>
+                  <span class="decision-row-value">Stateless 架构, 零成本水平扩展, 无需引入 Redis 依赖</span>
+                </div>
+                <div class="decision-row">
+                  <span class="decision-row-label">Trade-off</span>
+                  <span class="decision-row-value">Token 签发后无法立即撤销；如需强制登出功能，后续必须实现 token blacklist</span>
+                </div>
+                <div class="decision-row">
+                  <span class="decision-row-label">Risk</span>
+                  <span class="decision-row-value">若业务未来要求实时吊销能力，需引入 Redis/DB 查询，部分抵消 stateless 优势</span>
+                </div>
+              </div>
+              <div class="decision-footer">
+                <span class="vote-label">Do you agree with this decision?</span>
+                <div class="vote-buttons">
+                  <button class="vote-btn agree" data-decision="1" data-vote="agree">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8.5l4 4 8-8"/></svg>
+                    Agree <span class="vote-count">12</span>
+                  </button>
+                  <button class="vote-btn disagree" data-decision="1" data-vote="disagree">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+                    Disagree <span class="vote-count">3</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Decision 2 -->
+            <div class="decision-card">
+              <div class="decision-header">
+                <span class="decision-num">D-2</span>
+                <span class="decision-title">bcrypt (cost=12) vs argon2id</span>
+                <span class="decision-chose">Chose: bcrypt</span>
+              </div>
+              <div class="decision-body">
+                <div class="decision-row">
+                  <span class="decision-row-label">Rationale</span>
+                  <span class="decision-row-value">成熟生态、无 native compilation 依赖，跨平台兼容性更优</span>
+                </div>
+                <div class="decision-row">
+                  <span class="decision-row-label">Trade-off</span>
+                  <span class="decision-row-value">在同等安全级别下比 argon2id 慢约 40%</span>
+                </div>
+                <div class="decision-row">
+                  <span class="decision-row-label">Note</span>
+                  <span class="decision-row-value">已评估 argon2id，但 node-argon2 在 Alpine Linux 上存在构建问题，影响 Docker 部署</span>
+                </div>
+              </div>
+              <div class="decision-footer">
+                <span class="vote-label">Do you agree with this decision?</span>
+                <div class="vote-buttons">
+                  <button class="vote-btn agree" data-decision="2" data-vote="agree">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8.5l4 4 8-8"/></svg>
+                    Agree <span class="vote-count">9</span>
+                  </button>
+                  <button class="vote-btn disagree" data-decision="2" data-vote="disagree">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+                    Disagree <span class="vote-count">5</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Decision 3 -->
+            <div class="decision-card">
+              <div class="decision-header">
+                <span class="decision-num">D-3</span>
+                <span class="decision-title">Email link vs Verification code (密码重置)</span>
+                <span class="decision-chose">Chose: Email link</span>
+              </div>
+              <div class="decision-body">
+                <div class="decision-row">
+                  <span class="decision-row-label">Rationale</span>
+                  <span class="decision-row-value">更顺畅的用户体验，无需手动输入验证码</span>
+                </div>
+                <div class="decision-row">
+                  <span class="decision-row-label">Trade-off</span>
+                  <span class="decision-row-value">依赖邮件送达率；邮件客户端可能预取链接导致 token 提前消耗</span>
+                </div>
+                <div class="decision-row">
+                  <span class="decision-row-label">Mitigation</span>
+                  <span class="decision-row-value">1h 过期 + 一次性使用 + 防预取 POST 确认页（链接打开后需点击确认按钮）</span>
+                </div>
+              </div>
+              <div class="decision-footer">
+                <span class="vote-label">Do you agree with this decision?</span>
+                <div class="vote-buttons">
+                  <button class="vote-btn agree" data-decision="3" data-vote="agree">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8.5l4 4 8-8"/></svg>
+                    Agree <span class="vote-count">14</span>
+                  </button>
+                  <button class="vote-btn disagree" data-decision="3" data-vote="disagree">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+                    Disagree <span class="vote-count">1</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- 3. Evaluator Review -->
+        <div class="report-section" id="sec-evaluator">
+          <div class="section-header" data-target="sec-evaluator-body">
+            <svg class="section-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4l4 4-4 4"/></svg>
+            <span class="section-num">03</span>
+            <span class="section-title">Evaluator Review Summary</span>
+          </div>
+          <div class="section-body" id="sec-evaluator-body">
+            <div class="eval-timeline">
+
+              <div class="eval-round">
+                <div class="eval-round-dot issues">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 5v3m0 3h.01"/></svg>
+                </div>
+                <div class="eval-round-title">Round 1 — 3 findings</div>
+
+                <div class="eval-item">
+                  <span class="eval-icon">❌</span>
+                  <div class="eval-detail">
+                    <div class="eval-desc">Register API 返回了 <code style="font-family:var(--font-mono);font-size:11px;background:var(--bg-tertiary);padding:1px 4px;border-radius:3px">password_hash</code> 字段<span class="eval-tag security">Security</span><span class="eval-tag fix">Auto-fixed</span></div>
+                  </div>
+                </div>
+
+                <div class="eval-item">
+                  <span class="eval-icon">❌</span>
+                  <div class="eval-detail">
+                    <div class="eval-desc">JWT 过期时间硬编码为 24h，缺乏灵活性<span class="eval-tag fix">Auto-fixed</span></div>
+                    <div style="font-size:11px;color:var(--text-tertiary);margin-top:3px">→ 已改为 env-configurable (<code style="font-family:var(--font-mono);font-size:10px;background:var(--bg-tertiary);padding:1px 3px;border-radius:2px">JWT_EXPIRY</code>)</div>
+                  </div>
+                </div>
+
+                <div class="eval-item">
+                  <span class="eval-icon">⚠️</span>
+                  <div class="eval-detail">
+                    <div class="eval-desc">密码强度验证仅检查长度<span class="eval-tag flagged">Suggestion</span></div>
+                    <div style="font-size:11px;color:var(--text-tertiary);margin-top:3px">建议增加大写/小写/数字/特殊字符规则</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="eval-round">
+                <div class="eval-round-dot pass">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3 3 7-7"/></svg>
+                </div>
+                <div class="eval-round-title">Round 2 — All passed ✓</div>
+
+                <div class="eval-item" style="background:var(--badge-green-bg)">
+                  <span class="eval-icon">✅</span>
+                  <div class="eval-detail">
+                    <div class="eval-desc" style="color:var(--badge-green-text)">所有自动修复已验证通过；安全审查无新发现</div>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+        <!-- 4. Task Completion Matrix -->
+        <div class="report-section" id="sec-tasks">
+          <div class="section-header" data-target="sec-tasks-body">
+            <svg class="section-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4l4 4-4 4"/></svg>
+            <span class="section-num">04</span>
+            <span class="section-title">Task Completion Matrix</span>
+          </div>
+          <div class="section-body" id="sec-tasks-body">
+            <table class="task-table">
+              <thead>
+                <tr>
+                  <th>Task</th>
+                  <th>Agent</th>
+                  <th>Score</th>
+                  <th>Cost</th>
+                  <th>Duration</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="task-name">T1 User Model</td>
+                  <td class="task-agent">Agent-1</td>
+                  <td class="task-score high">9/10</td>
+                  <td class="task-cost">$0.42</td>
+                  <td class="task-duration">2m 15s</td>
+                  <td><span class="task-status approved">✅ Auto-approved</span></td>
+                </tr>
+                <tr>
+                  <td class="task-name">T2 Register API</td>
+                  <td class="task-agent">Agent-1</td>
+                  <td class="task-score high">8.5/10</td>
+                  <td class="task-cost">$0.65</td>
+                  <td class="task-duration">3m 02s</td>
+                  <td><span class="task-status approved">✅ Auto-approved (1 fix)</span></td>
+                </tr>
+                <tr>
+                  <td class="task-name">T3 Login + JWT</td>
+                  <td class="task-agent">Agent-2</td>
+                  <td class="task-score high">8/10</td>
+                  <td class="task-cost">$0.78</td>
+                  <td class="task-duration">2m 48s</td>
+                  <td><span class="task-status approved">✅ Auto-approved</span></td>
+                </tr>
+                <tr>
+                  <td class="task-name">T4 Auth Middleware</td>
+                  <td class="task-agent">Agent-3</td>
+                  <td class="task-score mid">6.5/10</td>
+                  <td class="task-cost">$0.52</td>
+                  <td class="task-duration">1m 35s</td>
+                  <td><span class="task-status reviewed">⚡ Reviewed</span></td>
+                </tr>
+                <tr>
+                  <td class="task-name">T5 Password Reset</td>
+                  <td class="task-agent">Agent-4</td>
+                  <td class="task-score high">8/10</td>
+                  <td class="task-cost">$0.92</td>
+                  <td class="task-duration">3m 15s</td>
+                  <td><span class="task-status approved">✅ Auto-approved</span></td>
+                </tr>
+                <tr>
+                  <td class="task-name">T6 E2E Tests</td>
+                  <td class="task-agent">Agent-5</td>
+                  <td class="task-score high">9/10</td>
+                  <td class="task-cost">$0.56</td>
+                  <td class="task-duration">1m 47s</td>
+                  <td><span class="task-status approved">✅ Auto-approved</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 5. Known Limitations -->
+        <div class="report-section" id="sec-limitations">
+          <div class="section-header" data-target="sec-limitations-body">
+            <svg class="section-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4l4 4-4 4"/></svg>
+            <span class="section-num">05</span>
+            <span class="section-title">Known Limitations</span>
+          </div>
+          <div class="section-body" id="sec-limitations-body">
+            <ul class="limitation-list">
+              <li class="limitation-item">
+                <div class="limitation-icon">!</div>
+                <div>
+                  <div class="limitation-text">Rate limiting 未实现</div>
+                  <div class="limitation-note">建议在 API gateway 层或使用 express-rate-limit 中间件添加</div>
+                </div>
+              </li>
+              <li class="limitation-item">
+                <div class="limitation-icon">!</div>
+                <div>
+                  <div class="limitation-text">CSRF 防护未添加</div>
+                  <div class="limitation-note">如果切换到 SSR 渲染模式，需添加 CSRF token 机制</div>
+                </div>
+              </li>
+              <li class="limitation-item">
+                <div class="limitation-icon">!</div>
+                <div>
+                  <div class="limitation-text">bcrypt cost=12 高并发下未做负载测试</div>
+                  <div class="limitation-note">高并发注册场景下可能成为瓶颈，建议使用队列或降低 cost factor</div>
+                </div>
+              </li>
+              <li class="limitation-item">
+                <div class="limitation-icon">—</div>
+                <div>
+                  <div class="limitation-text">OAuth 第三方登录被排除</div>
+                  <div class="limitation-note">根据 Contract 约定，OAuth 不在本次 mission 范围内</div>
+                </div>
+              </li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- 6. Cost Breakdown -->
+        <div class="report-section" id="sec-cost">
+          <div class="section-header" data-target="sec-cost-body">
+            <svg class="section-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4l4 4-4 4"/></svg>
+            <span class="section-num">06</span>
+            <span class="section-title">Cost Breakdown</span>
+          </div>
+          <div class="section-body" id="sec-cost-body">
+            <div class="cost-grid">
+              <div class="cost-card">
+                <div class="cost-card-title">By Model</div>
+                <div class="cost-model-row">
+                  <span class="cost-model-name"><span class="dot" style="background:var(--accent)"></span>Sonnet 4</span>
+                  <span class="cost-model-tokens">38.1K tokens</span>
+                  <span class="cost-model-amount">$3.05</span>
+                </div>
+                <div class="cost-model-row">
+                  <span class="cost-model-name"><span class="dot" style="background:var(--green)"></span>Haiku 4</span>
+                  <span class="cost-model-tokens">10.1K tokens</span>
+                  <span class="cost-model-amount">$0.80</span>
+                </div>
+                <div class="budget-meter">
+                  <div class="budget-label">
+                    <span>Budget utilization</span>
+                    <span style="font-weight:600;font-family:var(--font-mono)">12.8%</span>
+                  </div>
+                  <div class="budget-track">
+                    <div class="budget-fill" style="width:12.8%"></div>
+                  </div>
+                  <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-tertiary);margin-top:4px;font-family:var(--font-mono)">
+                    <span>$3.85 spent</span>
+                    <span>$30.00 budget</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="cost-card">
+                <div class="cost-card-title">By Task</div>
+                <div class="bar-chart">
+                  <div class="bar-row">
+                    <span class="bar-label">T1 Model</span>
+                    <div class="bar-track"><div class="bar-fill c1" style="width:45.6%">$0.42</div></div>
+                  </div>
+                  <div class="bar-row">
+                    <span class="bar-label">T2 Register</span>
+                    <div class="bar-track"><div class="bar-fill c2" style="width:70.6%">$0.65</div></div>
+                  </div>
+                  <div class="bar-row">
+                    <span class="bar-label">T3 Login</span>
+                    <div class="bar-track"><div class="bar-fill c3" style="width:84.7%">$0.78</div></div>
+                  </div>
+                  <div class="bar-row">
+                    <span class="bar-label">T4 Auth</span>
+                    <div class="bar-track"><div class="bar-fill c4" style="width:56.5%">$0.52</div></div>
+                  </div>
+                  <div class="bar-row">
+                    <span class="bar-label">T5 Reset</span>
+                    <div class="bar-track"><div class="bar-fill c5" style="width:100%">$0.92</div></div>
+                  </div>
+                  <div class="bar-row">
+                    <span class="bar-label">T6 Tests</span>
+                    <div class="bar-track"><div class="bar-fill c1" style="width:60.8%">$0.56</div></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 7. Learning Flywheel -->
+        <div class="report-section" id="sec-flywheel">
+          <div class="section-header" data-target="sec-flywheel-body">
+            <svg class="section-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4l4 4-4 4"/></svg>
+            <span class="section-num">07</span>
+            <span class="section-title">Learning Flywheel</span>
+          </div>
+          <div class="section-body" id="sec-flywheel-body">
+            <div class="flywheel-card">
+              <div class="flywheel-title">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1a7 7 0 110 14A7 7 0 018 1z"/><path d="M8 4v4l2.5 1.5"/></svg>
+                Past Decision Patterns
+              </div>
+              <div class="flywheel-patterns">
+                <div class="flywheel-pattern"><span class="check">✓</span> 偏好 stateless 架构 (3/3 reports)</div>
+                <div class="flywheel-pattern"><span class="check">✓</span> 优先选择生态成熟度高于裸性能 (2/3 reports)</div>
+                <div class="flywheel-pattern"><span class="check">✓</span> 重视用户体验流畅性 > 实现复杂度 (3/3 reports)</div>
+              </div>
+              <div class="flywheel-insight">
+                "Based on your feedback on 3 previous reports, the system learned: You prefer stateless auth, prioritize ecosystem maturity over raw performance, and favor smoother UX even when it introduces edge-case complexity."
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- CONTRACT COMPARISON PANEL -->
+    <div class="compare-overlay" id="comparePanel">
+      <div class="compare-header">
+        Mission Contract
+        <button class="compare-close" id="compareClose">×</button>
+      </div>
+      <div class="compare-body">
+        <div style="font-size:11px;color:var(--text-tertiary);margin-bottom:12px">
+          <span style="font-family:var(--font-mono);font-size:10px">auth-system-v2.yaml</span> — 6 deliverables
+        </div>
+
+        <div class="compare-item">
+          <div class="compare-item-header"><span class="compare-check">✅</span> User Model + DB Schema</div>
+          <div class="compare-item-detail">Mongoose schema with email unique index, bcrypt hashed password, timestamps</div>
+        </div>
+        <div class="compare-item">
+          <div class="compare-item-header"><span class="compare-check">✅</span> Register API (POST /auth/register)</div>
+          <div class="compare-item-detail">Email validation, duplicate check, password hashing, sanitized response</div>
+        </div>
+        <div class="compare-item">
+          <div class="compare-item-header"><span class="compare-check">✅</span> Login + JWT Issuance</div>
+          <div class="compare-item-detail">Credential verification, JWT signing with configurable expiry, refresh token</div>
+        </div>
+        <div class="compare-item">
+          <div class="compare-item-header"><span class="compare-check">✅</span> Auth Middleware</div>
+          <div class="compare-item-detail">Bearer token extraction, JWT verification, user injection into req context</div>
+        </div>
+        <div class="compare-item">
+          <div class="compare-item-header"><span class="compare-check">✅</span> Password Reset Flow</div>
+          <div class="compare-item-detail">Email link with 1h expiry, one-time use token, POST confirmation</div>
+        </div>
+        <div class="compare-item">
+          <div class="compare-item-header"><span class="compare-check">✅</span> E2E Test Suite</div>
+          <div class="compare-item-detail">Registration, login, auth guard, reset flow, error cases — 18 test cases</div>
+        </div>
+
+        <div class="compare-scope">
+          <strong>Excluded from scope</strong><br>
+          OAuth / social login, 2FA, admin panel, rate limiting, CSRF
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast">PDF export started — opening save dialog...</div>
+
+<script>
+(function(){
+  const html = document.documentElement;
+  const themeBtn = document.getElementById('themeToggle');
+  const sunIcon = themeBtn.querySelector('.icon-sun');
+  const moonIcon = themeBtn.querySelector('.icon-moon');
+  const reportBody = document.getElementById('reportBody');
+  const tocItems = document.querySelectorAll('.toc-item');
+  const sections = document.querySelectorAll('.report-section');
+  const compareToggle = document.getElementById('compareToggle');
+  const compareCheckbox = compareToggle.querySelector('input');
+  const comparePanel = document.getElementById('comparePanel');
+  const compareClose = document.getElementById('compareClose');
+  const exportBtn = document.getElementById('exportBtn');
+  const toast = document.getElementById('toast');
+
+  /* Theme */
+  themeBtn.addEventListener('click', function(){
+    const dark = html.getAttribute('data-theme') === 'dark';
+    html.setAttribute('data-theme', dark ? 'light' : 'dark');
+    sunIcon.style.display = dark ? '' : 'none';
+    moonIcon.style.display = dark ? 'none' : '';
+  });
+
+  /* Scrollspy */
+  const sectionIds = Array.from(sections).map(s => s.id);
+  function updateScrollspy(){
+    let active = sectionIds[0];
+    const scrollTop = reportBody.scrollTop + 80;
+    for(const id of sectionIds){
+      const el = document.getElementById(id);
+      if(el && el.offsetTop <= scrollTop) active = id;
+    }
+    tocItems.forEach(item => {
+      item.classList.toggle('active', item.getAttribute('data-section') === active);
+    });
+  }
+  reportBody.addEventListener('scroll', updateScrollspy);
+
+  /* TOC click */
+  tocItems.forEach(item => {
+    item.addEventListener('click', function(e){
+      e.preventDefault();
+      const target = document.getElementById(this.getAttribute('data-section'));
+      if(target){
+        reportBody.scrollTo({top: target.offsetTop - 16, behavior: 'smooth'});
+      }
+    });
+  });
+
+  /* Collapsible sections */
+  document.querySelectorAll('.section-header').forEach(header => {
+    header.addEventListener('click', function(){
+      const targetId = this.getAttribute('data-target');
+      const body = document.getElementById(targetId);
+      if(!body) return;
+      const isCollapsed = body.classList.contains('collapsed');
+      if(isCollapsed){
+        body.classList.remove('collapsed');
+        body.style.maxHeight = body.scrollHeight + 'px';
+        this.classList.remove('collapsed');
+        setTimeout(() => body.style.maxHeight = 'none', 400);
+      } else {
+        body.style.maxHeight = body.scrollHeight + 'px';
+        requestAnimationFrame(() => {
+          body.classList.add('collapsed');
+          body.style.maxHeight = '0px';
+          this.classList.add('collapsed');
+        });
+      }
+    });
+  });
+
+  /* Vote buttons */
+  document.querySelectorAll('.vote-btn').forEach(btn => {
+    btn.addEventListener('click', function(){
+      const decision = this.getAttribute('data-decision');
+      const vote = this.getAttribute('data-vote');
+      const siblings = this.parentElement.querySelectorAll('.vote-btn');
+      const wasVoted = this.classList.contains('voted');
+
+      siblings.forEach(s => s.classList.remove('voted'));
+
+      if(!wasVoted){
+        this.classList.add('voted');
+        const countEl = this.querySelector('.vote-count');
+        const cur = parseInt(countEl.textContent);
+        countEl.textContent = cur + 1;
+        this.style.transform = 'scale(1.05)';
+        setTimeout(() => this.style.transform = '', 200);
+      }
+    });
+  });
+
+  /* Contract comparison */
+  compareCheckbox.addEventListener('change', function(){
+    comparePanel.classList.toggle('visible', this.checked);
+  });
+  compareClose.addEventListener('click', function(){
+    compareCheckbox.checked = false;
+    comparePanel.classList.remove('visible');
+  });
+
+  /* Export */
+  exportBtn.addEventListener('click', function(){
+    toast.classList.add('visible');
+    this.style.transform = 'scale(0.95)';
+    setTimeout(() => { this.style.transform = ''; }, 150);
+    setTimeout(() => toast.classList.remove('visible'), 2500);
+  });
+
+  /* Init scrollspy */
+  updateScrollspy();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,1772 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Swarm Commander — Pre-flight Chat</title>
+<style>
+/* ============================================================
+   CSS VARIABLES — Apple Design Language
+   ============================================================ */
+:root {
+  --bg-primary: #FFFFFF;
+  --bg-secondary: #F5F5F7;
+  --bg-tertiary: #E8E8ED;
+  --bg-elevated: #FFFFFF;
+  --bg-sidebar: rgba(246, 246, 246, 0.82);
+  --bg-chat: #F5F5F7;
+  --text-primary: #1D1D1F;
+  --text-secondary: #6E6E73;
+  --text-tertiary: #AEAEB2;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.15);
+  --accent: #007AFF;
+  --accent-hover: #0066D6;
+  --accent-light: rgba(0, 122, 255, 0.1);
+  --green: #34C759;
+  --green-light: rgba(52, 199, 89, 0.1);
+  --red: #FF3B30;
+  --red-light: rgba(255, 59, 48, 0.1);
+  --orange: #FF9500;
+  --orange-light: rgba(255, 149, 0, 0.1);
+  --yellow: #FFCC00;
+  --purple: #AF52DE;
+  --surface-hover: rgba(0, 0, 0, 0.04);
+  --surface-active: rgba(0, 0, 0, 0.08);
+  --msg-agent-bg: #E8E8ED;
+  --msg-user-bg: var(--accent);
+  --msg-user-text: #FFFFFF;
+  --choice-bg: #FFFFFF;
+  --choice-border: rgba(0, 0, 0, 0.12);
+  --choice-hover: rgba(0, 122, 255, 0.06);
+  --contract-bg: #FFFFFF;
+  --input-bg: #FFFFFF;
+  --seg-bg: rgba(0, 0, 0, 0.06);
+  --seg-active: #FFFFFF;
+  --seg-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 0 0 0.5px rgba(0,0,0,0.04);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.08);
+  --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
+  --shadow-window: 0 0 0 0.5px rgba(0,0,0,0.1), 0 12px 40px rgba(0,0,0,0.15), 0 40px 80px rgba(0,0,0,0.1);
+  --ease-out: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --duration-fast: 150ms;
+  --duration-normal: 250ms;
+  --duration-slow: 400ms;
+  --topbar-height: 52px;
+  --statusbar-height: 36px;
+  --chat-width: 420px;
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --bg-primary: #1C1C1E;
+  --bg-secondary: #2C2C2E;
+  --bg-tertiary: #3A3A3C;
+  --bg-elevated: #2C2C2E;
+  --bg-sidebar: rgba(30, 30, 30, 0.82);
+  --bg-chat: #1C1C1E;
+  --text-primary: #F5F5F7;
+  --text-secondary: #98989D;
+  --text-tertiary: #636366;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.15);
+  --accent: #0A84FF;
+  --accent-hover: #409CFF;
+  --accent-light: rgba(10, 132, 255, 0.15);
+  --green: #30D158;
+  --green-light: rgba(48, 209, 88, 0.15);
+  --red: #FF453A;
+  --red-light: rgba(255, 69, 58, 0.15);
+  --orange: #FF9F0A;
+  --orange-light: rgba(255, 159, 10, 0.15);
+  --yellow: #FFD60A;
+  --purple: #BF5AF2;
+  --surface-hover: rgba(255, 255, 255, 0.06);
+  --surface-active: rgba(255, 255, 255, 0.1);
+  --msg-agent-bg: #2C2C2E;
+  --msg-user-bg: #0A84FF;
+  --msg-user-text: #FFFFFF;
+  --choice-bg: #2C2C2E;
+  --choice-border: rgba(255, 255, 255, 0.1);
+  --choice-hover: rgba(10, 132, 255, 0.12);
+  --contract-bg: #2C2C2E;
+  --input-bg: #2C2C2E;
+  --seg-bg: rgba(255, 255, 255, 0.08);
+  --seg-active: #3A3A3C;
+  --seg-shadow: 0 1px 3px rgba(0,0,0,0.2), 0 0 0 0.5px rgba(255,255,255,0.05);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.2);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.3);
+  --shadow-lg: 0 8px 30px rgba(0,0,0,0.4);
+  --shadow-window: 0 0 0 0.5px rgba(255,255,255,0.05), 0 12px 40px rgba(0,0,0,0.4), 0 40px 80px rgba(0,0,0,0.3);
+  color-scheme: dark;
+}
+
+/* ============================================================
+   RESET & BASE
+   ============================================================ */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+               "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  line-height: 1.38;
+  color: var(--text-primary);
+  background: #707070;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.01em;
+}
+
+code, .mono {
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+  font-size: 11.5px;
+}
+
+/* ============================================================
+   WINDOW FRAME
+   ============================================================ */
+.window {
+  width: 1280px;
+  height: 820px;
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: var(--shadow-window);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+  position: relative;
+}
+
+/* ============================================================
+   TOP BAR
+   ============================================================ */
+.topbar {
+  height: var(--topbar-height);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  background: var(--bg-sidebar);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 0.5px solid var(--border);
+  flex-shrink: 0;
+  gap: 12px;
+  position: relative;
+  z-index: 10;
+}
+
+.traffic-lights {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding-right: 8px;
+}
+
+.traffic-light {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  cursor: default;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8px;
+  color: transparent;
+  transition: color var(--duration-fast) var(--ease-out);
+}
+.traffic-lights:hover .traffic-light { color: rgba(0,0,0,0.5); }
+.tl-close { background: #FF5F57; }
+.tl-minimize { background: #FEBC2E; }
+.tl-maximize { background: #28C840; }
+
+.topbar-title {
+  flex: 1;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+.topbar-title span {
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.theme-toggle {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--duration-fast) var(--ease-out);
+  font-size: 16px;
+}
+.theme-toggle:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+/* ============================================================
+   MAIN CONTENT SPLIT
+   ============================================================ */
+.main-content {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ============================================================
+   LEFT PANEL — CHAT
+   ============================================================ */
+.chat-panel {
+  width: var(--chat-width);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 0.5px solid var(--border);
+  background: var(--bg-chat);
+}
+
+.chat-header {
+  padding: 12px 16px;
+  border-bottom: 0.5px solid var(--border);
+  background: var(--bg-sidebar);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  flex-shrink: 0;
+}
+
+.chat-header-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+}
+
+/* Segmented Control */
+.segmented-control {
+  display: flex;
+  background: var(--seg-bg);
+  border-radius: 6px;
+  padding: 2px;
+  gap: 1px;
+  position: relative;
+}
+
+.seg-btn {
+  flex: 1;
+  padding: 5px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+  text-align: center;
+  white-space: nowrap;
+  position: relative;
+  z-index: 1;
+}
+.seg-btn:hover { color: var(--text-primary); }
+.seg-btn.active {
+  color: var(--text-primary);
+  background: var(--seg-active);
+  box-shadow: var(--seg-shadow);
+  font-weight: 600;
+}
+
+/* Chat Messages Area */
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  scroll-behavior: smooth;
+}
+.chat-messages::-webkit-scrollbar { width: 6px; }
+.chat-messages::-webkit-scrollbar-track { background: transparent; }
+.chat-messages::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+
+/* Message Bubbles */
+.msg {
+  max-width: 92%;
+  animation: msgIn var(--duration-normal) var(--ease-out) both;
+}
+.msg.agent { align-self: flex-start; }
+.msg.user { align-self: flex-end; }
+
+@keyframes msgIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.msg-bubble {
+  padding: 8px 12px;
+  border-radius: 14px;
+  font-size: 13px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.msg.agent .msg-bubble {
+  background: var(--msg-agent-bg);
+  color: var(--text-primary);
+  border-bottom-left-radius: 4px;
+}
+.msg.user .msg-bubble {
+  background: var(--msg-user-bg);
+  color: var(--msg-user-text);
+  border-bottom-right-radius: 4px;
+}
+
+.msg-bubble code {
+  background: rgba(0,0,0,0.06);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11.5px;
+}
+[data-theme="dark"] .msg-bubble code {
+  background: rgba(255,255,255,0.08);
+}
+.msg.user .msg-bubble code {
+  background: rgba(255,255,255,0.2);
+}
+
+.msg-label {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  margin-bottom: 4px;
+  padding: 0 4px;
+}
+.msg.user .msg-label { text-align: right; }
+
+/* Choice Buttons */
+.msg-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.choice-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--choice-bg);
+  border: 1px solid var(--choice-border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+  font-size: 12.5px;
+  color: var(--text-primary);
+  text-align: left;
+  width: 100%;
+  font-family: inherit;
+  line-height: 1.38;
+}
+.choice-btn:hover {
+  background: var(--choice-hover);
+  border-color: var(--accent);
+}
+.choice-btn:active {
+  transform: scale(0.98);
+}
+.choice-btn.selected {
+  background: var(--accent-light);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 500;
+  pointer-events: none;
+}
+
+.choice-key {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  background: var(--bg-tertiary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.choice-btn.selected .choice-key {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* Divider */
+.msg-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 500;
+}
+.msg-divider::before, .msg-divider::after {
+  content: '';
+  flex: 1;
+  height: 0.5px;
+  background: var(--border);
+}
+
+/* You-Decide Badge */
+.you-decide {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  background: var(--accent-light);
+  color: var(--accent);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+  border: none;
+  font-family: inherit;
+  margin-top: 6px;
+}
+.you-decide:hover { background: var(--accent); color: #fff; }
+
+/* Chat Input */
+.chat-input-area {
+  padding: 12px 16px;
+  border-top: 0.5px solid var(--border);
+  background: var(--bg-sidebar);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  flex-shrink: 0;
+}
+
+.chat-input-wrapper {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  background: var(--input-bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 4px 4px 4px 12px;
+  transition: border-color var(--duration-fast) var(--ease-out);
+}
+.chat-input-wrapper:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.12);
+}
+
+.chat-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text-primary);
+  padding: 6px 0;
+  resize: none;
+  line-height: 1.38;
+  max-height: 80px;
+}
+.chat-input::placeholder { color: var(--text-tertiary); }
+
+.send-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--duration-fast) var(--ease-out);
+  flex-shrink: 0;
+}
+.send-btn:hover { background: var(--accent-hover); }
+.send-btn:active { transform: scale(0.92); }
+.send-btn svg { width: 14px; height: 14px; }
+
+/* ============================================================
+   RIGHT PANEL — MISSION CONTRACT
+   ============================================================ */
+.contract-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-secondary);
+}
+
+.contract-header {
+  padding: 16px 20px 12px;
+  border-bottom: 0.5px solid var(--border);
+  background: var(--bg-sidebar);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  flex-shrink: 0;
+}
+
+.contract-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+.contract-subtitle {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.contract-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.contract-body::-webkit-scrollbar { width: 6px; }
+.contract-body::-webkit-scrollbar-track { background: transparent; }
+.contract-body::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+
+/* Contract Sections */
+.contract-section {
+  background: var(--contract-bg);
+  border-radius: 8px;
+  border: 0.5px solid var(--border);
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 0.5px solid var(--border);
+}
+
+.section-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.section-dot.green { background: var(--green); }
+.section-dot.blue { background: var(--accent); }
+.section-dot.red { background: var(--red); }
+.section-dot.gray { background: var(--text-tertiary); }
+
+.section-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex: 1;
+}
+
+.section-count {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.section-items {
+  padding: 6px 14px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.contract-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 5px 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-primary);
+  animation: itemFadeIn var(--duration-slow) var(--ease-out) both;
+}
+
+@keyframes itemFadeIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.item-icon {
+  font-size: 11px;
+  margin-top: 1px;
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+}
+.item-icon.green { color: var(--green); }
+.item-icon.blue { color: var(--accent); }
+.item-icon.red { color: var(--red); }
+.item-icon.gray { color: var(--text-tertiary); }
+
+.item-text {
+  flex: 1;
+}
+
+.item-tag {
+  font-size: 9px;
+  font-weight: 500;
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.item-tag.new {
+  background: var(--green-light);
+  color: var(--green);
+}
+
+/* Empty section */
+.section-empty {
+  padding: 12px 14px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+/* Budget/Quality/Duration */
+.contract-footer {
+  padding: 12px 20px 16px;
+  border-top: 0.5px solid var(--border);
+  flex-shrink: 0;
+  background: var(--bg-sidebar);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+
+.contract-settings {
+  display: flex;
+  gap: 12px;
+}
+
+.setting-card {
+  flex: 1;
+  background: var(--contract-bg);
+  border: 0.5px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: var(--shadow-sm);
+}
+
+.setting-label {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+
+.setting-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+}
+
+.setting-unit {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.setting-input {
+  width: 60px;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.setting-input:focus {
+  color: var(--accent);
+}
+
+/* Confirm Button */
+.confirm-btn-area {
+  margin-top: 12px;
+}
+
+.confirm-btn {
+  width: 100%;
+  padding: 10px 16px;
+  border-radius: 8px;
+  border: none;
+  background: var(--green);
+  color: #fff;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.confirm-btn:hover { filter: brightness(1.05); }
+.confirm-btn:active { transform: scale(0.98); }
+.confirm-btn:disabled {
+  background: var(--bg-tertiary);
+  color: var(--text-tertiary);
+  cursor: not-allowed;
+}
+
+/* ============================================================
+   STATUS BAR
+   ============================================================ */
+.statusbar {
+  height: var(--statusbar-height);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  background: var(--bg-sidebar);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border-top: 0.5px solid var(--border);
+  flex-shrink: 0;
+  gap: 16px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.status-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  animation: pulse 2s ease-in-out infinite;
+}
+.status-dot.active { background: var(--green); }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.status-progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.progress-bar-bg {
+  width: 100px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-tertiary);
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width var(--duration-slow) var(--ease-out);
+}
+
+.status-spacer { flex: 1; }
+
+.status-savings {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--green);
+  font-weight: 500;
+}
+
+/* ============================================================
+   TYPING INDICATOR
+   ============================================================ */
+.typing-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px;
+  background: var(--msg-agent-bg);
+  border-radius: 14px;
+  border-bottom-left-radius: 4px;
+  align-self: flex-start;
+  animation: msgIn var(--duration-normal) var(--ease-out) both;
+}
+
+.typing-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  animation: typingBounce 1.4s ease-in-out infinite;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes typingBounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+
+/* ============================================================
+   SCROLLBAR GLOBAL
+   ============================================================ */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+
+/* ============================================================
+   UTILITY
+   ============================================================ */
+.hidden { display: none !important; }
+
+.fade-in {
+  animation: fadeIn var(--duration-normal) var(--ease-out) both;
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+</style>
+</head>
+
+<body>
+<div class="window">
+  <!-- ========== TOP BAR ========== -->
+  <div class="topbar">
+    <div class="traffic-lights">
+      <div class="traffic-light tl-close">×</div>
+      <div class="traffic-light tl-minimize">−</div>
+      <div class="traffic-light tl-maximize">+</div>
+    </div>
+    <div class="topbar-title">Pre-flight <span>— 用户认证系统</span></div>
+    <div class="topbar-actions">
+      <button class="theme-toggle" id="themeToggle" title="切换主题">☀</button>
+    </div>
+  </div>
+
+  <!-- ========== MAIN CONTENT ========== -->
+  <div class="main-content">
+    <!-- LEFT: Chat Panel -->
+    <div class="chat-panel">
+      <div class="chat-header">
+        <div class="chat-header-label">澄清模式</div>
+        <div class="segmented-control" id="modeSelector">
+          <button class="seg-btn active" data-mode="scenario">场景走查</button>
+          <button class="seg-btn" data-mode="devil">魔鬼代言人</button>
+          <button class="seg-btn" data-mode="risk">风险标记</button>
+        </div>
+      </div>
+
+      <div class="chat-messages" id="chatMessages"></div>
+
+      <div class="chat-input-area">
+        <div class="chat-input-wrapper">
+          <input class="chat-input" id="chatInput" type="text" placeholder="输入回复，或点击选项…" />
+          <button class="send-btn" id="sendBtn" title="发送">
+            <svg viewBox="0 0 20 20" fill="currentColor"><path d="M3.105 2.29a.75.75 0 0 1 .814-.12l13.5 6.5a.75.75 0 0 1 0 1.36l-13.5 6.5a.75.75 0 0 1-1.06-.86L4.87 10.5H10a.5.5 0 0 0 0-1H4.87L2.86 3.17a.75.75 0 0 1 .246-.88Z"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: Contract Panel -->
+    <div class="contract-panel">
+      <div class="contract-header">
+        <div class="contract-title">Mission Contract</div>
+        <div class="contract-subtitle">实时构建中 — 随对话更新</div>
+      </div>
+
+      <div class="contract-body" id="contractBody">
+        <!-- Section: 用户明确要求的 -->
+        <div class="contract-section">
+          <div class="section-header">
+            <div class="section-dot green"></div>
+            <div class="section-label">用户明确要求的</div>
+            <div class="section-count" id="greenCount">0</div>
+          </div>
+          <div class="section-items" id="greenItems">
+            <div class="section-empty">等待对话确认…</div>
+          </div>
+        </div>
+
+        <!-- Section: Agent 自主决策 -->
+        <div class="contract-section">
+          <div class="section-header">
+            <div class="section-dot blue"></div>
+            <div class="section-label">Agent 自主决策</div>
+            <div class="section-count" id="blueCount">0</div>
+          </div>
+          <div class="section-items" id="blueItems">
+            <div class="section-empty">当你选择"你决定"时填充</div>
+          </div>
+        </div>
+
+        <!-- Section: 明确不做的 -->
+        <div class="contract-section">
+          <div class="section-header">
+            <div class="section-dot red"></div>
+            <div class="section-label">明确不做的</div>
+            <div class="section-count" id="redCount">0</div>
+          </div>
+          <div class="section-items" id="redItems">
+            <div class="section-empty">排除范围待确认…</div>
+          </div>
+        </div>
+
+        <!-- Section: 环境前提 -->
+        <div class="contract-section">
+          <div class="section-header">
+            <div class="section-dot gray"></div>
+            <div class="section-label">已确认的环境前提</div>
+            <div class="section-count" id="grayCount">0</div>
+          </div>
+          <div class="section-items" id="grayItems">
+            <div class="section-empty">环境信息待确认…</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="contract-footer">
+        <div class="contract-settings">
+          <div class="setting-card">
+            <div class="setting-label">预算上限</div>
+            <div class="setting-value">
+              $<input class="setting-input" type="text" value="30" />
+            </div>
+          </div>
+          <div class="setting-card">
+            <div class="setting-label">质量门槛</div>
+            <div class="setting-value">
+              <input class="setting-input" type="text" value="7" style="width:30px" /><span class="setting-unit">/10</span>
+            </div>
+          </div>
+          <div class="setting-card">
+            <div class="setting-label">最大时长</div>
+            <div class="setting-value">
+              <input class="setting-input" type="text" value="4" style="width:30px" /><span class="setting-unit">小时</span>
+            </div>
+          </div>
+        </div>
+        <div class="confirm-btn-area">
+          <button class="confirm-btn" id="confirmBtn" disabled>
+            <span>✓</span> 签署合同并启动 Swarm
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== STATUS BAR ========== -->
+  <div class="statusbar">
+    <div class="status-item">
+      <div class="status-dot active"></div>
+      <span>Pre-flight 进行中</span>
+    </div>
+    <div class="status-progress">
+      <div class="progress-bar-bg">
+        <div class="progress-bar-fill" id="progressFill" style="width: 0%"></div>
+      </div>
+      <span id="progressText">0%</span>
+    </div>
+    <div class="status-spacer"></div>
+    <div class="status-savings">
+      <span>💡</span>
+      <span id="savingsText">5 分钟澄清 → 节省 ~$50 错误方向成本</span>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   STATE & DATA
+   ============================================================ */
+const state = {
+  mode: 'scenario',
+  messageIndex: {},
+  contractItems: { green: [], blue: [], red: [], gray: [] },
+  progress: 0,
+  animating: false,
+  conversationPlayed: { scenario: false, devil: false, risk: false }
+};
+
+/* ============================================================
+   CONVERSATION DATA — Three Modes
+   ============================================================ */
+const conversations = {
+  scenario: [
+    {
+      type: 'agent',
+      text: '我来走一遍用户认证的完整流程。\n\n首先，用户访问注册页 → 填写邮箱和密码 → 提交。提交后发生什么？',
+      choices: [
+        { key: 'A', text: '直接激活账号', action: 'activate' },
+        { key: 'B', text: '发送验证邮件，点击链接激活', action: 'email_verify' },
+        { key: 'C', text: '人工审核后激活', action: 'manual' }
+      ],
+      contractOnChoice: {
+        email_verify: [
+          { section: 'green', text: '注册后发验证邮件，点击链接激活' }
+        ],
+        activate: [
+          { section: 'green', text: '注册后直接激活，无需邮件验证' }
+        ],
+        manual: [
+          { section: 'green', text: '注册后需人工审核激活' }
+        ]
+      }
+    },
+    {
+      type: 'user-auto',
+      text: '选 B，发验证邮件',
+      selectedAction: 'email_verify'
+    },
+    {
+      type: 'agent',
+      text: '好的，验证邮件链接激活。接下来——登录后的鉴权方式？',
+      choices: [
+        { key: 'A', text: 'JWT (access 15min + refresh 7d)', action: 'jwt' },
+        { key: 'B', text: 'Session + Cookie', action: 'session' }
+      ],
+      contractOnChoice: {
+        jwt: [
+          { section: 'green', text: 'JWT 鉴权：access token 15min + refresh token 7d' }
+        ],
+        session: [
+          { section: 'green', text: 'Session + Cookie 鉴权方式' }
+        ]
+      }
+    },
+    {
+      type: 'user-auto',
+      text: 'JWT，15 分钟 access + 7 天 refresh',
+      selectedAction: 'jwt'
+    },
+    {
+      type: 'agent',
+      text: '用户登录后，如果在另一台设备也登录——同时允许多设备在线吗？还是新登录踢掉旧的？',
+      choices: [
+        { key: 'A', text: '允许多设备同时在线', action: 'multi' },
+        { key: 'B', text: '新登录踢掉旧设备', action: 'kick' },
+        { key: 'C', text: '你决定', action: 'agent_decide' }
+      ],
+      contractOnChoice: {
+        multi: [
+          { section: 'green', text: '允许多设备同时登录' }
+        ],
+        kick: [
+          { section: 'green', text: '新登录踢掉旧设备（单设备在线）' }
+        ],
+        agent_decide: [
+          { section: 'blue', text: '多设备登录策略（Agent 自主决策）' }
+        ]
+      }
+    },
+    {
+      type: 'user-auto',
+      text: '允许多设备同时在线',
+      selectedAction: 'multi'
+    },
+    {
+      type: 'agent',
+      text: '接下来是密码重置流程。用户点"忘记密码" → 输入邮箱 → 收到重置链接 → 设置新密码。\n\n重置链接的过期时间？',
+      choices: [
+        { key: 'A', text: '1 小时', action: '1h' },
+        { key: 'B', text: '24 小时', action: '24h' },
+        { key: 'C', text: '你决定', action: 'agent_decide' }
+      ],
+      contractOnChoice: {
+        '1h': [
+          { section: 'green', text: '密码重置走邮件链接，1 小时过期' }
+        ],
+        '24h': [
+          { section: 'green', text: '密码重置走邮件链接，24 小时过期' }
+        ],
+        agent_decide: [
+          { section: 'blue', text: '密码重置链接过期时间（Agent 自主决策）' }
+        ]
+      }
+    },
+    {
+      type: 'user-auto',
+      text: '1 小时过期',
+      selectedAction: '1h'
+    },
+    {
+      type: 'agent',
+      text: '关于邮件发送——你的项目配了 SMTP 吗？',
+      choices: [
+        { key: 'A', text: '已配 SendGrid，密钥在 .env', action: 'sendgrid' },
+        { key: 'B', text: '还没配，先用 console.log mock', action: 'mock' }
+      ],
+      contractOnChoice: {
+        sendgrid: [
+          { section: 'gray', text: 'SMTP 已配置（SendGrid，密钥在 .env）' }
+        ],
+        mock: [
+          { section: 'gray', text: 'SMTP 未配置，邮件先用 console.log mock' }
+        ]
+      }
+    },
+    {
+      type: 'user-auto',
+      text: '已经配好 SendGrid 了',
+      selectedAction: 'sendgrid'
+    },
+    {
+      type: 'agent',
+      text: '最后确认——项目里已有 <code>User</code> model 吗？我是扩展现有的，还是新建？',
+      choices: [
+        { key: 'A', text: '已有 User model，在上面扩展', action: 'extend' },
+        { key: 'B', text: '没有，新建一个', action: 'new' }
+      ],
+      contractOnChoice: {
+        extend: [
+          { section: 'gray', text: '已有 User model，扩展而非新建' },
+          { section: 'gray', text: '前端 React，后端 Express' }
+        ],
+        new: [
+          { section: 'gray', text: '新建 User model' },
+          { section: 'gray', text: '前端 React，后端 Express' }
+        ]
+      }
+    },
+    {
+      type: 'user-auto',
+      text: '已有 User model，扩展它',
+      selectedAction: 'extend'
+    },
+    {
+      type: 'agent',
+      text: '流程走完了！还有几项次要细节——密码策略规则、登录失败锁定策略、错误消息措辞——这些需要你定还是我来决定？',
+      choices: [
+        { key: 'A', text: '这些你决定就好', action: 'all_agent' },
+        { key: 'B', text: '我来定每一项', action: 'all_user' }
+      ],
+      contractOnChoice: {
+        all_agent: [
+          { section: 'blue', text: '密码策略的具体规则' },
+          { section: 'blue', text: '登录失败锁定策略' },
+          { section: 'blue', text: '错误消息的具体措辞' },
+          { section: 'red', text: 'OAuth 第三方登录' },
+          { section: 'red', text: '双因素认证 (2FA)' },
+          { section: 'red', text: '用户角色 / 权限体系' }
+        ],
+        all_user: [
+          { section: 'green', text: '密码策略：用户手动指定' },
+          { section: 'red', text: 'OAuth 第三方登录' },
+          { section: 'red', text: '双因素认证 (2FA)' },
+          { section: 'red', text: '用户角色 / 权限体系' }
+        ]
+      }
+    },
+    {
+      type: 'user-auto',
+      text: '你决定就好，我信你',
+      selectedAction: 'all_agent'
+    },
+    {
+      type: 'agent',
+      text: '✅ 场景走查完成。Mission Contract 已就绪，请检查右侧合同内容，确认无误后签署启动。'
+    }
+  ],
+
+  devil: [
+    {
+      type: 'agent',
+      text: '我仔细审视了"用户认证系统"的需求，发现以下你没有明确说明的关键点：\n\n<strong>1. 多设备同时登录</strong>：允许？还是新登录踢掉旧的？\n<strong>2. 密码策略</strong>：只要求长度？还是大小写+数字+特殊字符？\n<strong>3. 暴力破解防护</strong>：登录失败 N 次锁定？N 是多少？\n<strong>4. 你的项目已有 User model</strong>，扩展还是新建？\n\n请逐一告诉我你的选择，或者说"你决定"让我自行判断。',
+      choices: [
+        { key: 'A', text: '我逐一回答', action: 'answer_all' },
+        { key: 'B', text: '全部你决定', action: 'agent_all' }
+      ],
+      contractOnChoice: {
+        answer_all: [],
+        agent_all: [
+          { section: 'blue', text: '多设备登录策略' },
+          { section: 'blue', text: '密码策略的具体规则' },
+          { section: 'blue', text: '暴力破解防护策略' },
+          { section: 'blue', text: 'User model 扩展方式' }
+        ]
+      }
+    },
+    {
+      type: 'user-auto',
+      text: '多设备允许同时在线，其他你决定',
+      selectedAction: 'agent_all'
+    },
+    {
+      type: 'agent',
+      text: '收到。继续找漏洞——\n\n<strong>5. 验证邮件重发</strong>：用户没收到邮件，需要"重发验证邮件"按钮吗？频率限制多少？\n<strong>6. JWT 密钥管理</strong>：你有 <code>.env</code> 机制吗？还是硬编码在代码里？\n<strong>7. Refresh Token 存储</strong>：存数据库还是 Redis？被盗用时如何失效？',
+      choices: [
+        { key: 'A', text: '需要重发按钮，60 秒冷却', action: 'resend_60' },
+        { key: 'B', text: '你决定重发策略', action: 'resend_agent' }
+      ],
+      contractOnChoice: {
+        resend_60: [
+          { section: 'green', text: '验证邮件可重发，60 秒冷却时间' },
+          { section: 'gray', text: 'JWT 密钥通过 .env 管理' }
+        ],
+        resend_agent: [
+          { section: 'blue', text: '验证邮件重发策略（Agent 自主决策）' },
+          { section: 'gray', text: 'JWT 密钥通过 .env 管理' }
+        ]
+      }
+    },
+    {
+      type: 'user-auto',
+      text: '要重发按钮，60 秒冷却。.env 已有',
+      selectedAction: 'resend_60'
+    },
+    {
+      type: 'agent',
+      text: '最后一组——明确排除范围，防止我过度发挥：\n\n以下功能是否确认<strong>不做</strong>？\n• OAuth 第三方登录\n• 双因素认证 (2FA)\n• 用户角色 / 权限体系\n• 账号注销/删除功能',
+      choices: [
+        { key: 'A', text: '对，这些都不做', action: 'exclude_all' },
+        { key: 'B', text: '账号注销要做，其他不做', action: 'exclude_partial' }
+      ],
+      contractOnChoice: {
+        exclude_all: [
+          { section: 'green', text: '允许多设备同时登录' },
+          { section: 'red', text: 'OAuth 第三方登录' },
+          { section: 'red', text: '双因素认证 (2FA)' },
+          { section: 'red', text: '用户角色 / 权限体系' },
+          { section: 'red', text: '账号注销 / 删除功能' },
+          { section: 'gray', text: '前端 React，后端 Express' }
+        ],
+        exclude_partial: [
+          { section: 'green', text: '允许多设备同时登录' },
+          { section: 'green', text: '账号注销 / 删除功能' },
+          { section: 'red', text: 'OAuth 第三方登录' },
+          { section: 'red', text: '双因素认证 (2FA)' },
+          { section: 'red', text: '用户角色 / 权限体系' },
+          { section: 'gray', text: '前端 React，后端 Express' }
+        ]
+      }
+    },
+    {
+      type: 'user-auto',
+      text: '都不做，scope 保持精简',
+      selectedAction: 'exclude_all'
+    },
+    {
+      type: 'agent',
+      text: '✅ 魔鬼代言人审查完成。所有 spec 漏洞已填补，Mission Contract 已更新。'
+    }
+  ],
+
+  risk: [
+    {
+      type: 'agent',
+      text: '我评估了这个任务，以下是风险最高的两个点——搞错了代价最大：'
+    },
+    {
+      type: 'agent',
+      text: '<strong>🔴 高风险 #1：密码重置邮件</strong>\n\n依赖外部 SMTP 服务。你已经配置好了吗？还是需要先 mock？\n\n如果没配好就开始开发，整个邮件流程会全部卡住。',
+      choices: [
+        { key: 'A', text: 'SendGrid 已配置，密钥在 .env', action: 'smtp_ready' },
+        { key: 'B', text: '还没配，先用 mock', action: 'smtp_mock' }
+      ],
+      contractOnChoice: {
+        smtp_ready: [
+          { section: 'gray', text: 'SMTP 已配置（SendGrid，密钥在 .env）' },
+          { section: 'green', text: '密码重置走邮件链接' }
+        ],
+        smtp_mock: [
+          { section: 'gray', text: 'SMTP 未配置，先用 console.log mock' },
+          { section: 'green', text: '密码重置流程（邮件先 mock）' }
+        ]
+      }
+    },
+    {
+      type: 'user-auto',
+      text: 'SendGrid 已配好',
+      selectedAction: 'smtp_ready'
+    },
+    {
+      type: 'agent',
+      text: '<strong>🔴 高风险 #2：JWT 密钥管理</strong>\n\n需要 <code>JWT_SECRET</code> 环境变量。你有 <code>.env</code> 机制吗？access token 和 refresh token 用同一个密钥还是分开？',
+      choices: [
+        { key: 'A', text: '有 .env，分开两个密钥', action: 'jwt_separate' },
+        { key: 'B', text: '有 .env，用同一个密钥就行', action: 'jwt_same' },
+        { key: 'C', text: '你决定', action: 'jwt_agent' }
+      ],
+      contractOnChoice: {
+        jwt_separate: [
+          { section: 'green', text: 'JWT 使用分离密钥（access / refresh 各一个）' },
+          { section: 'gray', text: '.env 已配置 JWT 密钥' }
+        ],
+        jwt_same: [
+          { section: 'green', text: 'JWT 使用单一密钥' },
+          { section: 'gray', text: '.env 已配置 JWT 密钥' }
+        ],
+        jwt_agent: [
+          { section: 'blue', text: 'JWT 密钥策略（Agent 自主决策）' },
+          { section: 'gray', text: '.env 已配置 JWT 密钥' }
+        ]
+      }
+    },
+    {
+      type: 'user-auto',
+      text: '分开两个密钥，更安全',
+      selectedAction: 'jwt_separate'
+    },
+    {
+      type: 'agent',
+      text: '这两个高风险点已确认。其他部分（注册流程、登录逻辑、密码策略等）我有足够信心独立完成。\n\n自动填充合理默认值：',
+      contractItems: [
+        { section: 'green', text: 'JWT 鉴权：access 15min + refresh 7d' },
+        { section: 'green', text: '注册后发验证邮件激活' },
+        { section: 'blue', text: '密码策略具体规则' },
+        { section: 'blue', text: '登录失败锁定策略' },
+        { section: 'blue', text: '错误消息措辞' },
+        { section: 'red', text: 'OAuth 第三方登录' },
+        { section: 'red', text: '双因素认证 (2FA)' },
+        { section: 'red', text: '用户角色 / 权限体系' },
+        { section: 'gray', text: '已有 User model，扩展而非新建' },
+        { section: 'gray', text: '前端 React，后端 Express' }
+      ]
+    },
+    {
+      type: 'agent',
+      text: '✅ 风险标记完成。只花了 2 个问题就覆盖了关键风险。Mission Contract 已就绪。'
+    }
+  ]
+};
+
+/* ============================================================
+   DOM REFS
+   ============================================================ */
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => document.querySelectorAll(sel);
+
+const chatMessages = $('#chatMessages');
+const chatInput = $('#chatInput');
+const sendBtn = $('#sendBtn');
+const themeToggle = $('#themeToggle');
+const confirmBtn = $('#confirmBtn');
+const progressFill = $('#progressFill');
+const progressText = $('#progressText');
+
+/* ============================================================
+   THEME TOGGLE
+   ============================================================ */
+themeToggle.addEventListener('click', () => {
+  const html = document.documentElement;
+  const isDark = html.getAttribute('data-theme') === 'dark';
+  html.setAttribute('data-theme', isDark ? 'light' : 'dark');
+  themeToggle.textContent = isDark ? '☀' : '☾';
+});
+
+/* ============================================================
+   SEGMENTED CONTROL (MODE SWITCHING)
+   ============================================================ */
+$$('.seg-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (state.animating) return;
+    $$('.seg-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    state.mode = btn.dataset.mode;
+    switchMode(state.mode);
+  });
+});
+
+function switchMode(mode) {
+  resetContract();
+  chatMessages.innerHTML = '';
+  state.progress = 0;
+  updateProgress(0);
+  confirmBtn.disabled = true;
+
+  if (!state.conversationPlayed[mode]) {
+    state.conversationPlayed[mode] = true;
+    playConversation(mode);
+  } else {
+    playConversation(mode, true);
+  }
+}
+
+/* ============================================================
+   PLAY CONVERSATION
+   ============================================================ */
+async function playConversation(mode, instant = false) {
+  const msgs = conversations[mode];
+  state.animating = true;
+  const totalSteps = msgs.length;
+  let lastAgentMsg = null;
+
+  for (let i = 0; i < msgs.length; i++) {
+    const msg = msgs[i];
+    const delay = instant ? 50 : 400;
+
+    if (msg.type === 'agent') {
+      if (!instant) {
+        showTyping();
+        await sleep(800);
+        removeTyping();
+      }
+      renderAgentMessage(msg, mode, i);
+      lastAgentMsg = msg;
+
+      if (msg.contractItems) {
+        await sleep(instant ? 30 : 300);
+        for (let idx = 0; idx < msg.contractItems.length; idx++) {
+          const item = msg.contractItems[idx];
+          if (instant) {
+            addContractItem(item.section, item.text);
+          } else {
+            await sleep(150);
+            addContractItem(item.section, item.text);
+          }
+        }
+        if (!instant) await sleep(100);
+      }
+    } else if (msg.type === 'user-auto') {
+      if (lastAgentMsg && lastAgentMsg.choices && msg.selectedAction) {
+        markChoiceSelected(msg.selectedAction);
+        if (lastAgentMsg.contractOnChoice && lastAgentMsg.contractOnChoice[msg.selectedAction]) {
+          const items = lastAgentMsg.contractOnChoice[msg.selectedAction];
+          for (let idx = 0; idx < items.length; idx++) {
+            if (instant) {
+              addContractItem(items[idx].section, items[idx].text);
+            } else {
+              await sleep(200);
+              addContractItem(items[idx].section, items[idx].text);
+            }
+          }
+        }
+      }
+      if (!instant) await sleep(300);
+      renderUserMessage(msg.text);
+      lastAgentMsg = null;
+    }
+
+    const pct = Math.round(((i + 1) / totalSteps) * 100);
+    updateProgress(pct);
+
+    if (!instant) await sleep(delay);
+  }
+
+  state.animating = false;
+  confirmBtn.disabled = false;
+  scrollChatBottom();
+}
+
+function markChoiceSelected(action) {
+  const allChoiceContainers = chatMessages.querySelectorAll('.msg-choices');
+  const lastContainer = allChoiceContainers[allChoiceContainers.length - 1];
+  if (!lastContainer) return;
+  lastContainer.querySelectorAll('.choice-btn').forEach(b => {
+    if (b.dataset.action === action) {
+      b.classList.add('selected');
+    } else {
+      b.style.opacity = '0.5';
+    }
+    b.style.pointerEvents = 'none';
+  });
+}
+
+/* ============================================================
+   RENDER MESSAGES
+   ============================================================ */
+function renderAgentMessage(msg, mode, msgIdx) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'msg agent';
+
+  const label = document.createElement('div');
+  label.className = 'msg-label';
+  label.textContent = 'Swarm Agent';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble';
+  bubble.innerHTML = formatText(msg.text);
+
+  wrapper.appendChild(label);
+  wrapper.appendChild(bubble);
+
+  if (msg.choices) {
+    const choicesContainer = document.createElement('div');
+    choicesContainer.className = 'msg-choices';
+    choicesContainer.dataset.msgIdx = msgIdx;
+    choicesContainer.dataset.mode = mode;
+
+    msg.choices.forEach(choice => {
+      const btn = document.createElement('button');
+      btn.className = 'choice-btn';
+      btn.dataset.action = choice.action;
+      btn.innerHTML = `<span class="choice-key">${choice.key}</span><span>${choice.text}</span>`;
+      btn.addEventListener('click', () => handleChoiceClick(btn, msg, choice, mode));
+      choicesContainer.appendChild(btn);
+    });
+
+    wrapper.appendChild(choicesContainer);
+  }
+
+  chatMessages.appendChild(wrapper);
+  scrollChatBottom();
+}
+
+function renderUserMessage(text) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'msg user';
+
+  const label = document.createElement('div');
+  label.className = 'msg-label';
+  label.textContent = '你';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble';
+  bubble.textContent = text;
+
+  wrapper.appendChild(label);
+  wrapper.appendChild(bubble);
+  chatMessages.appendChild(wrapper);
+  scrollChatBottom();
+}
+
+function handleChoiceClick(btn, msg, choice, mode) {
+  const container = btn.closest('.msg-choices');
+  container.querySelectorAll('.choice-btn').forEach(b => {
+    b.classList.remove('selected');
+    b.style.pointerEvents = 'none';
+    b.style.opacity = '0.5';
+  });
+  btn.classList.add('selected');
+  btn.style.opacity = '1';
+
+  const choiceTextMap = {
+    'email_verify': '选 B，发验证邮件',
+    'activate': '直接激活',
+    'manual': '人工审核',
+    'jwt': 'JWT，15 分钟 access + 7 天 refresh',
+    'session': 'Session + Cookie',
+    'multi': '允许多设备同时在线',
+    'kick': '新登录踢掉旧设备',
+    'agent_decide': '你决定',
+    '1h': '1 小时过期',
+    '24h': '24 小时',
+    'sendgrid': '已经配好 SendGrid 了',
+    'mock': '先 mock',
+    'extend': '已有 User model，扩展它',
+    'new': '新建',
+    'all_agent': '你决定就好，我信你',
+    'all_user': '我来定',
+    'answer_all': '我逐一回答',
+    'agent_all': '全部你决定',
+    'resend_60': '要重发按钮，60 秒冷却',
+    'resend_agent': '你决定重发策略',
+    'exclude_all': '都不做，scope 保持精简',
+    'exclude_partial': '账号注销要做，其他不做',
+    'smtp_ready': 'SendGrid 已配好',
+    'smtp_mock': '先 mock',
+    'jwt_separate': '分开两个密钥，更安全',
+    'jwt_same': '用同一个就行',
+    'jwt_agent': '你决定'
+  };
+
+  setTimeout(() => {
+    renderUserMessage(choiceTextMap[choice.action] || choice.text);
+  }, 150);
+
+  if (msg.contractOnChoice && msg.contractOnChoice[choice.action]) {
+    const items = msg.contractOnChoice[choice.action];
+    items.forEach((item, idx) => {
+      setTimeout(() => addContractItem(item.section, item.text), 300 + idx * 200);
+    });
+  }
+}
+
+/* ============================================================
+   CONTRACT MANAGEMENT
+   ============================================================ */
+function resetContract() {
+  state.contractItems = { green: [], blue: [], red: [], gray: [] };
+  ['green', 'blue', 'red', 'gray'].forEach(section => {
+    const container = $(`#${section}Items`);
+    const emptyTexts = {
+      green: '等待对话确认…',
+      blue: '当你选择"你决定"时填充',
+      red: '排除范围待确认…',
+      gray: '环境信息待确认…'
+    };
+    container.innerHTML = `<div class="section-empty">${emptyTexts[section]}</div>`;
+    $(`#${section}Count`).textContent = '0';
+  });
+}
+
+function addContractItem(section, text) {
+  if (state.contractItems[section].includes(text)) return;
+  state.contractItems[section].push(text);
+
+  const container = $(`#${section}Items`);
+  const empty = container.querySelector('.section-empty');
+  if (empty) empty.remove();
+
+  const icons = {
+    green: '✓', blue: '◆', red: '✕', gray: '○'
+  };
+
+  const item = document.createElement('div');
+  item.className = 'contract-item';
+  item.innerHTML = `
+    <span class="item-icon ${section}">${icons[section]}</span>
+    <span class="item-text">${text}</span>
+    <span class="item-tag new">NEW</span>
+  `;
+  container.appendChild(item);
+
+  $(`#${section}Count`).textContent = state.contractItems[section].length;
+
+  setTimeout(() => {
+    const tag = item.querySelector('.item-tag');
+    if (tag) tag.style.transition = 'opacity 1s ease';
+    if (tag) tag.style.opacity = '0';
+    setTimeout(() => { if (tag) tag.remove(); }, 1000);
+  }, 2000);
+}
+
+/* ============================================================
+   PROGRESS
+   ============================================================ */
+function updateProgress(pct) {
+  state.progress = pct;
+  progressFill.style.width = pct + '%';
+  progressText.textContent = pct + '%';
+  if (pct >= 100) {
+    $('#savingsText').textContent = '✅ 澄清完成 — 预计节省 ~$50 错误方向返工成本';
+  }
+}
+
+/* ============================================================
+   TYPING INDICATOR
+   ============================================================ */
+function showTyping() {
+  const typing = document.createElement('div');
+  typing.className = 'typing-indicator';
+  typing.id = 'typingIndicator';
+  typing.innerHTML = '<div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>';
+  chatMessages.appendChild(typing);
+  scrollChatBottom();
+}
+
+function removeTyping() {
+  const el = $('#typingIndicator');
+  if (el) el.remove();
+}
+
+/* ============================================================
+   CHAT INPUT
+   ============================================================ */
+function handleSend() {
+  const text = chatInput.value.trim();
+  if (!text) return;
+  renderUserMessage(text);
+  chatInput.value = '';
+
+  setTimeout(() => {
+    showTyping();
+    setTimeout(() => {
+      removeTyping();
+      const responses = [
+        '明白了，已记录到合同中。',
+        '好的，我会按这个方向执行。',
+        '收到，这个决策已更新到 Mission Contract。',
+        '了解，我会确保这一点。'
+      ];
+      const resp = responses[Math.floor(Math.random() * responses.length)];
+      renderAgentMessage({ text: resp }, state.mode, -1);
+    }, 1200);
+  }, 300);
+}
+
+sendBtn.addEventListener('click', handleSend);
+chatInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    handleSend();
+  }
+});
+
+/* ============================================================
+   CONFIRM BUTTON
+   ============================================================ */
+confirmBtn.addEventListener('click', () => {
+  confirmBtn.innerHTML = '<span>🚀</span> Swarm 已启动！';
+  confirmBtn.style.background = 'var(--accent)';
+  confirmBtn.disabled = true;
+  setTimeout(() => {
+    confirmBtn.innerHTML = '<span>✓</span> 签署合同并启动 Swarm';
+    confirmBtn.style.background = '';
+    confirmBtn.disabled = false;
+  }, 2500);
+});
+
+/* ============================================================
+   UTILITIES
+   ============================================================ */
+function formatText(text) {
+  return text.replace(/\n/g, '<br>');
+}
+
+function scrollChatBottom() {
+  requestAnimationFrame(() => {
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  });
+}
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+/* ============================================================
+   INIT — Auto-play first conversation
+   ============================================================ */
+state.conversationPlayed.scenario = true;
+playConversation('scenario');
+</script>
+</body>
+</html>

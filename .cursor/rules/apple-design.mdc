@@ -1,0 +1,268 @@
+---
+description: Apple-native macOS design language for Swarm Commander. Overrides frontend-design.mdc where conflicting (e.g., system fonts ARE required). Apply when building desktop UI, prototypes, or any macOS-style interface.
+globs: "design/**/*.{html,css,js,tsx,jsx,ts,svelte,vue}"
+alwaysApply: false
+---
+
+# Apple macOS Design Language — Swarm Commander
+
+Build interfaces that feel like they belong on the user's Mac. Every pixel should say "Apple built this."
+
+## Core Philosophy
+
+- **Clarity**: Content is king. UI is a container, not a destination. Minimize chrome.
+- **Deference**: Interface elements step back so content shines through. Use translucency and blur to imply depth without competing for attention.
+- **Depth**: Layered surfaces with blur, shadows, and vibrancy create a physical sense of space.
+
+**Override note**: This rule overrides `frontend-design.mdc` for matched files. Apple style REQUIRES system fonts — do NOT use custom display fonts or Google Fonts for UI text. SF Mono is acceptable for code blocks.
+
+---
+
+## Layout
+
+Three-panel structure (Top Bar + Sidebar + Content). 8px base grid.
+
+```
+┌─────────────────────────────────────────────────┐
+│  ● ● ●  │         Top Bar (48-52px)             │  ← draggable
+├──────────┼──────────────────────────────────────┤
+│ Sidebar  │                                      │
+│ 220-260px│         Main Content                 │
+│ vibrancy │         (solid background)           │
+│          │                                      │
+├──────────┴──────────────────────────────────────┤
+│              Bottom Bar (optional)               │
+└─────────────────────────────────────────────────┘
+```
+
+- Top bar: 48-52px, doubles as window drag zone. Sparse — search, view toggles, global actions only.
+- Sidebar: 220-260px, translucent with vibrancy. Sections with small-caps headers. Active item = subtle highlight, not loud color.
+- Content: solid/opaque background for readability. This is the star — minimize surrounding chrome.
+- Traffic lights: top-left, integrated into sidebar or top bar. 12px circles, 8px spacing. Red #FF5F57, Yellow #FEBC2E, Green #28C840. Gray #CDCDCD when inactive.
+
+---
+
+## Typography
+
+```css
+/* UI text — MUST use system fonts */
+font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+             "Helvetica Neue", Helvetica, Arial, sans-serif;
+
+/* Code / monospace */
+font-family: "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
+```
+
+| Role        | Size | Weight   | Line Height |
+|-------------|------|----------|-------------|
+| Large Title | 26px | Bold 700 | 32px        |
+| Title 1     | 22px | Regular  | 28px        |
+| Title 2     | 17px | Regular  | 22px        |
+| Title 3     | 15px | Semi 600 | 20px        |
+| Body        | 13px | Regular  | 18px        |
+| Callout     | 12px | Regular  | 16px        |
+| Caption     | 11px | Regular  | 14px        |
+| Mini        | 9px  | Medium   | 12px        |
+
+Letter-spacing: -0.01em to -0.03em for headlines. Use opacity or secondary color for de-emphasis, not lighter weight.
+
+---
+
+## Color System (CSS Variables)
+
+Design each mode independently — do NOT simply invert.
+
+```css
+:root {
+  --bg-primary: #FFFFFF;
+  --bg-secondary: #F5F5F7;
+  --bg-tertiary: #E8E8ED;
+  --bg-elevated: #FFFFFF;
+  --text-primary: #1D1D1F;
+  --text-secondary: #6E6E73;
+  --text-tertiary: #AEAEB2;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.15);
+  --accent: #007AFF;
+  --accent-hover: #0066D6;
+  --surface-hover: rgba(0, 0, 0, 0.04);
+  --surface-active: rgba(0, 0, 0, 0.08);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.08);
+  --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-primary: #1C1C1E;
+    --bg-secondary: #2C2C2E;
+    --bg-tertiary: #3A3A3C;
+    --bg-elevated: #2C2C2E;
+    --text-primary: #F5F5F7;
+    --text-secondary: #98989D;
+    --text-tertiary: #636366;
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.15);
+    --accent: #0A84FF;
+    --accent-hover: #409CFF;
+    --surface-hover: rgba(255, 255, 255, 0.06);
+    --surface-active: rgba(255, 255, 255, 0.1);
+    --shadow-sm: 0 1px 3px rgba(0,0,0,0.2);
+    --shadow-md: 0 4px 12px rgba(0,0,0,0.3);
+    --shadow-lg: 0 8px 30px rgba(0,0,0,0.4);
+  }
+}
+```
+
+### Semantic Accent Colors
+
+| Color  | Light   | Dark    |
+|--------|---------|---------|
+| Blue   | #007AFF | #0A84FF |
+| Green  | #34C759 | #30D158 |
+| Red    | #FF3B30 | #FF453A |
+| Orange | #FF9500 | #FF9F0A |
+| Yellow | #FFCC00 | #FFD60A |
+| Purple | #AF52DE | #BF5AF2 |
+| Pink   | #FF2D55 | #FF375F |
+| Teal   | #5AC8FA | #64D2FF |
+
+Accent color = interactive highlights only (buttons, links, selected items, focus rings). Never for large background areas.
+
+---
+
+## Spacing (8px Grid)
+
+| Context             | Value     |
+|---------------------|-----------|
+| Window padding      | 16-20px   |
+| Section gap         | 24px      |
+| Card gap            | 12-16px   |
+| Element gap         | 8px       |
+| Card inner padding  | 12px      |
+| Button padding      | 6px 12px  |
+| Input padding       | 8px 12px  |
+| Icon-to-label gap   | 6px       |
+
+### Interactive Element Sizes
+
+| Element         | Height  |
+|-----------------|---------|
+| Top bar         | 48-52px |
+| Button          | 28px    |
+| Button (large)  | 34px    |
+| Input field     | 28px    |
+| Sidebar row     | 28-32px |
+| List row        | 36-44px |
+| Toolbar icon    | 28x28px |
+
+---
+
+## Corner Radii
+
+| Element        | Radius |
+|----------------|--------|
+| Window         | 10px   |
+| Modal / Panel  | 12px   |
+| Card           | 8px    |
+| Button         | 6px    |
+| Input          | 6px    |
+| Tag / Badge    | 4px    |
+| Toggle (pill)  | 14px   |
+| Tooltip        | 4px    |
+
+Nested rounded corners: parent radius = content padding + child radius.
+
+---
+
+## Shadows (Layered)
+
+The 0.5px border-shadow is essential — it IS the macOS look.
+
+```css
+/* Subtle — cards, buttons */
+box-shadow: 0 0 0 0.5px rgba(0,0,0,0.05), 0 1px 2px rgba(0,0,0,0.06);
+
+/* Medium — dropdowns, popovers */
+box-shadow: 0 0 0 0.5px rgba(0,0,0,0.06), 0 4px 16px rgba(0,0,0,0.1);
+
+/* Heavy — floating windows, modals */
+box-shadow: 0 0 0 0.5px rgba(0,0,0,0.1), 0 2px 8px rgba(0,0,0,0.08),
+            0 8px 30px rgba(0,0,0,0.14), 0 24px 60px rgba(0,0,0,0.08);
+
+/* Window */
+box-shadow: 0 0 0 0.5px rgba(0,0,0,0.1), 0 12px 40px rgba(0,0,0,0.15),
+            0 40px 80px rgba(0,0,0,0.1);
+```
+
+Dark mode: increase shadow opacity ~2x.
+
+---
+
+## Blur, Vibrancy & Translucency
+
+```css
+.sidebar, .toolbar, .floating-panel {
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+
+/* Light sidebar */
+.sidebar { background: rgba(246, 246, 246, 0.72); }
+
+/* Dark sidebar */
+@media (prefers-color-scheme: dark) {
+  .sidebar { background: rgba(30, 30, 30, 0.72); }
+}
+```
+
+Use blur on: sidebars, top bars, floating panels, popovers, toasts, command palette.
+Do NOT blur: main content area, modal overlays (use semi-transparent dark overlay), body text containers.
+Always include `saturate(180%)` to prevent washed-out colors.
+
+---
+
+## Animation
+
+```css
+:root {
+  --ease-out: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
+  --duration-fast: 150ms;
+  --duration-normal: 250ms;
+  --duration-slow: 400ms;
+}
+```
+
+Every state change gets a transition. No interaction without visual feedback. Respect `prefers-reduced-motion`.
+
+---
+
+## Interaction Patterns
+
+- **Keyboard shortcuts**: Every primary action needs one. Show hints in `<kbd>` badges next to actions.
+- **Command Palette** (`Cmd+K`): centered floating modal with backdrop blur for multi-section search.
+- **Drag and drop**: highlight drop zones with dashed accent border + subtle accent background.
+- **Optimistic UI**: show result immediately, process async, revert on failure.
+- **Progressive disclosure**: hide filters/toolbars until content exists. Advanced options behind "..." menus.
+- **Empty states**: centered icon + one line of text + CTA. Hide all secondary UI.
+
+---
+
+## Borders
+
+Use borders sparingly. macOS uses very thin (0.5px), low-opacity borders. Never thick or dark borders. Hierarchy comes from background shade differences, not borders.
+
+---
+
+## Anti-Patterns (NEVER do these)
+
+- Pure black (#000000) backgrounds — Apple uses dark grays (#1C1C1E)
+- Pure white (#FFFFFF) text on dark — use #F5F5F7
+- Thick, visible borders for separation — use background shade differences
+- Heavy drop shadows — use layered, subtle multi-shadow
+- Custom/Google fonts for UI text — system fonts only
+- Accent color on large background areas — highlights and interactive elements only
+- Directly inverting light mode colors for dark mode
+- Cluttered top bar / toolbar — keep it sparse, let it breathe

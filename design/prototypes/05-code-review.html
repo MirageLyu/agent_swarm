@@ -1,0 +1,1709 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Swarm Commander — Code Review</title>
+<style>
+/* ============================================================
+   CSS VARIABLES — Apple Design Language
+   ============================================================ */
+:root {
+  --bg-primary: #FFFFFF;
+  --bg-secondary: #F5F5F7;
+  --bg-tertiary: #E8E8ED;
+  --bg-elevated: #FFFFFF;
+  --bg-sidebar: rgba(246, 246, 246, 0.82);
+  --text-primary: #1D1D1F;
+  --text-secondary: #6E6E73;
+  --text-tertiary: #AEAEB2;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.15);
+  --accent: #007AFF;
+  --accent-hover: #0066D6;
+  --green: #34C759;
+  --green-bg: rgba(52, 199, 89, 0.08);
+  --green-bg-strong: rgba(52, 199, 89, 0.15);
+  --red: #FF3B30;
+  --red-bg: rgba(255, 59, 48, 0.08);
+  --red-bg-strong: rgba(255, 59, 48, 0.15);
+  --orange: #FF9500;
+  --orange-bg: rgba(255, 149, 0, 0.08);
+  --orange-bg-strong: rgba(255, 149, 0, 0.15);
+  --yellow: #FFCC00;
+  --purple: #AF52DE;
+  --teal: #5AC8FA;
+  --surface-hover: rgba(0, 0, 0, 0.04);
+  --surface-active: rgba(0, 0, 0, 0.08);
+  --diff-add-bg: rgba(52, 199, 89, 0.10);
+  --diff-add-gutter: rgba(52, 199, 89, 0.18);
+  --diff-del-bg: rgba(255, 59, 48, 0.08);
+  --diff-del-gutter: rgba(255, 59, 48, 0.15);
+  --diff-hunk-bg: rgba(0, 122, 255, 0.06);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.08);
+  --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
+  --shadow-window: 0 0 0 0.5px rgba(0,0,0,0.1), 0 12px 40px rgba(0,0,0,0.15), 0 40px 80px rgba(0,0,0,0.1);
+  --ease-out: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --duration-fast: 150ms;
+  --duration-normal: 250ms;
+  --duration-slow: 400ms;
+  --sidebar-width: 260px;
+  --topbar-height: 52px;
+  color-scheme: light dark;
+}
+
+[data-theme="dark"] {
+  --bg-primary: #1C1C1E;
+  --bg-secondary: #2C2C2E;
+  --bg-tertiary: #3A3A3C;
+  --bg-elevated: #2C2C2E;
+  --bg-sidebar: rgba(30, 30, 30, 0.82);
+  --text-primary: #F5F5F7;
+  --text-secondary: #98989D;
+  --text-tertiary: #636366;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.15);
+  --accent: #0A84FF;
+  --accent-hover: #409CFF;
+  --green: #30D158;
+  --green-bg: rgba(48, 209, 88, 0.12);
+  --green-bg-strong: rgba(48, 209, 88, 0.22);
+  --red: #FF453A;
+  --red-bg: rgba(255, 69, 58, 0.12);
+  --red-bg-strong: rgba(255, 69, 58, 0.22);
+  --orange: #FF9F0A;
+  --orange-bg: rgba(255, 159, 10, 0.12);
+  --orange-bg-strong: rgba(255, 159, 10, 0.22);
+  --yellow: #FFD60A;
+  --purple: #BF5AF2;
+  --teal: #64D2FF;
+  --surface-hover: rgba(255, 255, 255, 0.06);
+  --surface-active: rgba(255, 255, 255, 0.1);
+  --diff-add-bg: rgba(48, 209, 88, 0.10);
+  --diff-add-gutter: rgba(48, 209, 88, 0.20);
+  --diff-del-bg: rgba(255, 69, 58, 0.10);
+  --diff-del-gutter: rgba(255, 69, 58, 0.18);
+  --diff-hunk-bg: rgba(10, 132, 255, 0.08);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.2);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.3);
+  --shadow-lg: 0 8px 30px rgba(0,0,0,0.4);
+  --shadow-window: 0 0 0 0.5px rgba(255,255,255,0.05), 0 12px 40px rgba(0,0,0,0.4), 0 40px 80px rgba(0,0,0,0.3);
+}
+
+/* ============================================================
+   RESET & BASE
+   ============================================================ */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+               "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  line-height: 1.38;
+  background: #707070;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code, pre, .mono {
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+}
+
+/* ============================================================
+   WINDOW CHROME
+   ============================================================ */
+.window {
+  width: 1280px;
+  height: 820px;
+  background: var(--bg-primary);
+  border-radius: 10px;
+  box-shadow: var(--shadow-window);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+
+/* ============================================================
+   TOP BAR
+   ============================================================ */
+.topbar {
+  height: var(--topbar-height);
+  min-height: var(--topbar-height);
+  background: var(--bg-secondary);
+  border-bottom: 0.5px solid var(--border-strong);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  gap: 12px;
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  position: relative;
+  z-index: 10;
+}
+
+.traffic-lights {
+  display: flex;
+  gap: 8px;
+  margin-right: 8px;
+  flex-shrink: 0;
+}
+
+.traffic-light {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  position: relative;
+}
+
+.traffic-light.close { background: #FF5F57; }
+.traffic-light.minimize { background: #FEBC2E; }
+.traffic-light.maximize { background: #28C840; }
+
+.traffic-light::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 0.5px rgba(0,0,0,0.12);
+}
+
+.topbar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.topbar-title span {
+  color: var(--text-secondary);
+  font-weight: 400;
+  margin-left: 4px;
+}
+
+.topbar-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border-strong);
+  flex-shrink: 0;
+}
+
+.filter-tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  padding: 2px;
+  flex-shrink: 0;
+}
+
+.filter-tab {
+  padding: 4px 12px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+  white-space: nowrap;
+}
+
+.filter-tab:hover {
+  color: var(--text-primary);
+}
+
+.filter-tab.active {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  box-shadow: 0 0.5px 2px rgba(0,0,0,0.08);
+}
+
+.filter-tab .count {
+  display: inline-block;
+  min-width: 16px;
+  height: 16px;
+  line-height: 16px;
+  padding: 0 5px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  text-align: center;
+  margin-left: 4px;
+  background: var(--surface-active);
+  color: var(--text-secondary);
+}
+
+.filter-tab.active .count {
+  background: var(--accent);
+  color: #fff;
+}
+
+.topbar-spacer { flex: 1; }
+
+.topbar-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.btn {
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 0.5px solid var(--border-strong);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  line-height: 1.38;
+}
+
+.btn:hover {
+  background: var(--surface-hover);
+}
+
+.btn:active {
+  transform: scale(0.97);
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+}
+
+.btn-success {
+  background: var(--green);
+  color: #fff;
+  border-color: transparent;
+}
+
+.btn-success:hover {
+  opacity: 0.9;
+}
+
+.btn-danger {
+  color: var(--red);
+  border-color: var(--red);
+}
+
+.btn-danger:hover {
+  background: var(--red-bg);
+}
+
+.btn .kbd {
+  font-size: 10px;
+  font-family: "SF Mono", monospace;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.2);
+  margin-left: 2px;
+}
+
+.theme-toggle {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--duration-fast) var(--ease-out);
+  flex-shrink: 0;
+}
+
+.theme-toggle:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.theme-toggle svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ============================================================
+   MAIN CONTENT
+   ============================================================ */
+.main-content {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+/* ============================================================
+   FILE LIST (LEFT PANEL)
+   ============================================================ */
+.file-list-panel {
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-width);
+  background: var(--bg-sidebar);
+  border-right: 0.5px solid var(--border-strong);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+}
+
+.file-list-header {
+  padding: 12px 16px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-tertiary);
+}
+
+.file-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 8px 8px;
+}
+
+.file-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.file-list::-webkit-scrollbar-thumb {
+  background: var(--text-tertiary);
+  border-radius: 3px;
+  opacity: 0;
+}
+
+.task-group {
+  margin-bottom: 4px;
+}
+
+.task-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: default;
+}
+
+.task-label {
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(0, 122, 255, 0.1);
+}
+
+[data-theme="dark"] .task-label {
+  background: rgba(10, 132, 255, 0.15);
+}
+
+.task-agent {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-weight: 400;
+  margin-left: auto;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+  position: relative;
+}
+
+.file-item:hover {
+  background: var(--surface-hover);
+}
+
+.file-item.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.file-item.active .file-path,
+.file-item.active .file-stats,
+.file-item.active .file-status-badge {
+  color: rgba(255,255,255,0.85);
+}
+
+.file-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.file-icon svg {
+  width: 14px;
+  height: 14px;
+  color: var(--text-tertiary);
+}
+
+.file-item.active .file-icon svg {
+  color: rgba(255,255,255,0.8);
+}
+
+.file-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.file-name {
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-path {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.file-stats {
+  font-size: 10px;
+  font-family: "SF Mono", monospace;
+  color: var(--text-tertiary);
+  display: flex;
+  gap: 3px;
+}
+
+.stat-add { color: var(--green); }
+.stat-del { color: var(--red); }
+.file-item.active .stat-add,
+.file-item.active .stat-del { color: rgba(255,255,255,0.85); }
+
+.file-status-badge {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.file-status-badge svg {
+  width: 10px;
+  height: 10px;
+}
+
+.badge-approved {
+  background: var(--green-bg-strong);
+  color: var(--green);
+}
+
+.badge-needs-review {
+  background: var(--orange-bg-strong);
+  color: var(--orange);
+}
+
+.badge-auto-fixed {
+  background: rgba(0, 122, 255, 0.12);
+  color: var(--accent);
+}
+
+.file-item.active .badge-approved,
+.file-item.active .badge-needs-review,
+.file-item.active .badge-auto-fixed {
+  background: rgba(255,255,255,0.2);
+  color: #fff;
+}
+
+/* ============================================================
+   DIFF VIEWER (RIGHT PANEL)
+   ============================================================ */
+.diff-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+
+.review-summary {
+  padding: 10px 20px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border-bottom: 0.5px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+}
+
+.summary-stat {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.summary-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.diff-file-header {
+  padding: 12px 20px;
+  background: var(--bg-secondary);
+  border-bottom: 0.5px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.diff-file-path {
+  font-family: "SF Mono", monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex: 1;
+}
+
+.diff-file-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.diff-file-badge.new-file {
+  background: var(--green-bg-strong);
+  color: var(--green);
+}
+
+.diff-file-badge.modified {
+  background: var(--orange-bg-strong);
+  color: var(--orange);
+}
+
+.diff-file-score {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--surface-active);
+}
+
+.diff-file-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.diff-viewer {
+  flex: 1;
+  overflow: auto;
+  font-family: "SF Mono", monospace;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.diff-viewer::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.diff-viewer::-webkit-scrollbar-thumb {
+  background: var(--text-tertiary);
+  border-radius: 4px;
+}
+
+.diff-viewer::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Hunk header */
+.diff-hunk {
+  background: var(--diff-hunk-bg);
+  padding: 6px 16px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 500;
+  border-top: 0.5px solid var(--border);
+  border-bottom: 0.5px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.hunk-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.hunk-btn {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+  font-family: inherit;
+}
+
+.hunk-btn-approve {
+  background: var(--green-bg-strong);
+  color: var(--green);
+}
+
+.hunk-btn-approve:hover {
+  background: var(--green);
+  color: #fff;
+}
+
+.hunk-btn-reject {
+  background: var(--red-bg-strong);
+  color: var(--red);
+}
+
+.hunk-btn-reject:hover {
+  background: var(--red);
+  color: #fff;
+}
+
+/* Diff lines */
+.diff-line {
+  display: flex;
+  min-width: fit-content;
+}
+
+.diff-line:hover {
+  filter: brightness(0.97);
+}
+
+[data-theme="dark"] .diff-line:hover {
+  filter: brightness(1.08);
+}
+
+.line-nums {
+  display: flex;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.line-num {
+  width: 48px;
+  padding: 0 8px;
+  text-align: right;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  border-right: 0.5px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.diff-line-add .line-num { background: var(--diff-add-gutter); }
+.diff-line-del .line-num { background: var(--diff-del-gutter); }
+
+.line-sign {
+  width: 20px;
+  text-align: center;
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  user-select: none;
+}
+
+.diff-line-add .line-sign { color: var(--green); }
+.diff-line-del .line-sign { color: var(--red); }
+
+.line-content {
+  flex: 1;
+  padding: 0 16px 0 4px;
+  white-space: pre;
+  tab-size: 4;
+}
+
+.diff-line-add { background: var(--diff-add-bg); }
+.diff-line-del { background: var(--diff-del-bg); }
+.diff-line-ctx { background: transparent; }
+
+/* Syntax tokens */
+.tok-kw { color: #AF52DE; font-weight: 500; }
+.tok-str { color: #C41A16; }
+.tok-num { color: #1C00CF; }
+.tok-cm { color: var(--text-tertiary); font-style: italic; }
+.tok-fn { color: #326D74; }
+.tok-type { color: #0B4F79; }
+.tok-op { color: var(--text-secondary); }
+
+[data-theme="dark"] .tok-kw { color: #BF5AF2; }
+[data-theme="dark"] .tok-str { color: #FC6A5D; }
+[data-theme="dark"] .tok-num { color: #D0BF69; }
+[data-theme="dark"] .tok-fn { color: #67B7A4; }
+[data-theme="dark"] .tok-type { color: #5DD8FF; }
+[data-theme="dark"] .tok-op { color: var(--text-secondary); }
+
+/* ============================================================
+   EVALUATOR ANNOTATIONS
+   ============================================================ */
+.annotation {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 16px 10px 116px;
+  font-size: 12px;
+  line-height: 1.5;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  border-top: 0.5px solid var(--border);
+  border-bottom: 0.5px solid var(--border);
+  position: relative;
+}
+
+.annotation::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+}
+
+.annotation-warning {
+  background: var(--orange-bg);
+}
+.annotation-warning::before { background: var(--orange); }
+
+.annotation-error {
+  background: var(--red-bg);
+}
+.annotation-error::before { background: var(--red); }
+
+.annotation-success {
+  background: var(--green-bg);
+}
+.annotation-success::before { background: var(--green); }
+
+.annotation-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  margin-top: 1px;
+}
+
+.annotation-warning .annotation-icon {
+  background: var(--orange-bg-strong);
+  color: var(--orange);
+}
+
+.annotation-error .annotation-icon {
+  background: var(--red-bg-strong);
+  color: var(--red);
+}
+
+.annotation-success .annotation-icon {
+  background: var(--green-bg-strong);
+  color: var(--green);
+}
+
+.annotation-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.annotation-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+
+.annotation-agent {
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--text-primary);
+}
+
+.annotation-tag {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.tag-auto-fixed {
+  background: var(--green-bg-strong);
+  color: var(--green);
+}
+
+.tag-needs-review {
+  background: var(--orange-bg-strong);
+  color: var(--orange);
+}
+
+.annotation-text {
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.annotation-text code {
+  font-family: "SF Mono", monospace;
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--surface-active);
+}
+
+.annotation-actions {
+  flex-shrink: 0;
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  margin-top: 1px;
+}
+
+.annotation-btn {
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  border: 0.5px solid var(--border-strong);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+  white-space: nowrap;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+}
+
+.annotation-btn:hover {
+  background: var(--surface-hover);
+}
+
+.annotation-btn:active {
+  transform: scale(0.97);
+}
+
+.annotation-btn-revision {
+  color: var(--orange);
+  border-color: var(--orange);
+}
+
+.annotation-btn-revision:hover {
+  background: var(--orange-bg);
+}
+
+/* ============================================================
+   EMPTY STATE / NO DIFF
+   ============================================================ */
+.diff-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--text-tertiary);
+}
+
+.diff-empty svg {
+  width: 48px;
+  height: 48px;
+  opacity: 0.3;
+}
+
+.diff-empty p {
+  font-size: 13px;
+}
+
+/* ============================================================
+   ANIMATIONS
+   ============================================================ */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.diff-viewer .diff-line {
+  animation: fadeIn var(--duration-normal) var(--ease-out) both;
+}
+
+.annotation {
+  animation: fadeIn var(--duration-normal) var(--ease-out) both;
+}
+
+/* ============================================================
+   TOAST NOTIFICATION
+   ============================================================ */
+.toast-container {
+  position: absolute;
+  top: 64px;
+  right: 16px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.toast {
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-md);
+  border: 0.5px solid var(--border-strong);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  animation: toastIn 250ms var(--ease-out) both;
+  max-width: 300px;
+}
+
+.toast.toast-out {
+  animation: toastOut 200ms var(--ease-out) both;
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(-8px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes toastOut {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(-8px) scale(0.96); }
+}
+
+/* ============================================================
+   RESPONSIVE SCROLLBAR FOR FILE LIST
+   ============================================================ */
+.file-list {
+  scrollbar-width: thin;
+  scrollbar-color: var(--text-tertiary) transparent;
+}
+</style>
+</head>
+<body>
+<div class="window" data-theme="light">
+  <!-- Toast container -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <!-- Top Bar -->
+  <div class="topbar">
+    <div class="traffic-lights">
+      <div class="traffic-light close"></div>
+      <div class="traffic-light minimize"></div>
+      <div class="traffic-light maximize"></div>
+    </div>
+    <div class="topbar-title">Code Review<span>— 用户认证系统</span></div>
+    <div class="topbar-divider"></div>
+    <div class="filter-tabs">
+      <button class="filter-tab active" data-filter="all">All<span class="count">3</span></button>
+      <button class="filter-tab" data-filter="needs-review">Needs Review<span class="count">1</span></button>
+      <button class="filter-tab" data-filter="approved">Auto-approved<span class="count">2</span></button>
+    </div>
+    <div class="topbar-spacer"></div>
+    <div class="topbar-actions">
+      <button class="btn btn-success" id="approveAllBtn">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M13.5 4.5L6.5 11.5L2.5 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Approve All
+        <span class="kbd">⌘⇧A</span>
+      </button>
+      <button class="btn btn-primary" id="mergeAllBtn">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4 2v6c0 2 2 4 4 4h0c2 0 4-2 4-4V2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="4" cy="2" r="1.5" fill="currentColor"/><circle cx="12" cy="2" r="1.5" fill="currentColor"/><circle cx="8" cy="13" r="1.5" fill="currentColor"/></svg>
+        Merge All
+      </button>
+      <button class="theme-toggle" id="themeToggle" title="Toggle theme">
+        <svg class="icon-sun" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="3" stroke="currentColor" stroke-width="1.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        <svg class="icon-moon" viewBox="0 0 16 16" fill="none" style="display:none"><path d="M13.36 10.06A6 6 0 015.94 2.64 6 6 0 1013.36 10.06z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Main Content -->
+  <div class="main-content">
+    <!-- File List Panel -->
+    <div class="file-list-panel">
+      <div class="file-list-header">Changed Files</div>
+      <div class="file-list" id="fileList">
+        <!-- T1 Group -->
+        <div class="task-group" data-task="T1">
+          <div class="task-group-header">
+            <span class="task-label">T1</span>
+            User Model
+            <span class="task-agent">Agent-1</span>
+          </div>
+          <div class="file-item active" data-file="user-model" data-status="approved">
+            <div class="file-icon">
+              <svg viewBox="0 0 16 16" fill="none"><path d="M3 1.5h6.5L13 5v9.5a1 1 0 01-1 1H4a1 1 0 01-1-1v-13a1 1 0 011-1z" stroke="currentColor" stroke-width="1.2"/><path d="M9.5 1.5V5H13" stroke="currentColor" stroke-width="1.2"/></svg>
+            </div>
+            <div class="file-info">
+              <div class="file-name">user.ts</div>
+              <div class="file-path">src/models/</div>
+            </div>
+            <div class="file-meta">
+              <div class="file-stats">
+                <span class="stat-add">+45</span>
+              </div>
+              <div class="file-status-badge badge-approved">
+                <svg viewBox="0 0 16 16" fill="none"><path d="M12 5L6.5 10.5 4 8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- T2 Group -->
+        <div class="task-group" data-task="T2">
+          <div class="task-group-header">
+            <span class="task-label">T2</span>
+            Register API
+            <span class="task-agent">Agent-1</span>
+          </div>
+          <div class="file-item" data-file="auth-route" data-status="auto-fixed">
+            <div class="file-icon">
+              <svg viewBox="0 0 16 16" fill="none"><path d="M3 1.5h6.5L13 5v9.5a1 1 0 01-1 1H4a1 1 0 01-1-1v-13a1 1 0 011-1z" stroke="currentColor" stroke-width="1.2"/><path d="M9.5 1.5V5H13" stroke="currentColor" stroke-width="1.2"/></svg>
+            </div>
+            <div class="file-info">
+              <div class="file-name">auth.ts</div>
+              <div class="file-path">src/routes/</div>
+            </div>
+            <div class="file-meta">
+              <div class="file-stats">
+                <span class="stat-add">+38</span>
+                <span class="stat-del">-2</span>
+              </div>
+              <div class="file-status-badge badge-auto-fixed">
+                <svg viewBox="0 0 16 16" fill="none"><path d="M8 3v5l3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.2"/></svg>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- T4 Group -->
+        <div class="task-group" data-task="T4">
+          <div class="task-group-header">
+            <span class="task-label">T4</span>
+            Auth Middleware
+            <span class="task-agent">Agent-3</span>
+          </div>
+          <div class="file-item" data-file="auth-middleware" data-status="needs-review">
+            <div class="file-icon">
+              <svg viewBox="0 0 16 16" fill="none"><path d="M3 1.5h6.5L13 5v9.5a1 1 0 01-1 1H4a1 1 0 01-1-1v-13a1 1 0 011-1z" stroke="currentColor" stroke-width="1.2"/><path d="M9.5 1.5V5H13" stroke="currentColor" stroke-width="1.2"/></svg>
+            </div>
+            <div class="file-info">
+              <div class="file-name">auth.ts</div>
+              <div class="file-path">src/middleware/</div>
+            </div>
+            <div class="file-meta">
+              <div class="file-stats">
+                <span class="stat-add">+52</span>
+              </div>
+              <div class="file-status-badge badge-needs-review">
+                <svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.2"/><path d="M8 5v3.5M8 11h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Diff Panel -->
+    <div class="diff-panel" id="diffPanel">
+      <!-- Review Summary -->
+      <div class="review-summary">
+        <span class="summary-stat">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 1.5h6.5L13 5v9.5a1 1 0 01-1 1H4a1 1 0 01-1-1v-13a1 1 0 011-1z" stroke="currentColor" stroke-width="1.2"/></svg>
+          3 files changed
+        </span>
+        <span class="summary-stat">
+          <span class="summary-dot" style="background:var(--green)"></span>
+          2 auto-approved
+        </span>
+        <span class="summary-stat">
+          <span class="summary-dot" style="background:var(--orange)"></span>
+          1 needs review
+        </span>
+        <span style="margin-left:auto; color:var(--text-tertiary)">
+          Evaluator 发现 2 个问题：1 个已自动修复，1 个需人工审核
+        </span>
+      </div>
+
+      <!-- Diff file header & viewer will be rendered by JS -->
+      <div id="diffContent"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   DATA
+   ============================================================ */
+const FILES = {
+  'user-model': {
+    path: 'src/models/user.ts',
+    status: 'approved',
+    badge: 'New File',
+    badgeClass: 'new-file',
+    score: '9/10',
+    task: 'T1',
+    hunks: [
+      {
+        header: '@@ -0,0 +1,45 @@ New file: src/models/user.ts',
+        lines: [
+          { type: 'add', old: '', new: 1,  code: 'import bcrypt from "bcryptjs";' },
+          { type: 'add', old: '', new: 2,  code: 'import { v4 as uuid } from "uuid";' },
+          { type: 'add', old: '', new: 3,  code: 'import { db } from "../lib/database";' },
+          { type: 'add', old: '', new: 4,  code: '' },
+          { type: 'add', old: '', new: 5,  code: 'export interface User {' },
+          { type: 'add', old: '', new: 6,  code: '  id: string;' },
+          { type: 'add', old: '', new: 7,  code: '  email: string;' },
+          { type: 'add', old: '', new: 8,  code: '  password_hash: string;' },
+          { type: 'add', old: '', new: 9,  code: '  verified: boolean;' },
+          { type: 'add', old: '', new: 10, code: '  verification_token: string | null;' },
+          { type: 'add', old: '', new: 11, code: '  created_at: Date;' },
+          { type: 'add', old: '', new: 12, code: '  updated_at: Date;' },
+          { type: 'add', old: '', new: 13, code: '}' },
+          { type: 'add', old: '', new: 14, code: '' },
+          { type: 'add', old: '', new: 15, code: 'export interface CreateUserInput {' },
+          { type: 'add', old: '', new: 16, code: '  email: string;' },
+          { type: 'add', old: '', new: 17, code: '  password: string;' },
+          { type: 'add', old: '', new: 18, code: '}' },
+          { type: 'add', old: '', new: 19, code: '' },
+          { type: 'add', old: '', new: 20, code: 'export async function createUser(input: CreateUserInput): Promise<User> {' },
+          { type: 'add', old: '', new: 21, code: '  const hash = await bcrypt.hash(input.password, 12);' },
+          { type: 'add', old: '', new: 22, code: '  const token = uuid();' },
+          { type: 'add', old: '', new: 23, code: '' },
+          { type: 'add', old: '', new: 24, code: '  return db.users.create({' },
+          { type: 'add', old: '', new: 25, code: '    email: input.email,' },
+          { type: 'add', old: '', new: 26, code: '    password_hash: hash,' },
+          { type: 'add', old: '', new: 27, code: '    verified: false,' },
+          { type: 'add', old: '', new: 28, code: '    verification_token: token,' },
+          { type: 'add', old: '', new: 29, code: '  });' },
+          { type: 'add', old: '', new: 30, code: '}' },
+        ],
+        annotations: [
+          {
+            afterLine: 30,
+            type: 'success',
+            agent: 'Evaluator Agent',
+            tag: null,
+            text: '密码哈希使用 bcrypt 且 salt rounds=12，安全配置良好。类型定义清晰完整。',
+          }
+        ]
+      }
+    ]
+  },
+
+  'auth-route': {
+    path: 'src/routes/auth.ts',
+    status: 'auto-fixed',
+    badge: 'Modified',
+    badgeClass: 'modified',
+    score: '8.5/10',
+    task: 'T2',
+    hunks: [
+      {
+        header: '@@ -1,8 +1,12 @@ src/routes/auth.ts',
+        lines: [
+          { type: 'ctx', old: 1,  new: 1,  code: 'import { Router } from "express";' },
+          { type: 'ctx', old: 2,  new: 2,  code: 'import { validateEmail } from "../utils/validators";' },
+          { type: 'add', old: '',  new: 3,  code: 'import { createUser } from "../models/user";' },
+          { type: 'add', old: '',  new: 4,  code: 'import { sendVerificationEmail } from "../services/email";' },
+          { type: 'ctx', old: 3,  new: 5,  code: '' },
+          { type: 'ctx', old: 4,  new: 6,  code: 'const router = Router();' },
+          { type: 'ctx', old: 5,  new: 7,  code: '' },
+          { type: 'del', old: 6,  new: '',  code: '// TODO: implement auth routes' },
+          { type: 'del', old: 7,  new: '',  code: '' },
+        ],
+        annotations: []
+      },
+      {
+        header: '@@ -8,0 +8,36 @@ Register endpoint',
+        lines: [
+          { type: 'add', old: '', new: 8,  code: 'router.post("/register", async (req, res) => {' },
+          { type: 'add', old: '', new: 9,  code: '  try {' },
+          { type: 'add', old: '', new: 10, code: '    const { email, password } = req.body;' },
+          { type: 'add', old: '', new: 11, code: '' },
+          { type: 'add', old: '', new: 12, code: '    if (!validateEmail(email)) {' },
+          { type: 'add', old: '', new: 13, code: '      return res.status(400).json({ error: "Invalid email format" });' },
+          { type: 'add', old: '', new: 14, code: '    }' },
+          { type: 'add', old: '', new: 15, code: '' },
+          { type: 'add', old: '', new: 16, code: '    if (!password || password.length < 8) {' },
+          { type: 'add', old: '', new: 17, code: '      return res.status(400).json({ error: "Password must be at least 8 chars" });' },
+          { type: 'add', old: '', new: 18, code: '    }' },
+          { type: 'add', old: '', new: 19, code: '' },
+          { type: 'add', old: '', new: 20, code: '    const user = await createUser({ email, password });' },
+          { type: 'add', old: '', new: 21, code: '' },
+          { type: 'add', old: '', new: 22, code: '    await sendVerificationEmail(user.email, user.verification_token!);' },
+          { type: 'add', old: '', new: 23, code: '' },
+        ],
+        annotations: [
+          {
+            afterLine: 23,
+            type: 'error',
+            agent: 'Evaluator Agent',
+            tag: 'auto-fixed',
+            text: '<strong>安全问题：</strong>原始代码在响应中返回了 <code>password_hash</code> 字段。已自动修复为仅返回 <code>id</code> 和 <code>email</code>，防止敏感数据泄漏。',
+          }
+        ]
+      },
+      {
+        header: '',
+        lines: [
+          { type: 'del', old: 24, new: '',  code: '    return res.status(201).json({ user });' },
+          { type: 'add', old: '', new: 24,  code: '    return res.status(201).json({' },
+          { type: 'add', old: '', new: 25,  code: '      user: { id: user.id, email: user.email }' },
+          { type: 'add', old: '', new: 26,  code: '    });' },
+          { type: 'add', old: '', new: 27,  code: '  } catch (err: any) {' },
+          { type: 'add', old: '', new: 28,  code: '    if (err.code === "P2002") {' },
+          { type: 'add', old: '', new: 29,  code: '      return res.status(409).json({ error: "Email already registered" });' },
+          { type: 'add', old: '', new: 30,  code: '    }' },
+          { type: 'add', old: '', new: 31,  code: '    return res.status(500).json({ error: "Internal server error" });' },
+          { type: 'add', old: '', new: 32,  code: '  }' },
+          { type: 'add', old: '', new: 33,  code: '});' },
+          { type: 'ctx', old: 8,  new: 34,  code: '' },
+          { type: 'ctx', old: 9,  new: 35,  code: 'export default router;' },
+        ],
+        annotations: []
+      }
+    ]
+  },
+
+  'auth-middleware': {
+    path: 'src/middleware/auth.ts',
+    status: 'needs-review',
+    badge: 'New File',
+    badgeClass: 'new-file',
+    score: '6.5/10',
+    task: 'T4',
+    hunks: [
+      {
+        header: '@@ -0,0 +1,52 @@ New file: src/middleware/auth.ts',
+        lines: [
+          { type: 'add', old: '', new: 1,  code: 'import { Request, Response, NextFunction } from "express";' },
+          { type: 'add', old: '', new: 2,  code: 'import jwt from "jsonwebtoken";' },
+          { type: 'add', old: '', new: 3,  code: '' },
+          { type: 'add', old: '', new: 4,  code: 'const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-key";' },
+          { type: 'add', old: '', new: 5,  code: '' },
+          { type: 'add', old: '', new: 6,  code: 'export interface AuthRequest extends Request {' },
+          { type: 'add', old: '', new: 7,  code: '  userId?: string;' },
+          { type: 'add', old: '', new: 8,  code: '  userRole?: string;' },
+          { type: 'add', old: '', new: 9,  code: '}' },
+          { type: 'add', old: '', new: 10, code: '' },
+          { type: 'add', old: '', new: 11, code: 'export function authMiddleware(req: AuthRequest, res: Response, next: NextFunction) {' },
+          { type: 'add', old: '', new: 12, code: '  const header = req.headers.authorization;' },
+          { type: 'add', old: '', new: 13, code: '' },
+          { type: 'add', old: '', new: 14, code: '  if (!header || !header.startsWith("Bearer ")) {' },
+          { type: 'add', old: '', new: 15, code: '    return res.status(401).json({ error: "Missing or invalid token" });' },
+          { type: 'add', old: '', new: 16, code: '  }' },
+          { type: 'add', old: '', new: 17, code: '' },
+          { type: 'add', old: '', new: 18, code: '  const token = header.split(" ")[1];' },
+          { type: 'add', old: '', new: 19, code: '' },
+          { type: 'add', old: '', new: 20, code: '  try {' },
+          { type: 'add', old: '', new: 21, code: '    const decoded = jwt.verify(token, JWT_SECRET) as {' },
+          { type: 'add', old: '', new: 22, code: '      userId: string;' },
+          { type: 'add', old: '', new: 23, code: '      role: string;' },
+          { type: 'add', old: '', new: 24, code: '    };' },
+          { type: 'add', old: '', new: 25, code: '    req.userId = decoded.userId;' },
+          { type: 'add', old: '', new: 26, code: '    req.userRole = decoded.role;' },
+          { type: 'add', old: '', new: 27, code: '    next();' },
+          { type: 'add', old: '', new: 28, code: '  } catch (err) {' },
+          { type: 'add', old: '', new: 29, code: '    return res.status(401).json({ error: "Token expired or invalid" });' },
+          { type: 'add', old: '', new: 30, code: '  }' },
+          { type: 'add', old: '', new: 31, code: '}' },
+          { type: 'add', old: '', new: 32, code: '' },
+          { type: 'add', old: '', new: 33, code: 'export function generateToken(userId: string, role: string): string {' },
+        ],
+        annotations: []
+      },
+      {
+        header: '',
+        lines: [
+          { type: 'add', old: '', new: 34, code: '  return jwt.sign(' },
+          { type: 'add', old: '', new: 35, code: '    { userId, role },' },
+          { type: 'add', old: '', new: 36, code: '    JWT_SECRET,' },
+          { type: 'add', old: '', new: 37, code: '    { expiresIn: "24h" }' },
+          { type: 'add', old: '', new: 38, code: '  );' },
+        ],
+        annotations: [
+          {
+            afterLine: 38,
+            type: 'warning',
+            agent: 'Evaluator Agent',
+            tag: 'needs-review',
+            text: '<strong>配置问题：</strong>JWT 过期时间硬编码为 <code>"24h"</code>。建议通过环境变量 <code>JWT_EXPIRES_IN</code> 配置，以便不同环境（开发/生产）使用不同的过期策略。',
+          }
+        ]
+      },
+      {
+        header: '',
+        lines: [
+          { type: 'add', old: '', new: 39, code: '}' },
+          { type: 'add', old: '', new: 40, code: '' },
+          { type: 'add', old: '', new: 41, code: 'export function requireRole(...roles: string[]) {' },
+          { type: 'add', old: '', new: 42, code: '  return (req: AuthRequest, res: Response, next: NextFunction) => {' },
+          { type: 'add', old: '', new: 43, code: '    if (!req.userRole || !roles.includes(req.userRole)) {' },
+          { type: 'add', old: '', new: 44, code: '      return res.status(403).json({ error: "Insufficient permissions" });' },
+          { type: 'add', old: '', new: 45, code: '    }' },
+          { type: 'add', old: '', new: 46, code: '    next();' },
+          { type: 'add', old: '', new: 47, code: '  };' },
+          { type: 'add', old: '', new: 48, code: '}' },
+        ],
+        annotations: []
+      }
+    ]
+  }
+};
+
+/* ============================================================
+   SYNTAX HIGHLIGHTING (basic)
+   ============================================================ */
+function highlight(code) {
+  if (!code) return '';
+  let s = code
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  // Comments
+  s = s.replace(/(\/\/.*)/g, '<span class="tok-cm">$1</span>');
+
+  // Strings
+  s = s.replace(/("(?:[^"\\]|\\.)*")/g, '<span class="tok-str">$1</span>');
+
+  // Numbers
+  s = s.replace(/\b(\d+)\b/g, '<span class="tok-num">$1</span>');
+
+  // Keywords
+  const kws = 'import|from|export|interface|async|function|const|let|var|return|if|else|try|catch|throw|new|await|as|extends|typeof|type|class';
+  s = s.replace(new RegExp('\\b(' + kws + ')\\b', 'g'), '<span class="tok-kw">$1</span>');
+
+  // Types
+  const types = 'string|boolean|number|Date|Promise|Request|Response|NextFunction|User|CreateUserInput|AuthRequest|Router|void';
+  s = s.replace(new RegExp('\\b(' + types + ')\\b', 'g'), '<span class="tok-type">$1</span>');
+
+  return s;
+}
+
+/* ============================================================
+   RENDER DIFF
+   ============================================================ */
+function renderDiff(fileKey) {
+  const file = FILES[fileKey];
+  if (!file) return;
+
+  const container = document.getElementById('diffContent');
+  let html = '';
+
+  // File header
+  html += '<div class="diff-file-header">';
+  html += `<span class="diff-file-path">${esc(file.path)}</span>`;
+  html += `<span class="diff-file-badge ${file.badgeClass}">${file.badge}</span>`;
+  html += `<span class="diff-file-score">Score: ${file.score}</span>`;
+  html += '<div class="diff-file-actions">';
+  if (file.status === 'needs-review') {
+    html += '<button class="btn btn-success btn-sm" onclick="approveFile(this)"><svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M12 5L6.5 10.5 4 8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg> Approve</button>';
+    html += '<button class="btn btn-danger btn-sm" onclick="rejectFile(this)">Reject</button>';
+  } else {
+    html += `<span style="font-size:11px;color:var(--green);font-weight:600;display:flex;align-items:center;gap:4px"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M12 5L6.5 10.5 4 8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg> Approved</span>`;
+  }
+  html += '</div></div>';
+
+  // Diff viewer
+  html += '<div class="diff-viewer">';
+
+  file.hunks.forEach((hunk, hi) => {
+    if (hunk.header) {
+      html += `<div class="diff-hunk">`;
+      html += `<span>${esc(hunk.header)}</span>`;
+      html += `<div class="hunk-actions">`;
+      html += `<button class="hunk-btn hunk-btn-approve" onclick="approveHunk(this)">✓ Approve</button>`;
+      html += `<button class="hunk-btn hunk-btn-reject" onclick="rejectHunk(this)">✕ Reject</button>`;
+      html += `</div></div>`;
+    }
+
+    hunk.lines.forEach((line, li) => {
+      const cls = line.type === 'add' ? 'diff-line-add' : line.type === 'del' ? 'diff-line-del' : 'diff-line-ctx';
+      const sign = line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' ';
+      const delay = (hi * 20 + li * 8);
+
+      html += `<div class="diff-line ${cls}" style="animation-delay:${delay}ms">`;
+      html += `<div class="line-nums">`;
+      html += `<span class="line-num">${line.old || ''}</span>`;
+      html += `<span class="line-num">${line.new || ''}</span>`;
+      html += `</div>`;
+      html += `<span class="line-sign">${sign}</span>`;
+      html += `<span class="line-content">${highlight(line.code)}</span>`;
+      html += `</div>`;
+
+      // Check for annotations after this line
+      if (hunk.annotations) {
+        hunk.annotations.forEach(ann => {
+          if (ann.afterLine === (line.new || line.old)) {
+            html += renderAnnotation(ann);
+          }
+        });
+      }
+    });
+  });
+
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+function renderAnnotation(ann) {
+  const typeClass = ann.type === 'warning' ? 'annotation-warning' : ann.type === 'error' ? 'annotation-error' : 'annotation-success';
+  const icon = ann.type === 'warning' ? '⚠' : ann.type === 'error' ? '✕' : '✓';
+
+  let tagHtml = '';
+  if (ann.tag === 'auto-fixed') {
+    tagHtml = '<span class="annotation-tag tag-auto-fixed">已自动修复</span>';
+  } else if (ann.tag === 'needs-review') {
+    tagHtml = '<span class="annotation-tag tag-needs-review">需人工审核</span>';
+  }
+
+  let actionsHtml = '';
+  if (ann.tag === 'needs-review') {
+    actionsHtml = `
+      <div class="annotation-actions">
+        <button class="annotation-btn annotation-btn-revision" onclick="requestRevision(this)">Request Revision</button>
+        <button class="annotation-btn" onclick="dismissAnnotation(this)">Dismiss</button>
+      </div>`;
+  } else if (ann.tag === 'auto-fixed') {
+    actionsHtml = `
+      <div class="annotation-actions">
+        <button class="annotation-btn" onclick="viewOriginal(this)">View Original</button>
+      </div>`;
+  }
+
+  return `
+    <div class="annotation ${typeClass}">
+      <div class="annotation-icon">${icon}</div>
+      <div class="annotation-body">
+        <div class="annotation-header">
+          <span class="annotation-agent">${esc(ann.agent)}</span>
+          ${tagHtml}
+        </div>
+        <div class="annotation-text">${ann.text}</div>
+      </div>
+      ${actionsHtml}
+    </div>`;
+}
+
+function esc(s) {
+  if (!s) return '';
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/* ============================================================
+   INTERACTIONS
+   ============================================================ */
+let activeFile = 'user-model';
+let currentFilter = 'all';
+
+function selectFile(fileKey) {
+  activeFile = fileKey;
+  document.querySelectorAll('.file-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.file === fileKey);
+  });
+  renderDiff(fileKey);
+}
+
+// File item clicks
+document.getElementById('fileList').addEventListener('click', e => {
+  const item = e.target.closest('.file-item');
+  if (item) selectFile(item.dataset.file);
+});
+
+// Filter tabs
+document.querySelectorAll('.filter-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    currentFilter = tab.dataset.filter;
+    applyFilter();
+  });
+});
+
+function applyFilter() {
+  document.querySelectorAll('.file-item').forEach(item => {
+    const status = item.dataset.status;
+    let visible = true;
+    if (currentFilter === 'needs-review') visible = status === 'needs-review';
+    else if (currentFilter === 'approved') visible = status === 'approved' || status === 'auto-fixed';
+    item.style.display = visible ? '' : 'none';
+  });
+
+  document.querySelectorAll('.task-group').forEach(group => {
+    const visibleItems = group.querySelectorAll('.file-item:not([style*="display: none"])');
+    group.style.display = visibleItems.length ? '' : 'none';
+  });
+}
+
+// Theme toggle
+document.getElementById('themeToggle').addEventListener('click', () => {
+  const win = document.querySelector('.window');
+  const isDark = win.dataset.theme === 'dark';
+  win.dataset.theme = isDark ? 'light' : 'dark';
+  const sun = document.querySelector('.icon-sun');
+  const moon = document.querySelector('.icon-moon');
+  sun.style.display = isDark ? '' : 'none';
+  moon.style.display = isDark ? 'none' : '';
+});
+
+// Batch operations
+document.getElementById('approveAllBtn').addEventListener('click', () => {
+  document.querySelectorAll('.file-item').forEach(item => {
+    item.dataset.status = 'approved';
+    const badge = item.querySelector('.file-status-badge');
+    badge.className = 'file-status-badge badge-approved';
+    badge.innerHTML = '<svg viewBox="0 0 16 16" fill="none"><path d="M12 5L6.5 10.5 4 8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  });
+  showToast('All files approved', 'var(--green)');
+  renderDiff(activeFile);
+});
+
+document.getElementById('mergeAllBtn').addEventListener('click', () => {
+  showToast('Merge initiated for 3 files...', 'var(--accent)');
+});
+
+function approveFile(btn) {
+  const header = btn.closest('.diff-file-header');
+  const actions = header.querySelector('.diff-file-actions');
+  actions.innerHTML = '<span style="font-size:11px;color:var(--green);font-weight:600;display:flex;align-items:center;gap:4px"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M12 5L6.5 10.5 4 8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg> Approved</span>';
+  
+  const activeItem = document.querySelector('.file-item.active');
+  if (activeItem) {
+    activeItem.dataset.status = 'approved';
+    const badge = activeItem.querySelector('.file-status-badge');
+    badge.className = 'file-status-badge badge-approved';
+    badge.innerHTML = '<svg viewBox="0 0 16 16" fill="none"><path d="M12 5L6.5 10.5 4 8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  }
+  showToast('File approved', 'var(--green)');
+}
+
+function rejectFile(btn) {
+  showToast('File rejected — Agent notified', 'var(--red)');
+}
+
+function approveHunk(btn) {
+  const hunk = btn.closest('.diff-hunk');
+  btn.textContent = '✓ Approved';
+  btn.style.background = 'var(--green)';
+  btn.style.color = '#fff';
+  btn.style.pointerEvents = 'none';
+  const reject = hunk.querySelector('.hunk-btn-reject');
+  if (reject) reject.style.display = 'none';
+}
+
+function rejectHunk(btn) {
+  const hunk = btn.closest('.diff-hunk');
+  btn.textContent = '✕ Rejected';
+  btn.style.background = 'var(--red)';
+  btn.style.color = '#fff';
+  btn.style.pointerEvents = 'none';
+  const approve = hunk.querySelector('.hunk-btn-approve');
+  if (approve) approve.style.display = 'none';
+}
+
+function requestRevision(btn) {
+  showToast('Revision requested — Agent-3 notified', 'var(--orange)');
+  const ann = btn.closest('.annotation');
+  ann.style.opacity = '0.5';
+  btn.textContent = 'Requested';
+  btn.disabled = true;
+}
+
+function dismissAnnotation(btn) {
+  const ann = btn.closest('.annotation');
+  ann.style.transition = 'opacity 200ms, max-height 200ms';
+  ann.style.opacity = '0';
+  ann.style.maxHeight = '0';
+  ann.style.overflow = 'hidden';
+  ann.style.padding = '0';
+  ann.style.margin = '0';
+  setTimeout(() => ann.remove(), 250);
+}
+
+function viewOriginal(btn) {
+  showToast('Showing original code before auto-fix', 'var(--accent)');
+}
+
+// Toast system
+function showToast(message, color) {
+  const container = document.getElementById('toastContainer');
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+  toast.innerHTML = `<span style="width:6px;height:6px;border-radius:50%;background:${color};flex-shrink:0"></span>${esc(message)}`;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.classList.add('toast-out');
+    setTimeout(() => toast.remove(), 200);
+  }, 2500);
+}
+
+// Keyboard shortcuts
+document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'a') {
+    e.preventDefault();
+    document.getElementById('approveAllBtn').click();
+  }
+});
+
+// Initial render
+renderDiff(activeFile);
+</script>
+</body>
+</html>
