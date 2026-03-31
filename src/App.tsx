@@ -1,6 +1,7 @@
 import { Sidebar } from "./components/Sidebar";
 import { Titlebar } from "./components/Titlebar";
 import { useUiStore } from "./stores/ui-store";
+import { useTheme } from "./hooks/useTheme";
 import { MissionsView } from "./views/MissionsView";
 import { WorkspaceView } from "./views/WorkspaceView";
 import { AgentsView } from "./views/AgentsView";
@@ -25,6 +26,8 @@ function ActiveView() {
 }
 
 export default function App() {
+  useTheme();
+
   return (
     <div className={styles.shell}>
       <Sidebar />

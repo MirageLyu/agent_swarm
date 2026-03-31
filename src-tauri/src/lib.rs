@@ -5,6 +5,7 @@ pub mod git;
 pub mod llm;
 pub mod tools;
 
+use commands::ConfigManager;
 use db::Database;
 use tauri::Manager;
 
@@ -28,6 +29,9 @@ pub fn run() {
             let database = Database::open(&data_dir)?;
             app.manage(database);
 
+            let config_manager = ConfigManager::load(&data_dir);
+            app.manage(config_manager);
+
             tracing::info!("Miragenty initialized, data_dir: {}", data_dir.display());
             Ok(())
         })
@@ -36,6 +40,11 @@ pub fn run() {
             commands::get_db_status,
             commands::create_mission,
             commands::list_missions,
+            commands::get_config,
+            commands::set_api_key,
+            commands::update_config,
+            commands::run_agent,
+            commands::stop_agent,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
