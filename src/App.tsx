@@ -29,11 +29,11 @@ export default function App() {
   useTheme();
 
   return (
-    <div className={styles.shell}>
+    <div className={styles.shell} data-component="Shell">
       <Sidebar />
-      <div className={styles.main}>
+      <div className={styles.main} data-component="Main">
         <Titlebar />
-        <div className={styles.content}>
+        <div className={styles.content} data-component="Content">
           <ActiveView />
         </div>
       </div>

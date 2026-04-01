@@ -21,8 +21,10 @@ export interface CreateMissionRequest {
 
 export interface ConfigResponse {
   default_model: string;
+  base_url: string;
+  provider: string;
   max_concurrent_agents: number;
-  has_anthropic_key: boolean;
+  has_api_key: boolean;
 }
 
 export interface SetApiKeyRequest {
@@ -32,6 +34,8 @@ export interface SetApiKeyRequest {
 
 export interface UpdateConfigRequest {
   default_model?: string;
+  base_url?: string;
+  provider?: string;
   max_concurrent_agents?: number;
 }
 

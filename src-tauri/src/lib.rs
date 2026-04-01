@@ -33,6 +33,12 @@ pub fn run() {
             app.manage(config_manager);
 
             tracing::info!("Miragenty initialized, data_dir: {}", data_dir.display());
+
+            #[cfg(debug_assertions)]
+            if let Some(window) = app.get_webview_window("main") {
+                window.open_devtools();
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

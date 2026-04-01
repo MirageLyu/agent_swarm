@@ -3,6 +3,7 @@ name = "miragenty"
 version = "0.1.0"
 description = "Miragenty - AI Agent Swarm Commander"
 authors = ["miragelyu"]
+license = "GPL-3.0-only"
 edition = "2021"
 
 [lib]

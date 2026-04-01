@@ -16,11 +16,11 @@ export function SettingsView() {
   }, []);
 
   const handleSaveKey = async () => {
-    if (!apiKey.trim()) return;
+    if (!apiKey.trim() || !config) return;
     setSaving(true);
     try {
-      await commands.setApiKey({ provider: "anthropic", key: apiKey.trim() });
-      setConfig((c) => (c ? { ...c, has_anthropic_key: true } : c));
+      await commands.setApiKey({ provider: config.provider, key: apiKey.trim() });
+      setConfig((c) => (c ? { ...c, has_api_key: true } : c));
       setApiKey("");
       setMessage("API key saved");
       setTimeout(() => setMessage(""), 2000);
@@ -34,18 +34,40 @@ export function SettingsView() {
   return (
     <div className={styles.container}>
       <div className={styles.section}>
-        <h2 className={styles.sectionTitle}>API Keys</h2>
+        <h2 className={styles.sectionTitle}>LLM Provider</h2>
         <div className={styles.field}>
           <div className={styles.fieldHeader}>
-            <span>Anthropic</span>
-            <Badge variant={config?.has_anthropic_key ? "success" : "warning"}>
-              {config?.has_anthropic_key ? "Configured" : "Not Set"}
+            <span>Provider</span>
+          </div>
+          <p className={styles.fieldValue}>{config?.provider ?? "..."}</p>
+        </div>
+        <div className={styles.field}>
+          <div className={styles.fieldHeader}>
+            <span>Base URL</span>
+          </div>
+          <p className={styles.fieldValue}>{config?.base_url ?? "..."}</p>
+        </div>
+        <div className={styles.field}>
+          <div className={styles.fieldHeader}>
+            <span>Model</span>
+          </div>
+          <p className={styles.fieldValue}>{config?.default_model ?? "..."}</p>
+        </div>
+      </div>
+
+      <div className={styles.section}>
+        <h2 className={styles.sectionTitle}>API Key</h2>
+        <div className={styles.field}>
+          <div className={styles.fieldHeader}>
+            <span>{config?.provider ?? "Provider"}</span>
+            <Badge variant={config?.has_api_key ? "success" : "warning"}>
+              {config?.has_api_key ? "Configured" : "Not Set"}
             </Badge>
           </div>
           <div className={styles.fieldRow}>
             <Input
               type="password"
-              placeholder="sk-ant-..."
+              placeholder="sk-..."
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               style={{ flex: 1 }}
@@ -56,16 +78,6 @@ export function SettingsView() {
           </div>
         </div>
         {message && <p className={styles.message}>{message}</p>}
-      </div>
-
-      <div className={styles.section}>
-        <h2 className={styles.sectionTitle}>Model</h2>
-        <div className={styles.field}>
-          <div className={styles.fieldHeader}>
-            <span>Default Model</span>
-          </div>
-          <p className={styles.fieldValue}>{config?.default_model ?? "Loading..."}</p>
-        </div>
       </div>
 
       <div className={styles.section}>

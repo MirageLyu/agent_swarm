@@ -4,11 +4,25 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::Manager;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub api_keys: HashMap<String, String>,
     pub default_model: String,
+    pub base_url: String,
+    pub provider: String,
     pub max_concurrent_agents: u32,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            api_keys: HashMap::new(),
+            default_model: "qwen3.5-plus".to_string(),
+            base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+            provider: "openai_compat".to_string(),
+            max_concurrent_agents: 3,
+        }
+    }
 }
 
 pub struct ConfigManager {
@@ -23,11 +37,7 @@ impl ConfigManager {
             let data = std::fs::read_to_string(&config_path).unwrap_or_default();
             serde_json::from_str(&data).unwrap_or_default()
         } else {
-            AppConfig {
-                api_keys: HashMap::new(),
-                default_model: "claude-sonnet-4-20250514".to_string(),
-                max_concurrent_agents: 3,
-            }
+            AppConfig::default()
         };
 
         Self {
@@ -41,6 +51,10 @@ impl ConfigManager {
         config.api_keys.get(provider).cloned()
     }
 
+    pub fn get_config_snapshot(&self) -> AppConfig {
+        self.config.lock().unwrap().clone()
+    }
+
     fn save(&self) -> anyhow::Result<()> {
         let config = self.config.lock().unwrap();
         let data = serde_json::to_string_pretty(&*config)?;
@@ -52,18 +66,24 @@ impl ConfigManager {
 #[derive(Debug, Serialize)]
 pub struct ConfigResponse {
     pub default_model: String,
+    pub base_url: String,
+    pub provider: String,
     pub max_concurrent_agents: u32,
-    pub has_anthropic_key: bool,
+    pub has_api_key: bool,
 }
 
 #[tauri::command]
 pub fn get_config(app: tauri::AppHandle) -> Result<ConfigResponse, String> {
     let mgr = app.state::<ConfigManager>();
     let config = mgr.config.lock().unwrap();
+    let has_key = config.api_keys.contains_key(&config.provider)
+        || config.api_keys.contains_key("default");
     Ok(ConfigResponse {
         default_model: config.default_model.clone(),
+        base_url: config.base_url.clone(),
+        provider: config.provider.clone(),
         max_concurrent_agents: config.max_concurrent_agents,
-        has_anthropic_key: config.api_keys.contains_key("anthropic"),
+        has_api_key: has_key,
     })
 }
 
@@ -86,6 +106,8 @@ pub fn set_api_key(app: tauri::AppHandle, request: SetApiKeyRequest) -> Result<(
 #[derive(Debug, Deserialize)]
 pub struct UpdateConfigRequest {
     pub default_model: Option<String>,
+    pub base_url: Option<String>,
+    pub provider: Option<String>,
     pub max_concurrent_agents: Option<u32>,
 }
 
@@ -99,6 +121,12 @@ pub fn update_config(
         let mut config = mgr.config.lock().unwrap();
         if let Some(model) = request.default_model {
             config.default_model = model;
+        }
+        if let Some(url) = request.base_url {
+            config.base_url = url;
+        }
+        if let Some(prov) = request.provider {
+            config.provider = prov;
         }
         if let Some(max) = request.max_concurrent_agents {
             config.max_concurrent_agents = max;

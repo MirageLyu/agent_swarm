@@ -41,6 +41,7 @@ impl AgentEngine {
         &self,
         agent_id: &str,
         task_description: &str,
+        model: &str,
         max_steps: u32,
     ) -> Result<AgentStatus> {
         let tools = builtin_tools();
@@ -65,7 +66,7 @@ impl AgentEngine {
             self.emit_event(agent_id, step, "llm_call", &format!("Step {step}: calling LLM"));
 
             let request = LlmRequest {
-                model: "claude-sonnet-4-20250514".to_string(),
+                model: model.to_string(),
                 system: Some(system.clone()),
                 messages: messages.clone(),
                 tools: tools.clone(),
