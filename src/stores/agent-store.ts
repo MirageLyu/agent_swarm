@@ -2,11 +2,10 @@ import { create } from "zustand";
 
 export type AgentStatus =
   | "idle"
-  | "planning"
-  | "executing"
-  | "waiting_checkpoint"
+  | "running"
   | "completed"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 export interface AgentEvent {
   id: string;

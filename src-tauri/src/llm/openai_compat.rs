@@ -16,8 +16,13 @@ pub struct OpenAICompatProvider {
 impl OpenAICompatProvider {
     pub fn new(api_key: String, base_url: String) -> Self {
         let base_url = base_url.trim_end_matches('/').to_string();
+        let client = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_else(|_| Client::new());
         Self {
-            client: Client::new(),
+            client,
             api_key,
             base_url,
         }
@@ -157,8 +162,15 @@ impl OpenAICompatProvider {
                 let id = tc["id"].as_str().unwrap_or("").to_string();
                 let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
                 let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
-                let input: serde_json::Value =
-                    serde_json::from_str(args_str).unwrap_or(json!({}));
+                let input: serde_json::Value = match serde_json::from_str(args_str) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to parse tool arguments for {name}: {e} | raw: {args_str}"
+                        );
+                        json!({})
+                    }
+                };
                 content.push(ContentBlock::ToolUse { id, name, input });
             }
         }
@@ -199,15 +211,24 @@ impl LlmProvider for OpenAICompatProvider {
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
-            .await?;
+            .await
+            .map_err(|e| {
+                tracing::error!("OpenAI compat request failed: {e}");
+                e
+            })?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
+        let status = resp.status();
+        tracing::debug!("OpenAI compat response status: {status}");
+
+        if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
+            tracing::error!("OpenAI compat API error {status}: {text}");
             bail!("OpenAI compat API error {status}: {text}");
         }
 
         let data: serde_json::Value = resp.json().await?;
+        tracing::debug!("OpenAI compat response parsed OK, model output length: {}", 
+            data["choices"][0]["message"]["content"].as_str().map(|s| s.len()).unwrap_or(0));
         self.parse_response(&data)
     }
 
@@ -322,8 +343,15 @@ impl LlmProvider for OpenAICompatProvider {
         }
         for (id, name, args) in tool_calls {
             if !name.is_empty() {
-                let input: serde_json::Value =
-                    serde_json::from_str(&args).unwrap_or(json!({}));
+                let input: serde_json::Value = match serde_json::from_str(&args) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to parse streamed tool arguments for {name}: {e} | raw: {args}"
+                        );
+                        json!({})
+                    }
+                };
                 content.push(ContentBlock::ToolUse { id, name, input });
             }
         }

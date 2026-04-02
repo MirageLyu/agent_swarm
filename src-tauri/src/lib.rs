@@ -5,6 +5,7 @@ pub mod git;
 pub mod llm;
 pub mod tools;
 
+use agent::{AgentRegistry, Scheduler};
 use commands::ConfigManager;
 use db::Database;
 use tauri::Manager;
@@ -20,6 +21,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = app
                 .path()
@@ -31,6 +33,9 @@ pub fn run() {
 
             let config_manager = ConfigManager::load(&data_dir);
             app.manage(config_manager);
+
+            app.manage(AgentRegistry::new());
+            app.manage(Scheduler::new());
 
             tracing::info!("Miragenty initialized, data_dir: {}", data_dir.display());
 
@@ -46,11 +51,25 @@ pub fn run() {
             commands::get_db_status,
             commands::create_mission,
             commands::list_missions,
+            commands::plan_mission,
+            commands::get_mission_detail,
+            commands::update_task,
+            commands::delete_task,
+            commands::add_task,
+            commands::confirm_mission,
+            commands::delete_mission,
             commands::get_config,
             commands::set_api_key,
             commands::update_config,
             commands::run_agent,
             commands::stop_agent,
+            commands::get_agent_events,
+            commands::get_agent_detail,
+            commands::list_agents,
+            commands::start_mission_execution,
+            commands::get_scheduler_status,
+            commands::list_agents_by_mission,
+            commands::get_default_workspace_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

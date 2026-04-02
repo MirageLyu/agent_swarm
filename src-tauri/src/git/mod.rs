@@ -1,3 +1,3 @@
 mod worktree;
 
-pub use worktree::WorktreeManager;
+pub use worktree::{WorktreeManager, MergeOutcome};

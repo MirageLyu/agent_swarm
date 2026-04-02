@@ -1,9 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
-import { commands, onAgentEvent, onAgentStream } from "../ipc";
+import {
+  commands,
+  onAgentEvent,
+  onAgentStream,
+  onAgentStarted,
+  onTaskStatusChanged,
+  onMissionStatusChanged,
+} from "../ipc";
 import type { AgentEventPayload, AgentStreamPayload } from "../ipc";
+import type { TaskStatus, MissionStatus } from "../ipc/commands";
+import { useTaskStore } from "../stores/task-store";
 import styles from "./WorkspaceView.module.css";
+
+type AgentActivityStatus = "running" | "completed" | "failed" | "cancelled";
 
 interface AgentActivity {
   agentId: string;
@@ -15,7 +26,20 @@ interface AgentActivity {
     timestamp: number;
   }>;
   streamBuffer: string;
-  status: "running" | "completed" | "failed";
+  status: AgentActivityStatus;
+}
+
+function statusBadgeVariant(status: AgentActivityStatus) {
+  switch (status) {
+    case "completed":
+      return "success" as const;
+    case "failed":
+      return "error" as const;
+    case "cancelled":
+      return "warning" as const;
+    default:
+      return "info" as const;
+  }
 }
 
 export function WorkspaceView() {
@@ -24,6 +48,27 @@ export function WorkspaceView() {
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const eventCountRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const { updateTaskLocal, updateMissionStatus } = useTaskStore();
+
+  // Load historical agents from DB on mount
+  useEffect(() => {
+    commands.listAgents().then((list) => {
+      if (list.length === 0) return;
+      const restored: Record<string, AgentActivity> = {};
+      for (const a of list) {
+        restored[a.id] = {
+          agentId: a.id,
+          events: [],
+          streamBuffer: "",
+          status: (["running", "completed", "failed", "cancelled"].includes(a.status)
+            ? a.status
+            : "completed") as AgentActivityStatus,
+        };
+      }
+      setAgents((prev) => ({ ...restored, ...prev }));
+      setSelectedAgent((cur) => cur ?? list[0].id);
+    }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     const unlistenEvent = onAgentEvent((payload: AgentEventPayload) => {
@@ -44,7 +89,10 @@ export function WorkspaceView() {
         };
 
         let status = agent.status;
-        if (payload.kind === "message" || payload.content.includes("Completed")) {
+        if (payload.kind === "status_change") {
+          if (payload.content === "cancelled") status = "cancelled";
+          else if (payload.content === "running") status = "running";
+        } else if (payload.kind === "message" || payload.content.includes("Completed")) {
           status = "completed";
         } else if (payload.kind === "error" && payload.content.includes("Max steps")) {
           status = "failed";
@@ -79,11 +127,65 @@ export function WorkspaceView() {
       });
     });
 
+    const unlistenStarted = onAgentStarted((payload) => {
+      setAgents((prev) => {
+        if (prev[payload.agent_id]) return prev;
+        return {
+          ...prev,
+          [payload.agent_id]: {
+            agentId: payload.agent_id,
+            events: [],
+            streamBuffer: "",
+            status: "running",
+          },
+        };
+      });
+      setSelectedAgent((cur) => cur ?? payload.agent_id);
+    });
+
+    const unlistenTask = onTaskStatusChanged((payload) => {
+      updateTaskLocal(payload.task_id, { status: payload.to as TaskStatus });
+    });
+
+    const unlistenMission = onMissionStatusChanged((payload) => {
+      updateMissionStatus(payload.mission_id, payload.to as MissionStatus);
+    });
+
     return () => {
       unlistenEvent.then((fn) => fn());
       unlistenStream.then((fn) => fn());
+      unlistenStarted.then((fn) => fn());
+      unlistenTask.then((fn) => fn());
+      unlistenMission.then((fn) => fn());
     };
-  }, [selectedAgent]);
+  }, [selectedAgent, updateTaskLocal, updateMissionStatus]);
+
+  // Auto-load events when selecting an agent with no events yet (historical)
+  useEffect(() => {
+    if (!selectedAgent) return;
+    const agent = agents[selectedAgent];
+    if (agent && agent.events.length === 0 && agent.status !== "running") {
+      commands.getAgentEvents(selectedAgent).then((events) => {
+        setAgents((prev) => {
+          const cur = prev[selectedAgent];
+          if (!cur || cur.events.length > 0) return prev;
+          return {
+            ...prev,
+            [selectedAgent]: {
+              ...cur,
+              events: events.map((e, i) => ({
+                id: i,
+                step: e.step,
+                kind: e.kind,
+                content: e.content,
+                timestamp: new Date(e.created_at).getTime(),
+              })),
+            },
+          };
+        });
+      }).catch(() => {});
+    }
+  }, [selectedAgent, agents]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -106,8 +208,42 @@ export function WorkspaceView() {
     }
   }, [input]);
 
+  const handleStop = useCallback(async () => {
+    if (!selectedAgent) return;
+    try {
+      await commands.stopAgent(selectedAgent);
+    } catch (e) {
+      alert(String(e));
+    }
+  }, [selectedAgent]);
+
+  const handleLoadHistory = useCallback(async () => {
+    if (!selectedAgent) return;
+    try {
+      const events = await commands.getAgentEvents(selectedAgent);
+      setAgents((prev) => ({
+        ...prev,
+        [selectedAgent]: {
+          agentId: selectedAgent,
+          events: events.map((e, i) => ({
+            id: i,
+            step: e.step,
+            kind: e.kind,
+            content: e.content,
+            timestamp: new Date(e.created_at).getTime(),
+          })),
+          streamBuffer: "",
+          status: (prev[selectedAgent]?.status ?? "completed") as AgentActivityStatus,
+        },
+      }));
+    } catch (e) {
+      alert(String(e));
+    }
+  }, [selectedAgent]);
+
   const activeAgent = selectedAgent ? agents[selectedAgent] : null;
   const agentIds = Object.keys(agents);
+  const isRunning = activeAgent?.status === "running";
 
   return (
     <div className={styles.container}>
@@ -141,20 +277,25 @@ export function WorkspaceView() {
                 <span className={styles.tabLabel}>
                   Agent {id.substring(0, 6)}
                 </span>
-                <Badge
-                  variant={
-                    agents[id].status === "completed"
-                      ? "success"
-                      : agents[id].status === "failed"
-                        ? "error"
-                        : "info"
-                  }
-                >
+                <Badge variant={statusBadgeVariant(agents[id].status)}>
                   {agents[id].status}
                 </Badge>
               </button>
             ))}
           </div>
+
+          {activeAgent && (
+            <div className={styles.toolbar}>
+              {isRunning && (
+                <Button variant="ghost" size="sm" onClick={handleStop}>
+                  Stop Agent
+                </Button>
+              )}
+              <Button variant="ghost" size="sm" onClick={handleLoadHistory}>
+                Load History
+              </Button>
+            </div>
+          )}
 
           <div className={styles.stream} ref={scrollRef}>
             {activeAgent ? (
@@ -170,7 +311,9 @@ export function WorkspaceView() {
                               ? "warning"
                               : evt.kind === "tool_use"
                                 ? "info"
-                                : "default"
+                                : evt.kind === "status_change"
+                                  ? "default"
+                                  : "default"
                         }
                       >
                         Step {evt.step} · {evt.kind}

@@ -1,0 +1,119 @@
+---
+description: Commit message convention based on Conventional Commits for Miragenty
+globs:
+alwaysApply: true
+---
+
+# Commit Convention
+
+本项目遵循 [Conventional Commits 1.0.0](https://conventionalcommits.org/en/v1.0.0/) 规范。
+
+## 格式
+
+```
+<type>(<scope>): <description>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+## Type（必须）
+
+| type       | 含义                                     |
+|------------|------------------------------------------|
+| `feat`     | 新功能                                   |
+| `fix`      | Bug 修复                                 |
+| `refactor` | 重构（不改变行为的结构调整）             |
+| `perf`     | 性能优化                                 |
+| `docs`     | 文档变更（requirements、DTS、README 等） |
+| `test`     | 测试新增或修改                           |
+| `style`    | 代码格式（空格、分号、CSS 等，不影响逻辑）|
+| `build`    | 构建系统 / 依赖变更（Cargo.toml、package.json）|
+| `ci`       | CI 配置                                  |
+| `chore`    | 其他杂务（脚手架、配置、规则文件等）     |
+
+## Scope（推荐）
+
+scope 用括号包裹，标识改动所属模块。本项目推荐 scope：
+
+| scope      | 对应目录 / 领域                    |
+|------------|-------------------------------------|
+| `agent`    | `src-tauri/src/agent/`              |
+| `git`      | `src-tauri/src/git/`               |
+| `llm`      | `src-tauri/src/llm/`               |
+| `tools`    | `src-tauri/src/tools/`             |
+| `db`       | `src-tauri/src/db/`                |
+| `commands` | `src-tauri/src/commands/`          |
+| `ui`       | `src/views/`、`src/components/`    |
+| `ipc`      | `src/ipc/`                         |
+| `store`    | `src/stores/`                      |
+
+跨多模块的改动可省略 scope 或使用逗号分隔（如 `feat(agent,git): ...`）。
+
+## Description（必须）
+
+- 使用英文祈使句（imperative mood）：`add`, `fix`, `remove`，而非 `added`, `fixes`
+- 首字母小写，结尾不加句号
+- 长度 ≤ 72 字符（含 type+scope 前缀）
+- 描述 **为什么** 或 **做了什么**，而非复述代码
+
+## Body（可选）
+
+- 与 description 之间空一行
+- 解释 **动机与上下文**，说明 what 和 why，不需要说明 how
+- 每行 ≤ 100 字符
+- 可用中文或英文
+
+## Footer（可选）
+
+- 关联 DTS 问题单：`DTS: dts-2026-04-02-a3f7e1`
+- 关联功能模块：`Module: FM-02`
+- 破坏性变更：`BREAKING CHANGE: <description>`
+
+## 示例
+
+### 简单修复
+
+```
+fix(git): auto-resolve merge conflicts by accepting agent's version
+```
+
+### 带 body 和 footer
+
+```
+feat(agent): add DAG-ordered merge after mission completion
+
+After all agents complete, their branches are merged into main in
+topological order. Conflicts are auto-resolved by accepting the
+downstream agent's version since it has higher priority in the DAG.
+
+DTS: dts-2026-04-02-80d56b
+Module: FM-02
+```
+
+### 破坏性变更
+
+```
+refactor(ipc)!: rename startMission to startMissionExecution
+
+BREAKING CHANGE: frontend callers must update invoke name
+```
+
+### 文档与杂务
+
+```
+docs: add FM-08 mission lifecycle requirements and test cases
+
+Module: FM-08
+```
+
+```
+chore: add commit convention rule
+```
+
+## 禁止
+
+- 禁止无 type 前缀的自由格式消息
+- 禁止在 description 中堆砌文件名列表（放到 body）
+- 禁止空 commit 或仅含 "wip" 的 commit

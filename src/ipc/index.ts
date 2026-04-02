@@ -6,6 +6,23 @@ export type {
   ConfigResponse,
   SetApiKeyRequest,
   UpdateConfigRequest,
+  AgentEventRecord,
+  AgentDetail,
+  StartMissionRequest,
+  SchedulerStatus,
+  MissionAgentInfo,
 } from "./commands";
-export { onAgentEvent, onAgentStream } from "./events";
-export type { AgentEventPayload, AgentStreamPayload } from "./events";
+export {
+  onAgentEvent,
+  onAgentStream,
+  onAgentStarted,
+  onTaskStatusChanged,
+  onMissionStatusChanged,
+} from "./events";
+export type {
+  AgentEventPayload,
+  AgentStreamPayload,
+  AgentStartedPayload,
+  TaskStatusChangedPayload,
+  MissionStatusChangedPayload,
+} from "./events";

@@ -1,0 +1,33 @@
+---
+description: Safety rules for all git operations in the Miragenty codebase
+globs:
+  - "src-tauri/src/git/**"
+  - "src-tauri/src/agent/scheduler.rs"
+alwaysApply: false
+---
+
+# Git Operations Safety Protocol
+
+## Agent Worktree Merge — 产物交付质量
+
+Miragenty 的核心交付物是 Agent 在 worktree 中产生的文件。merge 到主分支后这些文件直接面向用户。
+
+1. **merge 后的文件绝不允许包含冲突标记**（`<<<<<<<`、`=======`、`>>>>>>>`）。这是用户的最终产出物，不是开发者的中间态。
+2. 冲突必须自动解决：多个 agent 按 DAG 拓扑序合并，冲突文件采用 **当前正在合并的 agent 分支版本**（theirs），因为后合并的 agent 在 DAG 中处于下游，其改动有更高优先级。
+3. merge 完成后必须验证工作目录无残留冲突标记。
+4. `MergeOutcome` 应区分 `Merged`（干净合并）和 `MergedWithOverrides`（有冲突文件被自动覆盖），便于上层记录和通知用户。
+
+## Commit 操作
+
+1. 使用 `git add -A` 时必须检查 tree 是否有实际变更，**禁止创建空 commit**。
+2. 签名（signature）不可用时回退到 Miragenty 默认签名，不可 panic。
+
+## Worktree 操作
+
+1. 创建 worktree 前确保仓库有至少一个 commit（HEAD 非 unborn）。
+2. 删除 worktree 时先删磁盘目录，再删分支——顺序不可反。
+
+## 测试要求
+
+1. 所有 merge 逻辑必须有单元测试覆盖：fast-forward、无冲突 merge、冲突自动解决。
+2. 冲突测试必须验证：合并后文件内容正确（无冲突标记）、返回值类型正确（`MergedWithOverrides`）、被覆盖的文件列表准确。

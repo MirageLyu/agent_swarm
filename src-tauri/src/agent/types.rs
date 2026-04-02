@@ -4,11 +4,10 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
     Idle,
-    Planning,
-    Executing,
-    WaitingCheckpoint,
+    Running,
     Completed,
     Failed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

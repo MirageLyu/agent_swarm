@@ -1,61 +1,96 @@
 import { create } from "zustand";
+import type {
+  MissionInfo,
+  TaskInfo,
+  DependencyInfo,
+  MissionStatus,
+} from "../ipc/commands";
 
-export type TaskStatus = "pending" | "queued" | "running" | "completed" | "failed" | "cancelled";
+export interface MissionState {
+  missions: MissionInfo[];
+  selectedMissionId: string | null;
+  tasks: TaskInfo[];
+  dependencies: DependencyInfo[];
+  planning: boolean;
+  error: string | null;
 
-export interface Task {
-  id: string;
-  missionId: string;
-  title: string;
-  description: string;
-  status: TaskStatus;
-  assignedAgentId: string | null;
-  dependencies: string[];
-  createdAt: string;
-  completedAt: string | null;
+  setMissions: (missions: MissionInfo[]) => void;
+  addMission: (mission: MissionInfo) => void;
+  removeMission: (id: string) => void;
+  updateMissionStatus: (id: string, status: MissionStatus) => void;
+  selectMission: (id: string | null) => void;
+
+  setDetail: (tasks: TaskInfo[], dependencies: DependencyInfo[]) => void;
+  addTaskLocal: (task: TaskInfo, deps: DependencyInfo[]) => void;
+  updateTaskLocal: (id: string, updates: Partial<TaskInfo>) => void;
+  removeTaskLocal: (id: string) => void;
+
+  setPlanning: (v: boolean) => void;
+  setError: (err: string | null) => void;
 }
 
-export interface Mission {
-  id: string;
-  title: string;
-  description: string;
-  status: "planning" | "executing" | "completed" | "failed";
-  tasks: string[];
-  createdAt: string;
-  totalCostUsd: number;
-}
+export const useTaskStore = create<MissionState>((set) => ({
+  missions: [],
+  selectedMissionId: null,
+  tasks: [],
+  dependencies: [],
+  planning: false,
+  error: null,
 
-interface TaskState {
-  missions: Record<string, Mission>;
-  tasks: Record<string, Task>;
-
-  addMission: (mission: Mission) => void;
-  updateMission: (id: string, updates: Partial<Mission>) => void;
-  addTask: (task: Task) => void;
-  updateTask: (id: string, updates: Partial<Task>) => void;
-}
-
-export const useTaskStore = create<TaskState>((set) => ({
-  missions: {},
-  tasks: {},
+  setMissions: (missions) => set({ missions }),
 
   addMission: (mission) =>
-    set((s) => ({ missions: { ...s.missions, [mission.id]: mission } })),
+    set((s) => ({ missions: [mission, ...s.missions] })),
 
-  updateMission: (id, updates) =>
+  removeMission: (id) =>
     set((s) => ({
-      missions: {
-        ...s.missions,
-        [id]: s.missions[id] ? { ...s.missions[id], ...updates } : s.missions[id],
-      },
+      missions: s.missions.filter((m) => m.id !== id),
+      selectedMissionId: s.selectedMissionId === id ? null : s.selectedMissionId,
     })),
 
-  addTask: (task) => set((s) => ({ tasks: { ...s.tasks, [task.id]: task } })),
-
-  updateTask: (id, updates) =>
+  updateMissionStatus: (id, status) =>
     set((s) => ({
-      tasks: {
-        ...s.tasks,
-        [id]: s.tasks[id] ? { ...s.tasks[id], ...updates } : s.tasks[id],
-      },
+      missions: s.missions.map((m) => (m.id === id ? { ...m, status } : m)),
     })),
+
+  selectMission: (id) => set({ selectedMissionId: id }),
+
+  setDetail: (tasks, dependencies) => set({ tasks, dependencies }),
+
+  addTaskLocal: (task, deps) =>
+    set((s) => ({
+      tasks: [...s.tasks, task],
+      dependencies: [...s.dependencies, ...deps],
+      missions: s.missions.map((m) =>
+        m.id === task.mission_id
+          ? { ...m, task_count: m.task_count + 1 }
+          : m,
+      ),
+    })),
+
+  updateTaskLocal: (id, updates) =>
+    set((s) => ({
+      tasks: s.tasks.map((t) => (t.id === id ? { ...t, ...updates } : t)),
+    })),
+
+  removeTaskLocal: (id) =>
+    set((s) => {
+      const task = s.tasks.find((t) => t.id === id);
+      return {
+        tasks: s.tasks.filter((t) => t.id !== id),
+        dependencies: s.dependencies.filter(
+          (d) => d.task_id !== id && d.depends_on !== id,
+        ),
+        missions: task
+          ? s.missions.map((m) =>
+              m.id === task.mission_id
+                ? { ...m, task_count: Math.max(0, m.task_count - 1) }
+                : m,
+            )
+          : s.missions,
+      };
+    }),
+
+  setPlanning: (v) => set({ planning: v }),
+  setError: (err) => set({ error: err }),
 }));

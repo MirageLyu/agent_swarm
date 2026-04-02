@@ -1,16 +1,15 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-const MIGRATIONS: &[(&str, &str)] = &[
-    (
+const MIGRATIONS: &[(&str, &str)] = &[(
         "001_initial",
         r#"
         CREATE TABLE IF NOT EXISTS missions (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
             description TEXT NOT NULL DEFAULT '',
-            status TEXT NOT NULL DEFAULT 'planning'
-                CHECK (status IN ('planning', 'executing', 'completed', 'failed')),
+            status TEXT NOT NULL DEFAULT 'draft'
+                CHECK (status IN ('draft', 'planned', 'running', 'completed', 'failed')),
             total_cost_usd REAL NOT NULL DEFAULT 0.0,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -22,7 +21,9 @@ const MIGRATIONS: &[(&str, &str)] = &[
             title TEXT NOT NULL,
             description TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'pending'
-                CHECK (status IN ('pending', 'queued', 'running', 'completed', 'failed', 'cancelled')),
+                CHECK (status IN ('pending', 'ready', 'running', 'completed', 'failed', 'cancelled')),
+            complexity TEXT NOT NULL DEFAULT 'medium'
+                CHECK (complexity IN ('low', 'medium', 'high')),
             assigned_agent_id TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             completed_at TEXT
@@ -39,7 +40,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
             name TEXT NOT NULL,
             task_id TEXT REFERENCES tasks(id),
             status TEXT NOT NULL DEFAULT 'idle'
-                CHECK (status IN ('idle', 'planning', 'executing', 'waiting_checkpoint', 'completed', 'failed')),
+                CHECK (status IN ('idle', 'running', 'completed', 'failed', 'cancelled')),
             worktree_path TEXT,
             current_step INTEGER NOT NULL DEFAULT 0,
             total_steps INTEGER,
@@ -72,6 +73,32 @@ const MIGRATIONS: &[(&str, &str)] = &[
         );
 
         CREATE INDEX IF NOT EXISTS idx_cost_records_agent ON cost_records(agent_id);
+        "#,
+    ),
+    (
+        "002_engine_hardening",
+        r#"
+        PRAGMA foreign_keys=OFF;
+
+        CREATE TABLE agent_events_new (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+            step INTEGER NOT NULL DEFAULT 0,
+            kind TEXT NOT NULL
+                CHECK (kind IN ('llm_call', 'tool_use', 'tool_result', 'checkpoint', 'error', 'message', 'status_change')),
+            content TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        INSERT INTO agent_events_new (id, agent_id, kind, content, created_at)
+            SELECT id, agent_id, kind, content, created_at FROM agent_events;
+
+        DROP TABLE agent_events;
+        ALTER TABLE agent_events_new RENAME TO agent_events;
+
+        CREATE INDEX IF NOT EXISTS idx_agent_events_agent ON agent_events(agent_id, created_at);
+
+        PRAGMA foreign_keys=ON;
         "#,
     ),
 ];
