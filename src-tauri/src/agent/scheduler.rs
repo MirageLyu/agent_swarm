@@ -276,7 +276,7 @@ impl Scheduler {
     }
 
     fn dispatch_task(
-        mission_id: &str,
+        _mission_id: &str,
         task_id: &str,
         task_title: &str,
         task_description: &str,
@@ -344,7 +344,6 @@ impl Scheduler {
 
         let aid = agent_id;
         let tid = task_id.to_string();
-        let mid = mission_id.to_string();
         let task_title_owned = task_title.to_string();
         let task_desc = format!("{task_title}\n\n{task_description}");
         let repo_path_owned = repo_path.clone();
@@ -392,7 +391,6 @@ impl Scheduler {
             );
 
             if task_status == "completed" {
-                // Auto-commit agent's work in the worktree
                 let wt_manager = WorktreeManager::new(repo_path_owned.clone());
                 let commit_msg = format!("[Task] {task_title_owned}");
                 match wt_manager.commit_worktree(&aid, &commit_msg) {
@@ -423,21 +421,8 @@ impl Scheduler {
                 }
             }
 
-            if let Ok(Some(new_status)) =
-                db.with_conn(|conn| queries::check_mission_terminal(conn, &mid))
-            {
-                if new_status == "completed" {
-                    Self::merge_completed_mission(&mid, &repo_path_owned, &app_clone);
-                }
-                let _ = app_clone.emit(
-                    "mission-status-changed",
-                    MissionStatusChangedPayload {
-                        mission_id: mid.clone(),
-                        from: "running".to_string(),
-                        to: new_status,
-                    },
-                );
-            }
+            // Terminal detection + merge is handled exclusively by poll_and_dispatch
+            // to avoid race conditions with duplicate merge calls.
 
             let registry = app_clone.state::<AgentRegistry>();
             registry.remove(&aid);
