@@ -1,19 +1,19 @@
 import type { MissionInfo } from "../../ipc/commands";
-import { MissionListItem } from "./MissionListItem";
+import { MissionListItem, type MissionAction } from "./MissionListItem";
 import styles from "./MissionList.module.css";
 
 interface MissionListProps {
   missions: MissionInfo[];
   selectedId: string | null;
   onSelect: (id: string) => void;
-  onDelete: (id: string) => void;
+  onAction: (id: string, action: MissionAction) => void;
 }
 
 export function MissionList({
   missions,
   selectedId,
   onSelect,
-  onDelete,
+  onAction,
 }: MissionListProps) {
   return (
     <div className={styles.container}>
@@ -30,7 +30,7 @@ export function MissionList({
               mission={m}
               selected={m.id === selectedId}
               onSelect={() => onSelect(m.id)}
-              onDelete={() => onDelete(m.id)}
+              onAction={(action) => onAction(m.id, action)}
             />
           ))
         )}

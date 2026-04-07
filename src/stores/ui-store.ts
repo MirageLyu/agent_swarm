@@ -4,6 +4,7 @@ export type ViewId =
   | "missions"
   | "workspace"
   | "agents"
+  | "review"
   | "insights"
   | "settings";
 

@@ -1,0 +1,89 @@
+.container {
+  width: 240px;
+  border-right: 0.5px solid var(--color-separator);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  overflow-y: auto;
+}
+
+.header {
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 0.5px solid var(--color-separator);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-1);
+}
+
+.fileItem {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  font-family: var(--font-mono);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+  border: none;
+  background: transparent;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  width: 100%;
+}
+
+.fileItem:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.fileItem.active {
+  background: var(--color-bg-active);
+  color: var(--color-text-primary);
+}
+
+.statusIndicator {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-family: var(--font-mono);
+}
+
+.statusIndicator.added {
+  color: var(--color-success);
+}
+
+.statusIndicator.modified {
+  color: var(--color-warning);
+}
+
+.statusIndicator.deleted {
+  color: var(--color-error);
+}
+
+.fileName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+
+.empty {
+  padding: var(--space-4);
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--color-text-tertiary);
+}

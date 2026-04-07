@@ -243,6 +243,65 @@ pub fn list_agents(app: tauri::AppHandle) -> Result<Vec<AgentDetail>, String> {
     .map_err(|e| e.to_string())
 }
 
+// ---- FM-04: Activity stream & cost tracking commands ----
+
+#[derive(Debug, Deserialize)]
+pub struct ListAgentEventsRequest {
+    pub mission_id: Option<String>,
+    pub agent_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct MissionCostSummary {
+    pub total_cost: f64,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+}
+
+#[tauri::command]
+pub fn list_agent_events(
+    app: tauri::AppHandle,
+    request: ListAgentEventsRequest,
+) -> Result<Vec<AgentEventRecord>, String> {
+    let db = app.state::<Database>();
+    db.with_conn(|conn| {
+        let rows = queries::list_agent_events(
+            conn,
+            request.mission_id.as_deref(),
+            request.agent_id.as_deref(),
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|r| AgentEventRecord {
+                id: r.id,
+                agent_id: r.agent_id,
+                step: r.step as u32,
+                kind: r.kind,
+                content: r.content,
+                created_at: r.created_at,
+            })
+            .collect())
+    })
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_mission_cost_summary(
+    app: tauri::AppHandle,
+    mission_id: String,
+) -> Result<MissionCostSummary, String> {
+    let db = app.state::<Database>();
+    db.with_conn(|conn| {
+        let summary = queries::get_mission_cost_summary(conn, &mission_id)?;
+        Ok(MissionCostSummary {
+            total_cost: summary.total_cost,
+            total_input_tokens: summary.total_input_tokens,
+            total_output_tokens: summary.total_output_tokens,
+        })
+    })
+    .map_err(|e| e.to_string())
+}
+
 // ---- FM-02: Mission execution commands ----
 
 #[tauri::command]
@@ -301,8 +360,18 @@ pub async fn start_mission_execution(
     if mission_status == "planned" {
         db.with_conn(|conn| {
             conn.execute(
-                "UPDATE missions SET status = 'running', updated_at = datetime('now') WHERE id = ?1",
-                [&request.mission_id],
+                "UPDATE missions SET status = 'running', repo_path = ?1, updated_at = datetime('now') WHERE id = ?2",
+                rusqlite::params![request.repo_path, request.mission_id],
+            )?;
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+    } else {
+        // running state — still record repo_path if not set
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE missions SET repo_path = COALESCE(repo_path, ?1), updated_at = datetime('now') WHERE id = ?2",
+                rusqlite::params![request.repo_path, request.mission_id],
             )?;
             Ok(())
         })
@@ -425,6 +494,169 @@ pub fn get_scheduler_status(app: tauri::AppHandle) -> Result<SchedulerStatus, St
         })
     })
     .map_err(|e| e.to_string())
+}
+
+// ---- FM-06: Runtime Intervention commands ----
+
+#[derive(Debug, Deserialize)]
+pub struct InjectAgentNoteRequest {
+    pub agent_id: String,
+    pub note: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct InjectAgentNoteResponse {
+    pub note_id: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct AgentNoteRecord {
+    pub id: String,
+    pub agent_id: String,
+    pub content: String,
+    pub status: String,
+    pub created_at: String,
+    pub applied_at: Option<String>,
+    pub mission_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InjectMissionNoteRequest {
+    pub mission_id: String,
+    pub note: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct InjectMissionNoteResponse {
+    pub note_ids: Vec<String>,
+    pub agent_count: usize,
+}
+
+#[tauri::command]
+pub fn inject_agent_note(
+    app: tauri::AppHandle,
+    request: InjectAgentNoteRequest,
+) -> Result<InjectAgentNoteResponse, String> {
+    let note = request.note.trim().to_string();
+    if note.is_empty() {
+        return Err("Note content cannot be empty".to_string());
+    }
+    if note.len() > 2000 {
+        return Err("Note content too long (max 2000 characters)".to_string());
+    }
+
+    let db = app.state::<Database>();
+
+    let agent_status: String = db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT status FROM agents WHERE id = ?1",
+                rusqlite::params![request.agent_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| anyhow::anyhow!("Agent not found"))
+        })
+        .map_err(|e| e.to_string())?;
+
+    if agent_status != "running" {
+        return Err(format!(
+            "Agent is not running (status: {agent_status})"
+        ));
+    }
+
+    let note_id = Uuid::new_v4().to_string();
+    db.with_conn(|conn| queries::insert_note(conn, &note_id, &request.agent_id, &note))
+        .map_err(|e| format!("Failed to inject note: {e}"))?;
+
+    Ok(InjectAgentNoteResponse { note_id })
+}
+
+#[tauri::command]
+pub fn list_agent_notes(
+    app: tauri::AppHandle,
+    agent_id: String,
+) -> Result<Vec<AgentNoteRecord>, String> {
+    let db = app.state::<Database>();
+    db.with_conn(|conn| {
+        let rows = queries::list_notes_for_agent(conn, &agent_id)?;
+        Ok(rows.into_iter().map(note_row_to_record).collect())
+    })
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn inject_mission_note(
+    app: tauri::AppHandle,
+    request: InjectMissionNoteRequest,
+) -> Result<InjectMissionNoteResponse, String> {
+    let note = request.note.trim().to_string();
+    if note.is_empty() {
+        return Err("Note content cannot be empty".to_string());
+    }
+    if note.len() > 2000 {
+        return Err("Note content too long (max 2000 characters)".to_string());
+    }
+
+    let db = app.state::<Database>();
+
+    let running_agents = db
+        .with_conn(|conn| queries::get_running_agent_ids_for_mission(conn, &request.mission_id))
+        .map_err(|e| e.to_string())?;
+
+    if running_agents.is_empty() {
+        return Err("No running agents in this mission".to_string());
+    }
+
+    let mut note_ids = Vec::with_capacity(running_agents.len());
+    let agent_count = running_agents.len();
+
+    db.with_conn(|conn| {
+        queries::append_mission_directive(conn, &request.mission_id, &note)?;
+
+        for agent_id in &running_agents {
+            let note_id = Uuid::new_v4().to_string();
+            queries::insert_note_for_mission(
+                conn,
+                &note_id,
+                agent_id,
+                &request.mission_id,
+                &note,
+            )?;
+            note_ids.push(note_id);
+        }
+        Ok(())
+    })
+    .map_err(|e| format!("Failed to inject mission note: {e}"))?;
+
+    Ok(InjectMissionNoteResponse {
+        note_ids,
+        agent_count,
+    })
+}
+
+#[tauri::command]
+pub fn list_mission_notes(
+    app: tauri::AppHandle,
+    mission_id: String,
+) -> Result<Vec<AgentNoteRecord>, String> {
+    let db = app.state::<Database>();
+    db.with_conn(|conn| {
+        let rows = queries::list_notes_for_mission(conn, &mission_id)?;
+        Ok(rows.into_iter().map(note_row_to_record).collect())
+    })
+    .map_err(|e| e.to_string())
+}
+
+fn note_row_to_record(r: queries::NoteRow) -> AgentNoteRecord {
+    AgentNoteRecord {
+        id: r.id,
+        agent_id: r.agent_id,
+        content: r.content,
+        status: r.status,
+        created_at: r.created_at,
+        applied_at: r.applied_at,
+        mission_id: r.mission_id,
+    }
 }
 
 #[tauri::command]

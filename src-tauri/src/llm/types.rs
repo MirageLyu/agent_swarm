@@ -61,6 +61,7 @@ pub struct StreamChunk {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StreamChunkKind {
     TextDelta,
+    ReasoningDelta,
     ToolUseStart { id: String, name: String },
     ToolUseInputDelta,
     MessageStop,

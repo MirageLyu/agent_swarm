@@ -1,8 +1,9 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { TaskInfo, DependencyInfo } from "../../ipc/commands";
 import { computeDagLayout } from "./dag-layout";
 import { TaskNode } from "./TaskNode";
 import { TaskEdge } from "./TaskEdge";
+import { DAGViewport, type ViewportTransform } from "./DAGViewport";
 import styles from "./TaskDAG.module.css";
 
 interface TaskDAGProps {
@@ -25,6 +26,12 @@ export function TaskDAG({
     [tasks, dependencies],
   );
 
+  const [transform, setTransform] = useState<ViewportTransform>({
+    scale: 1,
+    translateX: 0,
+    translateY: 0,
+  });
+
   if (tasks.length === 0) {
     return (
       <div className={styles.empty}>
@@ -45,11 +52,17 @@ export function TaskDAG({
           + Add Task
         </button>
       </div>
-      <div className={styles.viewport}>
+      <DAGViewport
+        contentWidth={layout.width}
+        contentHeight={layout.height}
+        transform={transform}
+        onTransformChange={setTransform}
+      >
         <svg
           width={layout.width}
           height={layout.height}
           className={styles.svg}
+          style={{ overflow: "visible" }}
         >
           <defs>
             <marker
@@ -83,7 +96,7 @@ export function TaskDAG({
             );
           })}
         </svg>
-      </div>
+      </DAGViewport>
     </div>
   );
 }

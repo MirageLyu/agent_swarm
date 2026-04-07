@@ -49,6 +49,7 @@ export function TaskNode({ task, layout, onEdit, onDelete }: TaskNodeProps) {
       y={layout.y}
       width={NODE_WIDTH}
       height={NODE_HEIGHT}
+      overflow="visible"
     >
       <div
         className={styles.node}

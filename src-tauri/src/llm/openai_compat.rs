@@ -133,6 +133,9 @@ impl OpenAICompatProvider {
             "max_tokens": request.max_tokens,
             "stream": stream,
         });
+        if stream {
+            body["stream_options"] = json!({ "include_usage": true });
+        }
         if !request.tools.is_empty() {
             body["tools"] = json!(self.convert_tools(&request.tools));
         }
@@ -255,6 +258,7 @@ impl LlmProvider for OpenAICompatProvider {
         }
 
         let mut full_text = String::new();
+        let mut full_reasoning = String::new();
         let mut tool_calls: Vec<(String, String, String)> = Vec::new(); // (id, name, args)
         let mut usage = TokenUsage::default();
         let mut finish_reason = String::from("stop");
@@ -282,6 +286,19 @@ impl LlmProvider for OpenAICompatProvider {
                 if let Ok(data) = serde_json::from_str::<serde_json::Value>(json_str) {
                     if let Some(choice) = data["choices"].as_array().and_then(|c| c.first()) {
                         let delta = &choice["delta"];
+
+                        // DashScope/Qwen reasoning models: reasoning_content
+                        if let Some(reasoning) = delta["reasoning_content"].as_str() {
+                            if !reasoning.is_empty() {
+                                full_reasoning.push_str(reasoning);
+                                let _ = tx
+                                    .send(StreamChunk {
+                                        kind: StreamChunkKind::ReasoningDelta,
+                                        content: reasoning.to_string(),
+                                    })
+                                    .await;
+                            }
+                        }
 
                         if let Some(text) = delta["content"].as_str() {
                             if !text.is_empty() {

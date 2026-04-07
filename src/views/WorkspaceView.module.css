@@ -4,32 +4,54 @@
   height: 100%;
 }
 
-.inputBar {
+.toolbar {
   display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: var(--space-3);
-  padding: var(--space-4);
+  padding: var(--space-2) var(--space-4);
   border-bottom: 0.5px solid var(--color-separator);
   background: var(--color-bg-primary);
 }
 
-.taskInput {
-  flex: 1;
-  height: 36px;
-  padding: 0 var(--space-4);
-  font-size: var(--text-sm);
+.toolbarLeft {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.toolbarRight {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.missionFilter {
+  height: 28px;
+  padding: 0 var(--space-3);
+  font-size: var(--text-xs);
   background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
+  color: var(--color-text-primary);
   outline: none;
+  cursor: pointer;
+  min-width: 160px;
   transition: border-color var(--duration-fast) var(--ease-out);
 }
 
-.taskInput:focus {
+.missionFilter:focus {
   border-color: var(--color-accent);
-  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.12);
 }
 
-.taskInput::placeholder {
+.viewToggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.viewLabel {
+  font-size: var(--text-xs);
   color: var(--color-text-tertiary);
 }
 
@@ -40,156 +62,4 @@
   flex: 1;
   color: var(--color-text-tertiary);
   font-size: var(--text-sm);
-}
-
-.workspace {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 0;
-}
-
-.agentTabs {
-  display: flex;
-  gap: 1px;
-  padding: var(--space-2) var(--space-4);
-  border-bottom: 0.5px solid var(--color-separator);
-  background: var(--color-bg-primary);
-  overflow-x: auto;
-}
-
-.tab {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-1) var(--space-3);
-  border-radius: var(--radius-sm);
-  font-size: var(--text-xs);
-  color: var(--color-text-secondary);
-  transition: all var(--duration-fast) var(--ease-out);
-  white-space: nowrap;
-}
-
-.tab:hover {
-  background: var(--color-bg-hover);
-}
-
-.tabActive {
-  background: var(--color-bg-active);
-  color: var(--color-text-primary);
-}
-
-.tabDot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--color-text-tertiary);
-}
-
-.tabDot[data-status="running"] {
-  background: var(--color-accent);
-  animation: pulse 1.5s infinite;
-}
-
-.tabDot[data-status="completed"] {
-  background: var(--color-success);
-}
-
-.tabDot[data-status="failed"] {
-  background: var(--color-error);
-}
-
-.tabDot[data-status="cancelled"] {
-  background: var(--color-warning);
-}
-
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.4;
-  }
-}
-
-.tabLabel {
-  font-family: var(--font-mono);
-}
-
-.toolbar {
-  display: flex;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-4);
-  border-bottom: 0.5px solid var(--color-separator);
-  background: var(--color-bg-primary);
-}
-
-.stream {
-  flex: 1;
-  overflow-y: auto;
-  padding: var(--space-4);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-
-.event {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: var(--space-3);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-primary);
-  border: 0.5px solid var(--color-border);
-}
-
-.eventHeader {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.eventContent {
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  line-height: 1.5;
-  color: var(--color-text-secondary);
-  white-space: pre-wrap;
-  word-break: break-all;
-  margin: 0;
-  max-height: 200px;
-  overflow-y: auto;
-}
-
-.streamingBlock {
-  padding: var(--space-3);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-primary);
-  border: 0.5px solid var(--color-accent);
-}
-
-.streamText {
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  line-height: 1.5;
-  color: var(--color-text-primary);
-  white-space: pre-wrap;
-  word-break: break-all;
-  margin: 0;
-}
-
-.cursor {
-  display: inline-block;
-  width: 8px;
-  height: 14px;
-  background: var(--color-accent);
-  animation: blink 0.8s step-end infinite;
-  vertical-align: text-bottom;
-}
-
-@keyframes blink {
-  50% {
-    opacity: 0;
-  }
 }

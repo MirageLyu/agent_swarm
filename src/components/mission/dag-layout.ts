@@ -172,15 +172,19 @@ export function computeDagLayout(
     });
   }
 
+  const MENU_CLEARANCE = 100;
   const totalWidth =
     PADDING * 2 + numLayers * NODE_WIDTH + (numLayers - 1) * LAYER_GAP;
   const totalHeight =
-    PADDING * 2 + maxNodesInLayer * (NODE_HEIGHT + NODE_GAP) - NODE_GAP;
+    PADDING * 2 +
+    maxNodesInLayer * (NODE_HEIGHT + NODE_GAP) -
+    NODE_GAP +
+    MENU_CLEARANCE;
 
   return {
     nodes: tasks.map((t) => nodeMap.get(t.id)!).filter(Boolean),
     edges,
     width: Math.max(totalWidth, NODE_WIDTH + PADDING * 2),
-    height: Math.max(totalHeight, NODE_HEIGHT + PADDING * 2),
+    height: Math.max(totalHeight, NODE_HEIGHT + PADDING * 2 + MENU_CLEARANCE),
   };
 }

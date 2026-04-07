@@ -70,6 +70,16 @@ pub fn run() {
             commands::get_scheduler_status,
             commands::list_agents_by_mission,
             commands::get_default_workspace_path,
+            commands::list_agent_events,
+            commands::get_mission_cost_summary,
+            commands::get_agent_diff,
+            commands::submit_review_action,
+            commands::inject_agent_note,
+            commands::list_agent_notes,
+            commands::inject_mission_note,
+            commands::list_mission_notes,
+            commands::stop_mission_execution,
+            commands::restart_mission,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

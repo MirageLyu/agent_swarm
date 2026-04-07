@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use uuid::Uuid;
 
 use crate::agent::planner;
+use crate::agent::scheduler::{MissionStatusChangedPayload, Scheduler};
 use crate::commands::ConfigManager;
+use crate::db::queries;
 use crate::llm::{AnthropicProvider, LlmProvider, OpenAICompatProvider};
 
 // ---------- shared types ----------
@@ -170,7 +172,7 @@ pub async fn plan_mission(
 ) -> Result<PlanMissionResponse, String> {
     let (provider, model) = build_provider(&app)?;
 
-    let planner_output = planner::call_planner(provider, &model, &request.description)
+    let planner_output = planner::call_planner(provider, &model, &request.description, &app)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -443,27 +445,212 @@ pub fn confirm_mission(app: tauri::AppHandle, mission_id: String) -> Result<(), 
     .map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DeleteMissionRequest {
+    pub mission_id: String,
+    pub clean_workspace: bool,
+}
+
 #[tauri::command]
-pub fn delete_mission(app: tauri::AppHandle, mission_id: String) -> Result<(), String> {
+pub async fn delete_mission(
+    app: tauri::AppHandle,
+    request: DeleteMissionRequest,
+) -> Result<(), String> {
     let db = app.state::<crate::db::Database>();
 
+    let (status, repo_path): (String, Option<String>) = db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT status, repo_path FROM missions WHERE id = ?",
+                [&request.mission_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| anyhow::anyhow!("Mission not found"))
+        })
+        .map_err(|e| e.to_string())?;
+
+    if status == "running" {
+        return Err("Cannot delete a running mission. Please stop it first.".to_string());
+    }
+
     db.with_conn(|conn| {
-        let status: String = conn
-            .query_row(
+        queries::delete_agents_for_mission(conn, &request.mission_id)?;
+        conn.execute("DELETE FROM missions WHERE id = ?", [&request.mission_id])?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
+
+    // Async workspace cleanup
+    if request.clean_workspace {
+        if let Some(rp) = repo_path {
+            let mid = request.mission_id.clone();
+            tokio::spawn(async move {
+                let worktrees_dir = std::path::PathBuf::from(&rp).join(".worktrees");
+                if worktrees_dir.exists() {
+                    if let Err(e) = tokio::fs::remove_dir_all(&worktrees_dir).await {
+                        tracing::warn!("Failed to clean worktrees for mission {mid}: {e}");
+                    } else {
+                        tracing::info!("Cleaned worktrees for mission {mid}");
+                    }
+                }
+            });
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn stop_mission_execution(
+    app: tauri::AppHandle,
+    mission_id: String,
+) -> Result<(), String> {
+    let db = app.state::<crate::db::Database>();
+
+    let status: String = db
+        .with_conn(|conn| {
+            conn.query_row(
                 "SELECT status FROM missions WHERE id = ?",
                 [&mission_id],
                 |row| row.get(0),
             )
-            .map_err(|_| anyhow::anyhow!("Mission not found"))?;
+            .map_err(|_| anyhow::anyhow!("Mission not found"))
+        })
+        .map_err(|e| e.to_string())?;
 
-        if status != "draft" {
-            anyhow::bail!("Only draft missions can be deleted (current: {status})");
-        }
+    if status != "running" {
+        return Err(format!(
+            "Mission must be running to stop (current: {status})"
+        ));
+    }
 
-        conn.execute("DELETE FROM missions WHERE id = ?", [&mission_id])?;
+    let scheduler = app.state::<Scheduler>();
+    scheduler.stop_mission(&mission_id);
+
+    db.with_conn(|conn| {
+        queries::reset_orphaned_running_tasks(conn, &mission_id)?;
+        conn.execute(
+            "UPDATE missions SET status = 'failed', updated_at = datetime('now') WHERE id = ?1",
+            [&mission_id],
+        )?;
         Ok(())
     })
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+
+    let _ = app.emit(
+        "mission-status-changed",
+        MissionStatusChangedPayload {
+            mission_id,
+            from: "running".to_string(),
+            to: "failed".to_string(),
+        },
+    );
+
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RestartMissionRequest {
+    pub mission_id: String,
+    pub mode: String, // "full" | "failed_only"
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct RestartResult {
+    pub reset_count: u32,
+}
+
+#[tauri::command]
+pub async fn restart_mission(
+    app: tauri::AppHandle,
+    request: RestartMissionRequest,
+) -> Result<RestartResult, String> {
+    let db = app.state::<crate::db::Database>();
+
+    let (status, repo_path): (String, Option<String>) = db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT status, repo_path FROM missions WHERE id = ?",
+                [&request.mission_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| anyhow::anyhow!("Mission not found"))
+        })
+        .map_err(|e| e.to_string())?;
+
+    if status != "completed" && status != "failed" {
+        return Err(format!(
+            "Mission must be completed or failed to restart (current: {status})"
+        ));
+    }
+
+    let reset_count = db
+        .with_conn(|conn| {
+            match request.mode.as_str() {
+                "full" => {
+                    queries::delete_agents_for_mission(conn, &request.mission_id)?;
+                    let count = queries::reset_all_tasks(conn, &request.mission_id)?;
+
+                    conn.execute(
+                        "UPDATE missions SET status = 'planned', updated_at = datetime('now') WHERE id = ?1",
+                        [&request.mission_id],
+                    )?;
+
+                    Ok(count)
+                }
+                "failed_only" => {
+                    let failed_count =
+                        queries::count_failed_tasks(conn, &request.mission_id)?;
+                    if failed_count == 0 {
+                        anyhow::bail!("No failed or cancelled tasks to restart");
+                    }
+
+                    // Get failed task ids for selective agent cleanup
+                    let mut stmt = conn.prepare(
+                        "SELECT id FROM tasks WHERE mission_id = ?1 AND status IN ('failed', 'cancelled')",
+                    )?;
+                    let failed_ids: Vec<String> = stmt
+                        .query_map(rusqlite::params![request.mission_id], |row| row.get(0))?
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+                    queries::delete_agents_for_tasks(conn, &failed_ids)?;
+                    let count = queries::reset_failed_tasks(conn, &request.mission_id)?;
+
+                    conn.execute(
+                        "UPDATE missions SET status = 'planned', updated_at = datetime('now') WHERE id = ?1",
+                        [&request.mission_id],
+                    )?;
+
+                    Ok(count)
+                }
+                _ => anyhow::bail!("Invalid restart mode: {}", request.mode),
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    // Async worktree cleanup
+    if let Some(rp) = repo_path {
+        let mode = request.mode.clone();
+        tokio::spawn(async move {
+            if mode == "full" {
+                let worktrees_dir = std::path::PathBuf::from(&rp).join(".worktrees");
+                if worktrees_dir.exists() {
+                    let _ = tokio::fs::remove_dir_all(&worktrees_dir).await;
+                }
+            }
+        });
+    }
+
+    let _ = app.emit(
+        "mission-status-changed",
+        MissionStatusChangedPayload {
+            mission_id: request.mission_id,
+            from: status,
+            to: "planned".to_string(),
+        },
+    );
+
+    Ok(RestartResult { reset_count })
 }
 
 // ---------- helpers ----------

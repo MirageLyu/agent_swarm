@@ -11,6 +11,21 @@ export type {
   StartMissionRequest,
   SchedulerStatus,
   MissionAgentInfo,
+  ListAgentEventsRequest,
+  MissionCostSummary,
+  DiffFile,
+  AgentDiffResponse,
+  SubmitReviewActionRequest,
+  ReviewAction,
+  NoteStatus,
+  AgentNoteRecord,
+  InjectAgentNoteRequest,
+  InjectAgentNoteResponse,
+  InjectMissionNoteRequest,
+  InjectMissionNoteResponse,
+  DeleteMissionRequest,
+  RestartMissionRequest,
+  RestartResult,
 } from "./commands";
 export {
   onAgentEvent,
@@ -18,6 +33,7 @@ export {
   onAgentStarted,
   onTaskStatusChanged,
   onMissionStatusChanged,
+  onPlannerStream,
 } from "./events";
 export type {
   AgentEventPayload,
@@ -25,4 +41,5 @@ export type {
   AgentStartedPayload,
   TaskStatusChangedPayload,
   MissionStatusChangedPayload,
+  PlannerStreamPayload,
 } from "./events";

@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "../components/ui/Button";
-import { Badge } from "../components/ui/Badge";
 import {
   commands,
   onAgentEvent,
@@ -10,137 +9,212 @@ import {
   onMissionStatusChanged,
 } from "../ipc";
 import type { AgentEventPayload, AgentStreamPayload } from "../ipc";
-import type { TaskStatus, MissionStatus } from "../ipc/commands";
+import type { TaskStatus, MissionStatus, MissionCostSummary } from "../ipc/commands";
+import { useAgentStore } from "../stores/agent-store";
+import type { Agent, AgentEvent, AgentStatus } from "../stores/agent-store";
 import { useTaskStore } from "../stores/task-store";
+import { AgentStreamList } from "../components/workspace/AgentStreamList";
+import { AgentTimeline } from "../components/workspace/AgentTimeline";
+import { CostSummaryBar } from "../components/workspace/CostSummaryBar";
+import { MissionNoteBar } from "../components/workspace/MissionNoteBar";
 import styles from "./WorkspaceView.module.css";
 
-type AgentActivityStatus = "running" | "completed" | "failed" | "cancelled";
+let eventCounter = 0;
 
-interface AgentActivity {
-  agentId: string;
-  events: Array<{
-    id: number;
-    step: number;
-    kind: string;
-    content: string;
-    timestamp: number;
-  }>;
-  streamBuffer: string;
-  status: AgentActivityStatus;
+function parseCheckpointCost(content: string): { inputTokens: number; outputTokens: number; cost: number } | null {
+  const tokensMatch = content.match(/tokens:\s*(\d+)in\/(\d+)out/);
+  const costMatch = content.match(/cost:\s*\$([0-9.]+)/);
+  if (!tokensMatch) return null;
+  return {
+    inputTokens: parseInt(tokensMatch[1], 10),
+    outputTokens: parseInt(tokensMatch[2], 10),
+    cost: costMatch ? parseFloat(costMatch[1]) : 0,
+  };
 }
 
-function statusBadgeVariant(status: AgentActivityStatus) {
-  switch (status) {
-    case "completed":
-      return "success" as const;
-    case "failed":
-      return "error" as const;
-    case "cancelled":
-      return "warning" as const;
-    default:
-      return "info" as const;
-  }
+function toAgentStatus(raw: string): AgentStatus {
+  const valid: AgentStatus[] = ["idle", "running", "completed", "failed", "cancelled", "waiting"];
+  return valid.includes(raw as AgentStatus) ? (raw as AgentStatus) : "completed";
 }
 
 export function WorkspaceView() {
-  const [input, setInput] = useState("");
-  const [agents, setAgents] = useState<Record<string, AgentActivity>>({});
-  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
-  const eventCountRef = useRef(0);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const { updateTaskLocal, updateMissionStatus } = useTaskStore();
+  const {
+    agents,
+    activeAgentId,
+    viewMode,
+    filterMissionId,
+    setActiveAgent,
+    setViewMode,
+    setFilterMissionId,
+    addAgent,
+    updateAgent,
+    appendEvent,
+    appendStream,
+    hydrateAgents,
+    hydrateEvents,
+  } = useAgentStore();
 
-  // Load historical agents from DB on mount
+  const { missions, updateTaskLocal, updateMissionStatus } = useTaskStore();
+  const [costSummary, setCostSummary] = useState<MissionCostSummary>({
+    total_cost: 0,
+    total_input_tokens: 0,
+    total_output_tokens: 0,
+  });
+
+  // Load mission list for the filter dropdown
   useEffect(() => {
-    commands.listAgents().then((list) => {
-      if (list.length === 0) return;
-      const restored: Record<string, AgentActivity> = {};
-      for (const a of list) {
-        restored[a.id] = {
-          agentId: a.id,
-          events: [],
-          streamBuffer: "",
-          status: (["running", "completed", "failed", "cancelled"].includes(a.status)
-            ? a.status
-            : "completed") as AgentActivityStatus,
-        };
-      }
-      setAgents((prev) => ({ ...restored, ...prev }));
-      setSelectedAgent((cur) => cur ?? list[0].id);
+    commands.listMissions().then((list) => {
+      useTaskStore.getState().setMissions(list);
     }).catch(() => {});
   }, []);
 
+  // Load agents for the current mission filter (or all agents)
   useEffect(() => {
-    const unlistenEvent = onAgentEvent((payload: AgentEventPayload) => {
-      setAgents((prev) => {
-        const agent = prev[payload.agent_id] || {
-          agentId: payload.agent_id,
+    const load = async () => {
+      try {
+        let agentList;
+        if (filterMissionId) {
+          agentList = await commands.listAgentsByMission(filterMissionId);
+        } else {
+          agentList = await commands.listAgents();
+        }
+        const hydrated: Agent[] = agentList.map((a) => ({
+          id: a.id,
+          name: a.name,
+          taskId: ("task_id" in a && a.task_id) ? String(a.task_id) : "",
+          missionId: filterMissionId,
+          status: toAgentStatus(a.status),
+          worktreePath: ("worktree_path" in a ? (a as { worktree_path?: string | null }).worktree_path : null) ?? null,
+          currentStep: a.current_step,
+          totalSteps: null,
+          tokensUsed: a.tokens_used,
+          costUsd: a.cost_usd,
           events: [],
           streamBuffer: "",
-          status: "running" as const,
-        };
+        }));
+        hydrateAgents(hydrated);
+      } catch {}
+    };
+    load();
+  }, [filterMissionId, hydrateAgents]);
 
-        const newEvent = {
-          id: eventCountRef.current++,
-          step: payload.step,
-          kind: payload.kind,
-          content: payload.content,
-          timestamp: Date.now(),
-        };
+  // Load cost summary when mission filter changes
+  useEffect(() => {
+    if (!filterMissionId) {
+      setCostSummary({ total_cost: 0, total_input_tokens: 0, total_output_tokens: 0 });
+      return;
+    }
+    commands.getMissionCostSummary(filterMissionId).then(setCostSummary).catch(() => {});
+  }, [filterMissionId]);
 
-        let status = agent.status;
-        if (payload.kind === "status_change") {
-          if (payload.content === "cancelled") status = "cancelled";
-          else if (payload.content === "running") status = "running";
-        } else if (payload.kind === "message" || payload.content.includes("Completed")) {
-          status = "completed";
-        } else if (payload.kind === "error" && payload.content.includes("Max steps")) {
-          status = "failed";
+  // Auto-load historical events when an agent is selected and has no events
+  useEffect(() => {
+    if (!activeAgentId) return;
+    const agent = agents[activeAgentId];
+    if (agent && agent.events.length === 0 && agent.status !== "running") {
+      commands.getAgentEvents(activeAgentId).then((events) => {
+        const mapped: AgentEvent[] = events.map((e) => ({
+          id: e.id,
+          agentId: e.agent_id,
+          step: e.step,
+          kind: e.kind as AgentEvent["kind"],
+          content: e.content,
+          timestamp: e.created_at,
+        }));
+        hydrateEvents(activeAgentId, mapped);
+      }).catch(() => {});
+    }
+  }, [activeAgentId, agents, hydrateEvents]);
+
+  // Realtime event subscriptions
+  useEffect(() => {
+    const unlistenEvent = onAgentEvent((payload: AgentEventPayload) => {
+      const agentId = payload.agent_id;
+      const store = useAgentStore.getState();
+
+      if (!store.agents[agentId]) {
+        addAgent({
+          id: agentId,
+          name: `Agent ${agentId.substring(0, 8)}`,
+          taskId: "",
+          missionId: null,
+          status: "running",
+          worktreePath: null,
+          currentStep: payload.step,
+          totalSteps: null,
+          tokensUsed: 0,
+          costUsd: 0,
+          events: [],
+          streamBuffer: "",
+        });
+      }
+
+      const evt: AgentEvent = {
+        id: `rt-${eventCounter++}`,
+        agentId,
+        step: payload.step,
+        kind: payload.kind as AgentEvent["kind"],
+        content: payload.content,
+        timestamp: new Date().toISOString(),
+      };
+      appendEvent(agentId, evt);
+
+      const currentAgent = useAgentStore.getState().agents[agentId];
+      const updates: Partial<Agent> = { currentStep: payload.step };
+
+      if (payload.kind === "status_change") {
+        updates.status = toAgentStatus(payload.content);
+      } else if (payload.kind === "message") {
+        updates.status = "completed";
+      } else if (payload.kind === "error" && payload.content.includes("Max steps")) {
+        updates.status = "failed";
+      }
+
+      if (payload.kind === "checkpoint" && currentAgent) {
+        const parsed = parseCheckpointCost(payload.content);
+        if (parsed) {
+          updates.tokensUsed = (currentAgent.tokensUsed || 0) + parsed.inputTokens + parsed.outputTokens;
+          updates.costUsd = (currentAgent.costUsd || 0) + parsed.cost;
         }
+      }
 
-        return {
-          ...prev,
-          [payload.agent_id]: {
-            ...agent,
-            events: [...agent.events, newEvent],
-            status,
-          },
-        };
-      });
+      const terminalStatuses: AgentStatus[] = ["completed", "failed", "cancelled"];
+      if (updates.status && terminalStatuses.includes(updates.status)) {
+        updates.streamBuffer = "";
+      }
 
-      if (!selectedAgent) {
-        setSelectedAgent(payload.agent_id);
+      updateAgent(agentId, updates);
+
+      if (!store.activeAgentId) {
+        setActiveAgent(agentId);
       }
     });
 
     const unlistenStream = onAgentStream((payload: AgentStreamPayload) => {
-      setAgents((prev) => {
-        const agent = prev[payload.agent_id];
-        if (!agent) return prev;
-        return {
-          ...prev,
-          [payload.agent_id]: {
-            ...agent,
-            streamBuffer: agent.streamBuffer + payload.content,
-          },
-        };
-      });
+      appendStream(payload.agent_id, payload.content);
     });
 
     const unlistenStarted = onAgentStarted((payload) => {
-      setAgents((prev) => {
-        if (prev[payload.agent_id]) return prev;
-        return {
-          ...prev,
-          [payload.agent_id]: {
-            agentId: payload.agent_id,
-            events: [],
-            streamBuffer: "",
-            status: "running",
-          },
-        };
-      });
-      setSelectedAgent((cur) => cur ?? payload.agent_id);
+      const store = useAgentStore.getState();
+      if (!store.agents[payload.agent_id]) {
+        addAgent({
+          id: payload.agent_id,
+          name: `Agent ${payload.agent_id.substring(0, 8)}`,
+          taskId: payload.task_id,
+          missionId: null,
+          status: "running",
+          worktreePath: payload.worktree_path,
+          currentStep: 0,
+          totalSteps: null,
+          tokensUsed: 0,
+          costUsd: 0,
+          events: [],
+          streamBuffer: "",
+        });
+      }
+      if (!store.activeAgentId) {
+        setActiveAgent(payload.agent_id);
+      }
     });
 
     const unlistenTask = onTaskStatusChanged((payload) => {
@@ -158,182 +232,133 @@ export function WorkspaceView() {
       unlistenTask.then((fn) => fn());
       unlistenMission.then((fn) => fn());
     };
-  }, [selectedAgent, updateTaskLocal, updateMissionStatus]);
+  }, [addAgent, updateAgent, appendEvent, appendStream, setActiveAgent, updateTaskLocal, updateMissionStatus]);
 
-  // Auto-load events when selecting an agent with no events yet (historical)
+  // Periodically refresh cost summary while a mission is running
   useEffect(() => {
-    if (!selectedAgent) return;
-    const agent = agents[selectedAgent];
-    if (agent && agent.events.length === 0 && agent.status !== "running") {
-      commands.getAgentEvents(selectedAgent).then((events) => {
-        setAgents((prev) => {
-          const cur = prev[selectedAgent];
-          if (!cur || cur.events.length > 0) return prev;
-          return {
-            ...prev,
-            [selectedAgent]: {
-              ...cur,
-              events: events.map((e, i) => ({
-                id: i,
-                step: e.step,
-                kind: e.kind,
-                content: e.content,
-                timestamp: new Date(e.created_at).getTime(),
-              })),
-            },
-          };
-        });
-      }).catch(() => {});
-    }
-  }, [selectedAgent, agents]);
+    if (!filterMissionId) return;
+    const interval = setInterval(() => {
+      commands.getMissionCostSummary(filterMissionId).then(setCostSummary).catch(() => {});
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [filterMissionId]);
 
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [agents, selectedAgent]);
+  const filteredAgents = useMemo(() => {
+    const all = Object.values(agents);
+    if (!filterMissionId) return all;
+    return all.filter((a) => a.missionId === filterMissionId || a.taskId !== "");
+  }, [agents, filterMissionId]);
 
-  const handleSubmit = useCallback(async () => {
-    if (!input.trim()) return;
-    const desc = input.trim();
-    setInput("");
-    try {
-      const resp = await commands.runAgent({
-        task_description: desc,
-        workspace_path: "/tmp/miragenty-workspace",
-      });
-      setSelectedAgent(resp.agent_id);
-    } catch (e) {
-      alert(String(e));
-    }
-  }, [input]);
+  const activeAgent = activeAgentId ? agents[activeAgentId] : null;
 
-  const handleStop = useCallback(async () => {
-    if (!selectedAgent) return;
-    try {
-      await commands.stopAgent(selectedAgent);
-    } catch (e) {
-      alert(String(e));
-    }
-  }, [selectedAgent]);
+  const hasRunningAgents = useMemo(
+    () => filteredAgents.some((a) => a.status === "running"),
+    [filteredAgents],
+  );
+
+  const handleSelectAgent = useCallback(
+    (id: string) => {
+      setActiveAgent(id);
+      setViewMode("focus");
+    },
+    [setActiveAgent, setViewMode],
+  );
+
+  const handleBackToList = useCallback(() => {
+    setViewMode("list");
+  }, [setViewMode]);
 
   const handleLoadHistory = useCallback(async () => {
-    if (!selectedAgent) return;
+    if (!filterMissionId) return;
     try {
-      const events = await commands.getAgentEvents(selectedAgent);
-      setAgents((prev) => ({
-        ...prev,
-        [selectedAgent]: {
-          agentId: selectedAgent,
-          events: events.map((e, i) => ({
-            id: i,
-            step: e.step,
-            kind: e.kind,
-            content: e.content,
-            timestamp: new Date(e.created_at).getTime(),
-          })),
-          streamBuffer: "",
-          status: (prev[selectedAgent]?.status ?? "completed") as AgentActivityStatus,
-        },
-      }));
-    } catch (e) {
-      alert(String(e));
-    }
-  }, [selectedAgent]);
-
-  const activeAgent = selectedAgent ? agents[selectedAgent] : null;
-  const agentIds = Object.keys(agents);
-  const isRunning = activeAgent?.status === "running";
+      const events = await commands.listAgentEvents({ mission_id: filterMissionId });
+      const byAgent = new Map<string, AgentEvent[]>();
+      for (const e of events) {
+        const mapped: AgentEvent = {
+          id: e.id,
+          agentId: e.agent_id,
+          step: e.step,
+          kind: e.kind as AgentEvent["kind"],
+          content: e.content,
+          timestamp: e.created_at,
+        };
+        const list = byAgent.get(e.agent_id) || [];
+        list.push(mapped);
+        byAgent.set(e.agent_id, list);
+      }
+      for (const [agentId, evts] of byAgent) {
+        hydrateEvents(agentId, evts);
+      }
+    } catch {}
+  }, [filterMissionId, hydrateEvents]);
 
   return (
     <div className={styles.container}>
-      <div className={styles.inputBar}>
-        <input
-          className={styles.taskInput}
-          placeholder="Describe a task for the agent..."
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
-        />
-        <Button variant="primary" size="md" onClick={handleSubmit} disabled={!input.trim()}>
-          Run Agent
-        </Button>
-      </div>
-
-      {agentIds.length === 0 ? (
-        <div className={styles.empty}>
-          <p>No agents running. Enter a task above to start.</p>
-        </div>
-      ) : (
-        <div className={styles.workspace}>
-          <div className={styles.agentTabs}>
-            {agentIds.map((id) => (
-              <button
-                key={id}
-                className={`${styles.tab} ${selectedAgent === id ? styles.tabActive : ""}`}
-                onClick={() => setSelectedAgent(id)}
-              >
-                <span className={styles.tabDot} data-status={agents[id].status} />
-                <span className={styles.tabLabel}>
-                  Agent {id.substring(0, 6)}
-                </span>
-                <Badge variant={statusBadgeVariant(agents[id].status)}>
-                  {agents[id].status}
-                </Badge>
-              </button>
+      <div className={styles.toolbar}>
+        <div className={styles.toolbarLeft}>
+          <select
+            className={styles.missionFilter}
+            value={filterMissionId ?? ""}
+            onChange={(e) => setFilterMissionId(e.target.value || null)}
+          >
+            <option value="">All Agents</option>
+            {missions.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.title} ({m.status})
+              </option>
             ))}
-          </div>
+          </select>
 
-          {activeAgent && (
-            <div className={styles.toolbar}>
-              {isRunning && (
-                <Button variant="ghost" size="sm" onClick={handleStop}>
-                  Stop Agent
-                </Button>
-              )}
-              <Button variant="ghost" size="sm" onClick={handleLoadHistory}>
-                Load History
-              </Button>
+          {viewMode === "list" && (
+            <div className={styles.viewToggle}>
+              <span className={styles.viewLabel}>
+                {filteredAgents.length} agent{filteredAgents.length !== 1 ? "s" : ""}
+              </span>
             </div>
           )}
-
-          <div className={styles.stream} ref={scrollRef}>
-            {activeAgent ? (
-              <>
-                {activeAgent.events.map((evt) => (
-                  <div key={evt.id} className={`${styles.event} ${styles[`event_${evt.kind}`]}`}>
-                    <div className={styles.eventHeader}>
-                      <Badge
-                        variant={
-                          evt.kind === "error"
-                            ? "error"
-                            : evt.kind === "checkpoint"
-                              ? "warning"
-                              : evt.kind === "tool_use"
-                                ? "info"
-                                : evt.kind === "status_change"
-                                  ? "default"
-                                  : "default"
-                        }
-                      >
-                        Step {evt.step} · {evt.kind}
-                      </Badge>
-                    </div>
-                    <pre className={styles.eventContent}>{evt.content}</pre>
-                  </div>
-                ))}
-                {activeAgent.streamBuffer && (
-                  <div className={styles.streamingBlock}>
-                    <pre className={styles.streamText}>{activeAgent.streamBuffer}</pre>
-                    <span className={styles.cursor} />
-                  </div>
-                )}
-              </>
-            ) : (
-              <p className={styles.empty}>Select an agent to view activity</p>
-            )}
-          </div>
         </div>
+
+        <div className={styles.toolbarRight}>
+          {filterMissionId && (
+            <Button variant="ghost" size="sm" onClick={handleLoadHistory}>
+              Load History
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {filterMissionId && (
+        <CostSummaryBar
+          totalCost={costSummary.total_cost}
+          totalInputTokens={costSummary.total_input_tokens}
+          totalOutputTokens={costSummary.total_output_tokens}
+          agentCount={filteredAgents.length}
+        />
+      )}
+
+      {filterMissionId && (
+        <MissionNoteBar
+          missionId={filterMissionId}
+          hasRunningAgents={hasRunningAgents}
+        />
+      )}
+
+      {filteredAgents.length === 0 ? (
+        <div className={styles.empty}>
+          <p>
+            {filterMissionId
+              ? "No agents for this mission yet. Start the mission to see activity."
+              : "No agents running. Start a mission to see activity here."}
+          </p>
+        </div>
+      ) : viewMode === "focus" && activeAgent ? (
+        <AgentTimeline agent={activeAgent} onBack={handleBackToList} />
+      ) : (
+        <AgentStreamList
+          agents={filteredAgents}
+          activeAgentId={activeAgentId}
+          onSelectAgent={handleSelectAgent}
+        />
       )}
     </div>
   );

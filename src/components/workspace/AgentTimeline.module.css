@@ -1,0 +1,242 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 0.5px solid var(--color-separator);
+  background: var(--color-bg-primary);
+  flex-wrap: wrap;
+}
+
+.backButton {
+  font-size: var(--text-sm);
+  color: var(--color-accent);
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.backButton:hover {
+  background: var(--color-bg-hover);
+}
+
+.agentMeta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.statusDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-text-tertiary);
+}
+
+.statusDot[data-status="running"] {
+  background: var(--color-accent);
+  animation: pulse 1.5s infinite;
+}
+
+.statusDot[data-status="completed"] {
+  background: var(--color-success);
+  animation: none;
+}
+
+.statusDot[data-status="failed"] {
+  background: var(--color-error);
+  animation: none;
+}
+
+.statusDot[data-status="cancelled"] {
+  background: var(--color-warning);
+  animation: none;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.agentName {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.agentStats {
+  display: flex;
+  gap: var(--space-3);
+  margin-left: auto;
+}
+
+.stat {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+}
+
+.timeline {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.event {
+  display: flex;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  position: relative;
+}
+
+.event::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 18px;
+  bottom: -2px;
+  width: 1px;
+  background: var(--color-separator);
+}
+
+.event:last-of-type::before {
+  display: none;
+}
+
+.eventDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-text-tertiary);
+  flex-shrink: 0;
+  margin-top: 6px;
+  position: relative;
+  z-index: 1;
+}
+
+.eventDot[data-kind="error"] {
+  background: var(--color-error);
+}
+
+.eventDot[data-kind="checkpoint"] {
+  background: var(--color-warning);
+}
+
+.eventDot[data-kind="tool_use"],
+.eventDot[data-kind="tool_result"] {
+  background: var(--color-accent);
+}
+
+.eventDot[data-kind="message"] {
+  background: var(--color-success);
+}
+
+.eventDot[data-kind="status_change"] {
+  background: var(--color-text-secondary);
+}
+
+.eventBody {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.eventHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.eventTime {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--color-text-tertiary);
+}
+
+.eventTokens {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-secondary);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.eventContent {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.eventError {
+  background: rgba(255, 59, 48, 0.04);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  margin-left: calc(-1 * var(--space-3));
+}
+
+.eventHighlight .eventContent {
+  color: var(--color-text-primary);
+}
+
+.streamingBlock {
+  margin-left: 18px;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-primary);
+  border: 0.5px solid var(--color-accent);
+}
+
+.streamText {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--color-text-primary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+}
+
+.cursor {
+  display: inline-block;
+  width: 8px;
+  height: 14px;
+  background: var(--color-accent);
+  animation: blink 0.8s step-end infinite;
+  vertical-align: text-bottom;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+  padding: var(--space-10);
+}

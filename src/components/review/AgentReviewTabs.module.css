@@ -1,0 +1,81 @@
+.tabBar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: var(--space-2) var(--space-6);
+  border-bottom: 0.5px solid var(--color-separator);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+  border: none;
+  background: transparent;
+  font-family: var(--font-sans);
+}
+
+.tab:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.tab.active {
+  background: var(--color-bg-active);
+  color: var(--color-text-primary);
+}
+
+.statusDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.statusDot.running {
+  background: var(--color-accent);
+}
+
+.statusDot.completed {
+  background: var(--color-success);
+}
+
+.statusDot.failed {
+  background: var(--color-error);
+}
+
+.statusDot.idle {
+  background: var(--color-text-tertiary);
+}
+
+.reviewBadge {
+  font-size: var(--text-xs);
+  padding: 1px 6px;
+  border-radius: 100px;
+  font-weight: 500;
+}
+
+.reviewBadge.approved {
+  background: rgba(52, 199, 89, 0.15);
+  color: var(--color-success);
+}
+
+.reviewBadge.rejected {
+  background: rgba(255, 59, 48, 0.15);
+  color: var(--color-error);
+}
+
+.reviewBadge.revision_requested {
+  background: rgba(255, 159, 10, 0.15);
+  color: var(--color-warning);
+}

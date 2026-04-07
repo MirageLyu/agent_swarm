@@ -3,8 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+use tauri::Emitter;
+use tokio::sync::mpsc;
 
-use crate::llm::{ContentBlock, LlmProvider, LlmRequest, Message, MessageRole};
+use crate::llm::{ContentBlock, LlmProvider, LlmRequest, Message, MessageRole, StreamChunk, StreamChunkKind};
 
 const PLANNER_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -197,10 +199,88 @@ fn detect_cycles(tasks: &[PlannerTask]) -> Result<(), PlannerError> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct PlannerStreamEvent {
+    kind: String,
+    content: String,
+}
+
+fn emit_planner_event(app: &tauri::AppHandle, kind: &str, content: &str) {
+    let _ = app.emit(
+        "planner-stream",
+        PlannerStreamEvent {
+            kind: kind.to_string(),
+            content: content.to_string(),
+        },
+    );
+}
+
+async fn stream_planner_call(
+    provider: Arc<dyn LlmProvider>,
+    request: &LlmRequest,
+    app: &tauri::AppHandle,
+) -> Result<String, PlannerError> {
+    let (tx, mut rx) = mpsc::channel::<StreamChunk>(256);
+
+    let provider_clone = provider.clone();
+    let request_clone = LlmRequest {
+        model: request.model.clone(),
+        system: request.system.clone(),
+        messages: request.messages.clone(),
+        tools: request.tools.clone(),
+        max_tokens: request.max_tokens,
+    };
+
+    let stream_handle = tokio::spawn(async move {
+        provider_clone.stream_chat(&request_clone, tx).await
+    });
+
+    let app_clone = app.clone();
+    let mut full_text = String::new();
+
+    // Forward stream chunks as Tauri events
+    while let Some(chunk) = rx.recv().await {
+        match chunk.kind {
+            StreamChunkKind::ReasoningDelta => {
+                emit_planner_event(&app_clone, "reasoning_delta", &chunk.content);
+            }
+            StreamChunkKind::TextDelta => {
+                full_text.push_str(&chunk.content);
+                emit_planner_event(&app_clone, "text_delta", &chunk.content);
+            }
+            StreamChunkKind::MessageStop => {
+                // Will emit "done" after parsing
+            }
+            _ => {}
+        }
+    }
+
+    let response = tokio::time::timeout(Duration::from_secs(5), stream_handle)
+        .await
+        .map_err(|_| PlannerError::LlmError("Stream handle timed out".into()))?
+        .map_err(|e| PlannerError::LlmError(format!("Stream task failed: {e}")))?
+        .map_err(|e| PlannerError::LlmError(e.to_string()))?;
+
+    // If full_text is empty, extract from response content blocks
+    if full_text.is_empty() {
+        full_text = response
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+    }
+
+    Ok(full_text)
+}
+
 pub async fn call_planner(
     provider: Arc<dyn LlmProvider>,
     model: &str,
     description: &str,
+    app: &tauri::AppHandle,
 ) -> Result<PlannerOutput, PlannerError> {
     let messages = vec![Message {
         role: MessageRole::User,
@@ -217,26 +297,24 @@ pub async fn call_planner(
         max_tokens: 4096,
     };
 
-    tracing::info!("Planner: calling LLM model={model}");
-    let response = tokio::time::timeout(PLANNER_TIMEOUT, provider.chat(&request))
-        .await
-        .map_err(|_| PlannerError::LlmError("Planning timed out, please retry".into()))?
-        .map_err(|e| PlannerError::LlmError(e.to_string()))?;
-    tracing::info!("Planner: LLM responded, parsing output");
-
-    let text = response
-        .content
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<String>();
+    tracing::info!("Planner: calling LLM (streaming) model={model}");
+    let text = tokio::time::timeout(
+        PLANNER_TIMEOUT,
+        stream_planner_call(provider.clone(), &request, app),
+    )
+    .await
+    .map_err(|_| PlannerError::LlmError("Planning timed out, please retry".into()))?
+    .map_err(|e| PlannerError::LlmError(e.to_string()))?;
+    tracing::info!("Planner: stream complete, parsing output");
 
     match parse_and_validate(&text) {
-        Ok(output) => Ok(output),
+        Ok(output) => {
+            emit_planner_event(app, "done", "");
+            Ok(output)
+        }
         Err(first_err) => {
             tracing::warn!("Planner first attempt failed: {first_err}, retrying with error feedback");
+            emit_planner_event(app, "error", &format!("Parse error, retrying: {first_err}"));
 
             let retry_messages = vec![
                 Message {
@@ -270,21 +348,17 @@ pub async fn call_planner(
                 max_tokens: 4096,
             };
 
-            let retry_response = tokio::time::timeout(PLANNER_TIMEOUT, provider.chat(&retry_request))
-                .await
-                .map_err(|_| PlannerError::LlmError("Planning retry timed out".into()))?
-                .map_err(|e| PlannerError::LlmError(e.to_string()))?;
+            let retry_text = tokio::time::timeout(
+                PLANNER_TIMEOUT,
+                stream_planner_call(provider, &retry_request, app),
+            )
+            .await
+            .map_err(|_| PlannerError::LlmError("Planning retry timed out".into()))?
+            .map_err(|e| PlannerError::LlmError(e.to_string()))?;
 
-            let retry_text = retry_response
-                .content
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<String>();
-
-            parse_and_validate(&retry_text)
+            let result = parse_and_validate(&retry_text)?;
+            emit_planner_event(app, "done", "");
+            Ok(result)
         }
     }
 }

@@ -101,6 +101,72 @@ const MIGRATIONS: &[(&str, &str)] = &[(
         PRAGMA foreign_keys=ON;
         "#,
     ),
+    (
+        "003_review_event_kind",
+        r#"
+        PRAGMA foreign_keys=OFF;
+
+        CREATE TABLE agent_events_new (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+            step INTEGER NOT NULL DEFAULT 0,
+            kind TEXT NOT NULL
+                CHECK (kind IN ('llm_call', 'tool_use', 'tool_result', 'checkpoint', 'error', 'message', 'status_change', 'review')),
+            content TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        INSERT INTO agent_events_new (id, agent_id, step, kind, content, created_at)
+            SELECT id, agent_id, step, kind, content, created_at FROM agent_events;
+
+        DROP TABLE agent_events;
+        ALTER TABLE agent_events_new RENAME TO agent_events;
+
+        CREATE INDEX IF NOT EXISTS idx_agent_events_agent ON agent_events(agent_id, created_at);
+
+        PRAGMA foreign_keys=ON;
+        "#,
+    ),
+    (
+        "004_agent_commit_hashes",
+        r#"
+        ALTER TABLE agents ADD COLUMN base_commit_hash TEXT;
+        ALTER TABLE agents ADD COLUMN head_commit_hash TEXT;
+        "#,
+    ),
+    (
+        "005_agent_notes",
+        r#"
+        CREATE TABLE IF NOT EXISTS agent_notes (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+            content TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued'
+                CHECK (status IN ('queued', 'applied', 'expired')),
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            applied_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_notes_agent ON agent_notes(agent_id, status);
+        "#,
+    ),
+    (
+        "006_agent_notes_mission_scope",
+        r#"
+        ALTER TABLE agent_notes ADD COLUMN mission_id TEXT;
+        "#,
+    ),
+    (
+        "007_mission_directives",
+        r#"
+        ALTER TABLE missions ADD COLUMN directives TEXT NOT NULL DEFAULT '';
+        "#,
+    ),
+    (
+        "008_mission_repo_path",
+        r#"
+        ALTER TABLE missions ADD COLUMN repo_path TEXT;
+        "#,
+    ),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

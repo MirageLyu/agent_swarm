@@ -276,7 +276,7 @@ impl Scheduler {
     }
 
     fn dispatch_task(
-        _mission_id: &str,
+        mission_id: &str,
         task_id: &str,
         task_title: &str,
         task_description: &str,
@@ -326,6 +326,13 @@ impl Scheduler {
             queries::insert_agent_for_task(conn, &agent_id, &agent_name, task_id, &wt_str)
         })?;
 
+        // Capture base commit hash for post-merge code review
+        if let Ok(repo) = git2::Repository::open(repo_path) {
+            if let Ok(base_hash) = repo.head().and_then(|h| h.peel_to_commit().map(|c| c.id().to_string())) {
+                let _ = db.with_conn(|conn| queries::save_agent_base_commit(conn, &agent_id, &base_hash));
+            }
+        }
+
         let (provider, model) = build_provider(app).map_err(|e| anyhow::anyhow!(e))?;
 
         let registry = app.state::<AgentRegistry>();
@@ -345,7 +352,18 @@ impl Scheduler {
         let aid = agent_id;
         let tid = task_id.to_string();
         let task_title_owned = task_title.to_string();
-        let task_desc = format!("{task_title}\n\n{task_description}");
+
+        let directives = db
+            .with_conn(|conn| queries::get_mission_directives(conn, mission_id))
+            .unwrap_or_default();
+        let task_desc = if directives.is_empty() {
+            format!("{task_title}\n\n{task_description}")
+        } else {
+            format!(
+                "{task_title}\n\n{task_description}\n\n\
+                 [Standing Mission Directives — you MUST follow these]\n{directives}"
+            )
+        };
         let repo_path_owned = repo_path.clone();
         let app_clone = app.clone();
 
@@ -396,6 +414,7 @@ impl Scheduler {
                 match wt_manager.commit_worktree(&aid, &commit_msg) {
                     Ok(Some(hash)) => {
                         tracing::info!("Agent {aid} work committed: {hash}");
+                        let _ = db.with_conn(|conn| queries::save_agent_head_commit(conn, &aid, &hash));
                     }
                     Ok(None) => {
                         tracing::info!("Agent {aid} produced no file changes to commit");

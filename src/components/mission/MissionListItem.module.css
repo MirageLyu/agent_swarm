@@ -45,14 +45,16 @@
   color: var(--color-text-tertiary);
 }
 
-.deleteBtn {
+.menuTrigger {
   margin-left: auto;
-  width: 20px;
+  width: 24px;
   height: 20px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: var(--text-base);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  letter-spacing: 1px;
   color: var(--color-text-tertiary);
   background: none;
   border: none;
@@ -62,11 +64,60 @@
   transition: all var(--duration-fast) var(--ease-out);
 }
 
-.item:hover .deleteBtn {
+.item:hover .menuTrigger {
   opacity: 1;
 }
 
-.deleteBtn:hover {
+.menuTrigger:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-active);
+}
+
+.menuContent {
+  min-width: 160px;
+  padding: var(--space-1);
+  background: var(--color-bg-elevated);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0 0 0.5px var(--color-border), var(--shadow-lg);
+  z-index: 100;
+  animation: slideIn 150ms var(--ease-out);
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.menuItem {
+  display: flex;
+  align-items: center;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--color-text-primary);
+  border-radius: 4px;
+  cursor: pointer;
+  outline: none;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.menuItem:hover,
+.menuItem[data-highlighted] {
+  background: var(--color-bg-hover);
+}
+
+.menuDanger {
   color: var(--color-error);
-  background: rgba(255, 59, 48, 0.1);
+}
+
+.menuDanger:hover,
+.menuDanger[data-highlighted] {
+  background: rgba(255, 59, 48, 0.08);
 }

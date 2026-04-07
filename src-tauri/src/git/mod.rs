@@ -1,3 +1,3 @@
 mod worktree;
 
-pub use worktree::{WorktreeManager, MergeOutcome};
+pub use worktree::{DiffFile, WorktreeManager, MergeOutcome};

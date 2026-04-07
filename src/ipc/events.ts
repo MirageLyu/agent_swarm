@@ -69,3 +69,18 @@ export function onMissionStatusChanged(
     callback(event.payload);
   });
 }
+
+// FM-07: Planner stream events
+
+export interface PlannerStreamPayload {
+  kind: "text_delta" | "reasoning_delta" | "done" | "error";
+  content: string;
+}
+
+export function onPlannerStream(
+  callback: (payload: PlannerStreamPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<PlannerStreamPayload>("planner-stream", (event) => {
+    callback(event.payload);
+  });
+}

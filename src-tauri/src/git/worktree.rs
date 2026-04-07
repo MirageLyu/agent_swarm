@@ -1,6 +1,15 @@
 use anyhow::{Context, Result};
 use git2::{Repository, BranchType};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Serialize, Clone)]
+pub struct DiffFile {
+    pub path: String,
+    pub status: String,
+    pub old_content: Option<String>,
+    pub new_content: Option<String>,
+}
 
 pub struct WorktreeManager {
     repo_path: PathBuf,
@@ -202,6 +211,111 @@ impl WorktreeManager {
         })?;
 
         Ok(diff_text)
+    }
+
+    /// Return structured per-file diff between the merge-base and the agent branch HEAD.
+    /// Requires the agent branch to still exist.
+    pub fn get_structured_diff(&self, agent_id: &str) -> Result<Vec<DiffFile>> {
+        let repo = Repository::open(&self.repo_path)
+            .context("Failed to open main repository")?;
+
+        let branch_name = format!("agent/{agent_id}");
+        let agent_branch = repo
+            .find_branch(&branch_name, BranchType::Local)
+            .context(format!("Agent branch '{branch_name}' not found — worktree may have been removed"))?;
+        let agent_commit = agent_branch.get().peel_to_commit()
+            .context("Failed to resolve agent branch to commit")?;
+
+        let main_head = repo.head()?.peel_to_commit()?;
+        let merge_base_oid = repo
+            .merge_base(main_head.id(), agent_commit.id())
+            .context("No merge base found between main and agent branch")?;
+        let base_tree = repo.find_commit(merge_base_oid)?.tree()?;
+        let agent_tree = agent_commit.tree()?;
+
+        Self::diff_trees(&repo, &base_tree, &agent_tree)
+    }
+
+    /// Return structured per-file diff using stored commit hashes.
+    /// Works even after the agent branch has been deleted, as long as
+    /// the commit objects are still reachable in the repository.
+    pub fn get_structured_diff_by_hashes(
+        &self,
+        base_hash: &str,
+        head_hash: &str,
+    ) -> Result<Vec<DiffFile>> {
+        let repo = Repository::open(&self.repo_path)
+            .context("Failed to open main repository")?;
+
+        let base_oid = git2::Oid::from_str(base_hash)
+            .context("Invalid base commit hash")?;
+        let head_oid = git2::Oid::from_str(head_hash)
+            .context("Invalid head commit hash")?;
+
+        let base_tree = repo.find_commit(base_oid)
+            .context("Base commit not found in repository")?.tree()?;
+        let head_tree = repo.find_commit(head_oid)
+            .context("Head commit not found in repository")?.tree()?;
+
+        Self::diff_trees(&repo, &base_tree, &head_tree)
+    }
+
+    fn diff_trees(
+        repo: &Repository,
+        base_tree: &git2::Tree,
+        head_tree: &git2::Tree,
+    ) -> Result<Vec<DiffFile>> {
+        let diff = repo.diff_tree_to_tree(Some(base_tree), Some(head_tree), None)?;
+
+        let mut files = Vec::new();
+        for delta in diff.deltas() {
+            let status = match delta.status() {
+                git2::Delta::Added => "added",
+                git2::Delta::Deleted => "deleted",
+                _ => "modified",
+            };
+
+            let path = delta
+                .new_file()
+                .path()
+                .or(delta.old_file().path())
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            let old_content = if status != "added" {
+                Self::read_blob_text(repo, base_tree, &path)
+            } else {
+                None
+            };
+
+            let new_content = if status != "deleted" {
+                Self::read_blob_text(repo, head_tree, &path)
+            } else {
+                None
+            };
+
+            files.push(DiffFile {
+                path,
+                status: status.to_string(),
+                old_content,
+                new_content,
+            });
+        }
+
+        Ok(files)
+    }
+
+    fn read_blob_text(repo: &Repository, tree: &git2::Tree, path: &str) -> Option<String> {
+        tree.get_path(Path::new(path))
+            .ok()
+            .and_then(|entry| repo.find_blob(entry.id()).ok())
+            .and_then(|blob| {
+                if blob.is_binary() {
+                    None
+                } else {
+                    std::str::from_utf8(blob.content()).ok().map(String::from)
+                }
+            })
     }
 
     pub fn worktree_path(&self, agent_id: &str) -> PathBuf {
@@ -416,5 +530,99 @@ mod tests {
 
         let result = wt.commit_worktree("agent-noop", "empty commit").expect("commit");
         assert!(result.is_none(), "should return None when no changes");
+    }
+
+    // ---- FM-05: Structured diff tests (UT-01) ----
+
+    #[test]
+    fn ut01_1_single_file_modified() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let repo_path = tmp.path().to_path_buf();
+        init_repo_with_file(&repo_path, "hello.txt", "original content");
+
+        let wt = WorktreeManager::new(repo_path.clone());
+        let wt_path = wt.create_worktree("agent-sd1").expect("create worktree");
+
+        fs::write(wt_path.join("hello.txt"), "modified content").expect("write");
+        wt.commit_worktree("agent-sd1", "modify file").expect("commit");
+
+        let files = wt.get_structured_diff("agent-sd1").expect("structured diff");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "hello.txt");
+        assert_eq!(files[0].status, "modified");
+        assert_eq!(files[0].old_content.as_deref(), Some("original content"));
+        assert_eq!(files[0].new_content.as_deref(), Some("modified content"));
+    }
+
+    #[test]
+    fn ut01_2_multiple_files() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let repo_path = tmp.path().to_path_buf();
+        init_repo_with_file(&repo_path, "a.txt", "aaa");
+
+        let wt = WorktreeManager::new(repo_path.clone());
+        let wt_path = wt.create_worktree("agent-sd2").expect("create worktree");
+
+        fs::write(wt_path.join("a.txt"), "aaa-modified").expect("write");
+        fs::write(wt_path.join("b.txt"), "new file b").expect("write");
+        wt.commit_worktree("agent-sd2", "multi-file changes").expect("commit");
+
+        let files = wt.get_structured_diff("agent-sd2").expect("structured diff");
+        assert_eq!(files.len(), 2, "should have 2 changed files");
+
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&"a.txt"), "should contain a.txt");
+        assert!(paths.contains(&"b.txt"), "should contain b.txt");
+
+        let added = files.iter().find(|f| f.path == "b.txt").unwrap();
+        assert_eq!(added.status, "added");
+        assert!(added.old_content.is_none());
+        assert_eq!(added.new_content.as_deref(), Some("new file b"));
+    }
+
+    #[test]
+    fn ut01_3_no_changes() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let repo_path = tmp.path().to_path_buf();
+        init_repo_with_file(&repo_path, "readme.txt", "hello");
+
+        let wt = WorktreeManager::new(repo_path.clone());
+        wt.create_worktree("agent-sd3").expect("create worktree");
+
+        let files = wt.get_structured_diff("agent-sd3").expect("structured diff");
+        assert!(files.is_empty(), "should return empty list when no changes");
+    }
+
+    #[test]
+    fn ut01_4_diff_by_hashes_after_branch_deleted() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let repo_path = tmp.path().to_path_buf();
+        init_repo_with_file(&repo_path, "hello.txt", "original");
+
+        let repo = Repository::open(&repo_path).unwrap();
+        let base_hash = repo.head().unwrap().peel_to_commit().unwrap().id().to_string();
+        drop(repo);
+
+        let wt = WorktreeManager::new(repo_path.clone());
+        let wt_path = wt.create_worktree("agent-hash").expect("create worktree");
+
+        fs::write(wt_path.join("hello.txt"), "changed").expect("write");
+        let head_hash = wt.commit_worktree("agent-hash", "edit").expect("commit").unwrap();
+
+        // Merge and delete the branch (simulating post-mission cleanup)
+        wt.merge_agent_branch("agent-hash").expect("merge");
+        wt.remove_worktree("agent-hash").expect("remove");
+
+        // Branch-based diff should now fail
+        assert!(wt.get_structured_diff("agent-hash").is_err());
+
+        // Hash-based diff should still work
+        let files = wt.get_structured_diff_by_hashes(&base_hash, &head_hash)
+            .expect("hash-based diff should work after branch deletion");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "hello.txt");
+        assert_eq!(files[0].status, "modified");
+        assert_eq!(files[0].old_content.as_deref(), Some("original"));
+        assert_eq!(files[0].new_content.as_deref(), Some("changed"));
     }
 }

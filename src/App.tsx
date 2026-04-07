@@ -5,6 +5,7 @@ import { useTheme } from "./hooks/useTheme";
 import { MissionsView } from "./views/MissionsView";
 import { WorkspaceView } from "./views/WorkspaceView";
 import { AgentsView } from "./views/AgentsView";
+import { ReviewView } from "./views/ReviewView";
 import { InsightsView } from "./views/InsightsView";
 import { SettingsView } from "./views/SettingsView";
 import styles from "./App.module.css";
@@ -18,6 +19,8 @@ function ActiveView() {
       return <WorkspaceView />;
     case "agents":
       return <AgentsView />;
+    case "review":
+      return <ReviewView />;
     case "insights":
       return <InsightsView />;
     case "settings":
