@@ -1,0 +1,90 @@
+.section {
+  padding-top: 8px;
+}
+
+.label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 8px 16px 4px;
+}
+
+.divider {
+  height: 0.5px;
+  background: var(--color-separator);
+  margin: 8px 16px;
+}
+
+.agentRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 16px;
+  margin: 0 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.agentRow:hover {
+  background: var(--color-bg-hover);
+}
+
+.statusDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.statusDot[data-status="running"] {
+  background: var(--color-success);
+  box-shadow: 0 0 5px var(--color-success);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.statusDot[data-status="waiting"] {
+  background: var(--color-warning);
+}
+
+.statusDot[data-status="idle"] {
+  background: var(--color-text-tertiary);
+}
+
+.statusDot[data-status="completed"] {
+  background: var(--color-success);
+}
+
+.statusDot[data-status="failed"] {
+  background: var(--color-error);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.agentName {
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.taskTitle {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.empty {
+  padding: 8px 16px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}

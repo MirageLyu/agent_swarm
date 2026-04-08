@@ -1,0 +1,108 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.15);
+  z-index: 999;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 20vh;
+  animation: overlayIn 200ms var(--ease-out);
+}
+
+@keyframes overlayIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+:root[data-theme="dark"] .overlay {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.palette {
+  width: 560px;
+  background: var(--color-bg-elevated);
+  border-radius: 12px;
+  box-shadow: 0 0 0 0.5px var(--color-border-strong), 0 8px 40px rgba(0, 0, 0, 0.2), 0 20px 60px rgba(0, 0, 0, 0.15);
+  overflow: hidden;
+  animation: paletteIn 200ms var(--ease-spring);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+
+@keyframes paletteIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.input {
+  width: 100%;
+  padding: 14px 16px;
+  border: none;
+  background: transparent;
+  font-size: 15px;
+  font-family: var(--font-sans);
+  color: var(--color-text-primary);
+  outline: none;
+  letter-spacing: -0.01em;
+}
+
+.input::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.list {
+  border-top: 0.5px solid var(--color-separator);
+  padding: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.item:hover,
+.itemSelected {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.itemIcon {
+  font-size: 16px;
+  width: 20px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.itemLabel {
+  flex: 1;
+}
+
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  font-size: 10px;
+  background: var(--color-bg-hover);
+  border-radius: 3px;
+  border: 0.5px solid var(--color-border);
+  color: var(--color-text-tertiary);
+  font-family: var(--font-sans);
+  margin-left: auto;
+}
+
+.empty {
+  padding: 20px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--color-text-tertiary);
+}

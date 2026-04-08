@@ -1,0 +1,26 @@
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 12px;
+  border-top: 0.5px solid var(--color-separator);
+  background: var(--color-bg-secondary);
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+
+.stats {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.completed { color: var(--color-success); }
+.running { color: var(--color-accent); }
+.pending { color: var(--color-text-tertiary); }
+.failed { color: var(--color-error); }
+
+.separator {
+  color: var(--color-text-tertiary);
+}

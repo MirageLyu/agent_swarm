@@ -10,6 +10,7 @@ import { AgentReviewTabs } from "../components/review/AgentReviewTabs";
 import { DiffFileTree } from "../components/review/DiffFileTree";
 import { DiffViewer } from "../components/review/DiffViewer";
 import { ReviewActionBar } from "../components/review/ReviewActionBar";
+import { ReviewFilterBar, type ReviewFilter } from "../components/review/ReviewFilterBar";
 import styles from "./ReviewView.module.css";
 
 function usePrefersDark(): boolean {
@@ -37,8 +38,8 @@ export function ReviewView() {
   const [reviewStatuses, setReviewStatuses] = useState<Record<string, ReviewAction | null>>({});
   const [loadingDiff, setLoadingDiff] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
 
-  // Detect forced theme from document attribute
   const docTheme = document.documentElement.getAttribute("data-theme");
   const editorTheme: "light" | "dark" =
     docTheme === "dark" ? "dark" : docTheme === "light" ? "light" : prefersDark ? "dark" : "light";
@@ -116,6 +117,32 @@ export function ReviewView() {
     [selectedAgentId],
   );
 
+  const handleApproveAll = useCallback(async () => {
+    if (!selectedMissionId) return;
+    for (const agent of agents) {
+      if (reviewStatuses[agent.id] !== "approved") {
+        try {
+          await commands.submitReviewAction({
+            agent_id: agent.id,
+            action: "approved",
+          });
+          setReviewStatuses((prev) => ({ ...prev, [agent.id]: "approved" }));
+        } catch {}
+      }
+    }
+  }, [selectedMissionId, agents, reviewStatuses]);
+
+  const handleMergeAll = useCallback(() => {
+    alert("Merge All is not yet implemented.");
+  }, []);
+
+  const filteredAgents = agents.filter((a) => {
+    if (reviewFilter === "all") return true;
+    if (reviewFilter === "needs_review") return reviewStatuses[a.id] !== "approved";
+    if (reviewFilter === "approved") return reviewStatuses[a.id] === "approved";
+    return true;
+  });
+
   const selectedFile = diffFiles.find((f) => f.path === selectedFilePath) ?? null;
 
   if (missions.length === 0) {
@@ -159,9 +186,19 @@ export function ReviewView() {
         </select>
       </div>
 
+      <ReviewFilterBar
+        filter={reviewFilter}
+        onFilterChange={setReviewFilter}
+        agents={agents}
+        reviewStatuses={reviewStatuses}
+        totalFiles={diffFiles.length}
+        onApproveAll={handleApproveAll}
+        onMergeAll={handleMergeAll}
+      />
+
       <div className={styles.body}>
         <AgentReviewTabs
-          agents={agents}
+          agents={filteredAgents}
           selectedAgentId={selectedAgentId}
           reviewStatuses={reviewStatuses}
           onSelect={setSelectedAgentId}

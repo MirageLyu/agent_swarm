@@ -70,6 +70,24 @@ export function onMissionStatusChanged(
   });
 }
 
+// FM-10: Pre-flight stream events
+
+export interface PreflightStreamPayload {
+  session_id: string;
+  chunk: {
+    kind: "start" | "text_delta" | "reasoning_delta" | "done" | "error";
+    content: string;
+  };
+}
+
+export function onPreflightStream(
+  callback: (payload: PreflightStreamPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<PreflightStreamPayload>("preflight-stream", (event) => {
+    callback(event.payload);
+  });
+}
+
 // FM-07: Planner stream events
 
 export interface PlannerStreamPayload {

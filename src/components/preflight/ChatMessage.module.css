@@ -1,0 +1,49 @@
+.message {
+  max-width: 92%;
+  animation: msgIn var(--duration-normal) var(--ease-out) both;
+}
+
+.agent {
+  align-self: flex-start;
+}
+
+.user {
+  align-self: flex-end;
+}
+
+@keyframes msgIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.label {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--color-text-tertiary);
+  margin-bottom: 4px;
+  padding: 0 4px;
+}
+
+.user .label {
+  text-align: right;
+}
+
+.bubble {
+  padding: 8px 12px;
+  border-radius: 14px;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.agent .bubble {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
+  border-bottom-left-radius: 4px;
+}
+
+.user .bubble {
+  background: var(--color-accent);
+  color: #ffffff;
+  border-bottom-right-radius: 4px;
+}

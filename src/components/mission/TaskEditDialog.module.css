@@ -35,11 +35,55 @@
 }
 
 .label {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
   font-size: var(--text-xs);
   font-weight: 500;
   color: var(--color-text-secondary);
   margin-bottom: var(--space-1);
+}
+
+.hintWrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  border: 1px solid var(--color-border);
+  border-radius: 50%;
+  cursor: default;
+}
+
+.hintTip {
+  display: none;
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  font-weight: 400;
+  color: var(--color-text-primary);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  pointer-events: none;
+  z-index: 10;
+}
+
+.hintWrap:hover .hintTip {
+  display: block;
 }
 
 .input {

@@ -5,6 +5,7 @@ import styles from "./AgentStreamCard.module.css";
 
 interface AgentStreamCardProps {
   agent: Agent;
+  taskTitle?: string;
   isActive: boolean;
   onClick: () => void;
 }
@@ -38,6 +39,7 @@ function getLatestEvent(agent: Agent) {
 
 export const AgentStreamCard = memo(function AgentStreamCard({
   agent,
+  taskTitle,
   isActive,
   onClick,
 }: AgentStreamCardProps) {
@@ -53,7 +55,7 @@ export const AgentStreamCard = memo(function AgentStreamCard({
       <div className={styles.header}>
         <div className={styles.agentInfo}>
           <span className={styles.statusDot} data-status={agent.status} />
-          <span className={styles.name}>{agent.name}</span>
+          <span className={styles.name}>{taskTitle || agent.name}</span>
         </div>
         <Badge variant={STATUS_BADGE_VARIANT[agent.status] ?? "default"}>
           {agent.status}

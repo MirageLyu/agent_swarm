@@ -14,11 +14,13 @@ export interface PlannerStreamState {
 interface PlannerStreamPanelProps {
   state: PlannerStreamState;
   onToggleCollapse: () => void;
+  fullHeight?: boolean;
 }
 
 export function PlannerStreamPanel({
   state,
   onToggleCollapse,
+  fullHeight,
 }: PlannerStreamPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -33,7 +35,7 @@ export function PlannerStreamPanel({
   const elapsed = (state.elapsedMs / 1000).toFixed(0);
 
   return (
-    <div className={styles.container}>
+    <div className={`${styles.container} ${fullHeight ? styles.containerFull : ""}`}>
       <button className={styles.header} onClick={onToggleCollapse}>
         <span className={styles.headerLeft}>
           {state.status === "streaming" && (
@@ -63,7 +65,7 @@ export function PlannerStreamPanel({
       {!state.collapsed && (
         <div
           ref={scrollRef}
-          className={`${styles.body} ${state.status === "error" ? styles.bodyError : ""}`}
+          className={`${styles.body} ${fullHeight ? styles.bodyFull : ""} ${state.status === "error" ? styles.bodyError : ""}`}
         >
           <pre className={styles.text}>
             {state.text || (state.errorMessage ?? "")}

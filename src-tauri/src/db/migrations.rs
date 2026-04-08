@@ -167,6 +167,67 @@ const MIGRATIONS: &[(&str, &str)] = &[(
         ALTER TABLE missions ADD COLUMN repo_path TEXT;
         "#,
     ),
+    (
+        "009_preflight_contract",
+        r#"
+        PRAGMA foreign_keys=OFF;
+
+        CREATE TABLE missions_new (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'draft'
+                CHECK (status IN ('draft', 'preflight', 'planned', 'running', 'completed', 'failed')),
+            total_cost_usd REAL NOT NULL DEFAULT 0.0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            directives TEXT NOT NULL DEFAULT '',
+            repo_path TEXT
+        );
+
+        INSERT INTO missions_new (id, title, description, status, total_cost_usd, created_at, updated_at, directives, repo_path)
+            SELECT id, title, description, status, total_cost_usd, created_at, updated_at, directives, repo_path FROM missions;
+
+        DROP TABLE missions;
+        ALTER TABLE missions_new RENAME TO missions;
+
+        CREATE TABLE IF NOT EXISTS mission_contracts (
+            id TEXT PRIMARY KEY,
+            mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+            status TEXT NOT NULL DEFAULT 'drafting'
+                CHECK (status IN ('drafting', 'signed')),
+            budget_usd REAL,
+            quality_threshold REAL,
+            max_duration_hours REAL,
+            signed_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS contract_items (
+            id TEXT PRIMARY KEY,
+            contract_id TEXT NOT NULL REFERENCES mission_contracts(id) ON DELETE CASCADE,
+            section TEXT NOT NULL
+                CHECK (section IN ('scope', 'constraints', 'exclusions', 'assumptions')),
+            text TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'user'
+                CHECK (source IN ('user', 'agent')),
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS preflight_sessions (
+            id TEXT PRIMARY KEY,
+            mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+            mode TEXT NOT NULL DEFAULT 'scenario_walk'
+                CHECK (mode IN ('scenario_walk', 'devils_advocate', 'risk_highlighter')),
+            messages TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        PRAGMA foreign_keys=ON;
+        "#,
+    ),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

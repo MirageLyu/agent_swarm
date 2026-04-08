@@ -1,0 +1,42 @@
+.metrics {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  -webkit-app-region: no-drag;
+}
+
+.badge {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  background: var(--color-bg-hover);
+  border-radius: 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-success);
+}
+
+.costNormal {
+  color: var(--color-text-secondary);
+}
+
+.costWarning {
+  color: var(--color-warning);
+}
+
+.costDanger {
+  color: var(--color-error);
+}
+
+.hidden {
+  display: none;
+}

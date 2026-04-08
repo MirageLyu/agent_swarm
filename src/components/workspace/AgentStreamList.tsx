@@ -5,12 +5,14 @@ import styles from "./AgentStreamList.module.css";
 
 interface AgentStreamListProps {
   agents: Agent[];
+  taskTitleMap?: Record<string, string>;
   activeAgentId: string | null;
   onSelectAgent: (id: string) => void;
 }
 
 export const AgentStreamList = memo(function AgentStreamList({
   agents,
+  taskTitleMap,
   activeAgentId,
   onSelectAgent,
 }: AgentStreamListProps) {
@@ -28,6 +30,7 @@ export const AgentStreamList = memo(function AgentStreamList({
         <AgentStreamCard
           key={agent.id}
           agent={agent}
+          taskTitle={taskTitleMap?.[agent.taskId]}
           isActive={agent.id === activeAgentId}
           onClick={() => onSelectAgent(agent.id)}
         />

@@ -52,3 +52,8 @@
   font-size: var(--text-xs);
   color: var(--color-success);
 }
+
+.saveRow {
+  display: flex;
+  justify-content: flex-end;
+}

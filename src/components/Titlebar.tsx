@@ -1,4 +1,5 @@
 import { useUiStore, type Theme } from "../stores/ui-store";
+import { TopBarMetrics } from "./TopBarMetrics";
 import styles from "./Titlebar.module.css";
 
 const themeIcons: Record<Theme, React.ReactNode> = {
@@ -44,11 +45,13 @@ export function Titlebar() {
   const activeView = useUiStore((s) => s.activeView);
   const theme = useUiStore((s) => s.theme);
   const setTheme = useUiStore((s) => s.setTheme);
+  const setCommandPaletteOpen = useUiStore((s) => s.setCommandPaletteOpen);
 
   const viewTitles: Record<string, string> = {
     missions: "Mission Board",
     workspace: "Workspace",
     agents: "Agents",
+    review: "Review",
     insights: "Insights",
     settings: "Settings",
   };
@@ -61,13 +64,19 @@ export function Titlebar() {
 
   return (
     <div className={styles.titlebar} data-tauri-drag-region>
-      <div className={styles.trafficLightSpacer} />
-      <div className={styles.title}>{viewTitles[activeView] ?? ""}</div>
+      <div className={styles.trafficLightSpacer} data-tauri-drag-region />
+      <div className={styles.title} data-tauri-drag-region>{viewTitles[activeView] ?? ""}</div>
+      <div className={styles.spacer} data-tauri-drag-region />
+      <TopBarMetrics />
       <div className={styles.actions}>
         <button className={styles.actionBtn} onClick={cycleTheme} title={`Theme: ${theme}`}>
           {themeIcons[theme]}
         </button>
-        <button className={styles.actionBtn} title="Command Palette (⌘K)">
+        <button
+          className={styles.actionBtn}
+          title="Command Palette (⌘K)"
+          onClick={() => setCommandPaletteOpen(true)}
+        >
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
             <path
               d="M6.5 11.5a5 5 0 100-10 5 5 0 000 10zM14 14l-3.5-3.5"

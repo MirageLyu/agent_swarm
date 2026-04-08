@@ -1,0 +1,158 @@
+.trigger {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-tertiary);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+}
+
+.trigger:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.content {
+  min-width: 160px;
+  background: var(--color-bg-elevated);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 0 0 0.5px var(--color-border), 0 5px 30px rgba(0, 0, 0, 0.18);
+  z-index: 100;
+  animation: menuIn 120ms var(--ease-out);
+}
+
+@keyframes menuIn {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.item {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: 5px;
+  font-size: 12px;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.item:hover,
+.item[data-highlighted] {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+.item[data-disabled] {
+  color: var(--color-text-tertiary);
+  cursor: not-allowed;
+}
+
+.item[data-disabled]:hover {
+  background: transparent;
+  color: var(--color-text-tertiary);
+}
+
+.danger {
+  color: var(--color-error);
+}
+
+.danger:hover,
+.danger[data-highlighted] {
+  background: var(--color-error);
+  color: #fff;
+}
+
+.separator {
+  height: 0.5px;
+  background: var(--color-separator);
+  margin: 4px 6px;
+}
+
+/* Note dialog */
+.noteOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.3);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.noteDialog {
+  width: 360px;
+  background: var(--color-bg-elevated);
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: var(--shadow-xl);
+}
+
+.noteTitle {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 10px;
+  color: var(--color-text-primary);
+}
+
+.noteInput {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 0.5px solid var(--color-border);
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  resize: vertical;
+  outline: none;
+}
+
+.noteInput:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
+}
+
+.noteInput::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.noteActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.noteCancel {
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-tertiary);
+}
+
+.noteCancel:hover {
+  background: var(--color-bg-active);
+}
+
+.noteSend {
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #fff;
+  background: var(--color-accent);
+}
+
+.noteSend:hover {
+  background: var(--color-accent-hover);
+}

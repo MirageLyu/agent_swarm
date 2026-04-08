@@ -31,7 +31,7 @@
   --radius-xl: 20px;
 
   /* Sidebar */
-  --sidebar-width: 220px;
+  --sidebar-width: 176px;
   --titlebar-height: 52px;
 
   /* Transitions */
@@ -71,6 +71,10 @@
   --shadow-xl: 0 0 0 0.5px rgba(0, 0, 0, 0.1), 0 12px 40px rgba(0, 0, 0, 0.15),
     0 40px 80px rgba(0, 0, 0, 0.1);
 
+  /* DAG canvas */
+  --dag-canvas-bg: #eeeef2;
+  --dag-canvas-dot: rgba(0, 0, 0, 0.07);
+
   /* Blur */
   --blur-sidebar: saturate(180%) blur(20px);
 }
@@ -99,6 +103,9 @@
     --color-warning: #ffd60a;
     --color-error: #ff453a;
 
+    --dag-canvas-bg: #222224;
+    --dag-canvas-dot: rgba(255, 255, 255, 0.05);
+
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
     --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
     --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.4);
@@ -126,6 +133,8 @@
   --color-success: #30d158;
   --color-warning: #ffd60a;
   --color-error: #ff453a;
+  --dag-canvas-bg: #222224;
+  --dag-canvas-dot: rgba(255, 255, 255, 0.05);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.4);

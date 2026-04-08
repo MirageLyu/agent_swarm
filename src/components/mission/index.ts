@@ -1,4 +1,5 @@
 export { PlanInput } from "./PlanInput";
+export { PlanMissionDialog } from "./PlanMissionDialog";
 export { TaskDAG } from "./TaskDAG";
 export { TaskNode } from "./TaskNode";
 export { TaskEdge } from "./TaskEdge";

@@ -1,31 +1,43 @@
 .sidebar {
-  width: var(--sidebar-width);
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 64px;
   height: 100%;
-  background: var(--color-bg-sidebar);
-  backdrop-filter: var(--blur-sidebar);
-  -webkit-backdrop-filter: var(--blur-sidebar);
   border-right: 0.5px solid var(--color-separator);
   display: flex;
   flex-direction: column;
-  flex-shrink: 0;
-  transition: width var(--duration-normal) var(--ease-out);
   overflow: hidden;
+  transition: width var(--duration-normal) var(--ease-out);
 }
 
-.sidebar.collapsed {
-  width: 56px;
+.sidebar::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--color-bg-sidebar);
+  backdrop-filter: var(--blur-sidebar);
+  -webkit-backdrop-filter: var(--blur-sidebar);
+  z-index: -1;
+  pointer-events: none;
+}
+
+.sidebar.expanded {
+  width: var(--sidebar-width);
+  box-shadow: var(--shadow-lg);
 }
 
 .trafficLightSpacer {
   height: var(--titlebar-height);
   flex-shrink: 0;
+  -webkit-app-region: drag;
 }
 
 .nav {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: var(--space-2) var(--space-2);
+  padding: var(--space-2);
 }
 
 .navItem {
@@ -39,6 +51,17 @@
   color: var(--color-text-secondary);
   transition: all var(--duration-fast) var(--ease-out);
   white-space: nowrap;
+  position: relative;
+  border: none;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sidebar:not(.expanded) .navItem {
+  justify-content: center;
+  padding-left: var(--space-2);
+  padding-right: var(--space-2);
 }
 
 .navItem:hover {
@@ -63,4 +86,33 @@
 .label {
   overflow: hidden;
   text-overflow: ellipsis;
+  animation: labelIn var(--duration-fast) var(--ease-out);
+}
+
+@keyframes labelIn {
+  from { opacity: 0; transform: translateX(-4px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* Tooltip (rendered outside sidebar, position: fixed) */
+.tooltip {
+  position: fixed;
+  left: 70px;
+  transform: translateY(-50%);
+  padding: 4px 10px;
+  background: var(--color-bg-elevated);
+  border: 0.5px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  box-shadow: var(--shadow-md);
+  pointer-events: none;
+  z-index: 1000;
+  animation: tooltipIn 100ms var(--ease-out);
+}
+
+@keyframes tooltipIn {
+  from { opacity: 0; transform: translateY(-50%) translateX(-4px); }
+  to   { opacity: 1; transform: translateY(-50%) translateX(0); }
 }

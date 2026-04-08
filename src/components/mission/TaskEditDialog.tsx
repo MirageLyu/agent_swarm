@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import type { TaskInfo, Complexity } from "../../ipc/commands";
+import type { TaskInfo, Complexity, DependencyInfo } from "../../ipc/commands";
 import { Button } from "../ui";
 import styles from "./TaskEditDialog.module.css";
 
@@ -8,7 +8,9 @@ interface TaskEditDialogProps {
   task: TaskInfo | null;
   open: boolean;
   onClose: () => void;
-  onSave: (taskId: string, title: string, description: string) => void;
+  onSave: (taskId: string, title: string, description: string, dependsOn: string[]) => void;
+  allTasks?: TaskInfo[];
+  dependencies?: DependencyInfo[];
 }
 
 export function TaskEditDialog({
@@ -16,22 +18,40 @@ export function TaskEditDialog({
   open,
   onClose,
   onSave,
+  allTasks = [],
+  dependencies = [],
 }: TaskEditDialogProps) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  const [selectedDeps, setSelectedDeps] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (task) {
       setTitle(task.title);
       setDescription(task.description);
+      const currentDeps = dependencies
+        .filter((d) => d.task_id === task.id)
+        .map((d) => d.depends_on);
+      setSelectedDeps(new Set(currentDeps));
     }
-  }, [task]);
+  }, [task, dependencies]);
+
+  const toggleDep = (id: string) => {
+    setSelectedDeps((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   const handleSave = () => {
     if (!task || !title.trim()) return;
-    onSave(task.id, title.trim(), description.trim());
+    onSave(task.id, title.trim(), description.trim(), [...selectedDeps]);
     onClose();
   };
+
+  const otherTasks = allTasks.filter((t) => t.id !== task?.id);
 
   return (
     <Dialog.Root open={open} onOpenChange={(v) => !v && onClose()}>
@@ -57,6 +77,23 @@ export function TaskEditDialog({
               rows={4}
             />
           </div>
+          {otherTasks.length > 0 && (
+            <div className={styles.field}>
+              <label className={styles.label}>Depends on</label>
+              <div className={styles.depList}>
+                {otherTasks.map((t) => (
+                  <label key={t.id} className={styles.depItem}>
+                    <input
+                      type="checkbox"
+                      checked={selectedDeps.has(t.id)}
+                      onChange={() => toggleDep(t.id)}
+                    />
+                    <span>{t.title}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
           <div className={styles.actions}>
             <Button variant="ghost" size="sm" onClick={onClose}>
               Cancel
@@ -145,7 +182,13 @@ export function AddTaskDialog({
             />
           </div>
           <div className={styles.field}>
-            <label className={styles.label}>Complexity</label>
+            <label className={styles.label}>
+              Complexity
+              <span className={styles.hintWrap}>
+                <span className={styles.hint}>?</span>
+                <span className={styles.hintTip}>仅供展示，不影响调度与执行流程</span>
+              </span>
+            </label>
             <div className={styles.complexityGroup}>
               {(["low", "medium", "high"] as Complexity[]).map((c) => (
                 <button

@@ -7,7 +7,7 @@ export interface AppInfo {
 
 // ---------- Mission / Task types ----------
 
-export type MissionStatus = "draft" | "planned" | "running" | "completed" | "failed";
+export type MissionStatus = "draft" | "preflight" | "planned" | "running" | "completed" | "failed";
 export type TaskStatus = "pending" | "ready" | "running" | "completed" | "failed" | "cancelled";
 export type Complexity = "low" | "medium" | "high";
 
@@ -71,6 +71,11 @@ export interface AddTaskRequest {
   title: string;
   description: string;
   complexity: Complexity;
+  depends_on: string[];
+}
+
+export interface SetTaskDependenciesRequest {
+  task_id: string;
   depends_on: string[];
 }
 
@@ -227,6 +232,94 @@ export interface InjectMissionNoteResponse {
   agent_count: number;
 }
 
+// ---------- Mission Template Export / Import ----------
+
+export interface ExportMissionTemplateRequest {
+  mission_id: string;
+  file_path: string;
+}
+
+// ---------- FM-10: Pre-flight & Contract ----------
+
+export type PreflightMode = "scenario_walk" | "devils_advocate" | "risk_highlighter";
+export type ContractSection = "scope" | "constraints" | "exclusions" | "assumptions";
+export type ContractStatus = "drafting" | "signed";
+
+export interface StartPreflightRequest {
+  description: string;
+}
+
+export interface StartPreflightResponse {
+  mission_id: string;
+  session_id: string;
+}
+
+export interface SendPreflightMessageRequest {
+  session_id: string;
+  message: string;
+  mode: PreflightMode;
+}
+
+export interface AddContractItemRequest {
+  mission_id: string;
+  section: ContractSection;
+  text: string;
+}
+
+export interface RemoveContractItemRequest {
+  mission_id: string;
+  item_id: string;
+}
+
+export interface UpdateContractConfigRequest {
+  mission_id: string;
+  budget_usd?: number;
+  quality_threshold?: number;
+  max_duration_hours?: number;
+}
+
+export interface ContractImpact {
+  section: ContractSection;
+  text: string;
+}
+
+export interface PreflightChoice {
+  id: string;
+  label: string;
+  contract_impact: ContractImpact | null;
+}
+
+export interface ContractItemInfo {
+  id: string;
+  section: ContractSection;
+  text: string;
+  source: "user" | "agent";
+  created_at: string;
+}
+
+export interface ContractInfo {
+  id: string;
+  mission_id: string;
+  status: ContractStatus;
+  budget_usd: number | null;
+  quality_threshold: number | null;
+  max_duration_hours: number | null;
+  signed_at: string | null;
+  items: ContractItemInfo[];
+}
+
+export interface PreflightMessageInfo {
+  role: "user" | "assistant";
+  content: string;
+  choices: PreflightChoice[];
+}
+
+export interface PreflightSessionInfo {
+  id: string;
+  mode: PreflightMode;
+  messages: PreflightMessageInfo[];
+}
+
 // ---------- FM-08: Mission Lifecycle ----------
 
 export interface DeleteMissionRequest {
@@ -273,6 +366,9 @@ export const commands = {
   deleteTask: (taskId: string) => invoke<void>("delete_task", { taskId }),
 
   addTask: (request: AddTaskRequest) => invoke<TaskInfo>("add_task", { request }),
+
+  setTaskDependencies: (request: SetTaskDependenciesRequest) =>
+    invoke<void>("set_task_dependencies", { request }),
 
   // Config
   getConfig: () => invoke<ConfigResponse>("get_config"),
@@ -339,4 +435,36 @@ export const commands = {
 
   restartMission: (request: RestartMissionRequest) =>
     invoke<RestartResult>("restart_mission", { request }),
+
+  // Mission Template Export / Import
+  exportMissionTemplate: (request: ExportMissionTemplateRequest) =>
+    invoke<void>("export_mission_template", { request }),
+
+  importMissionTemplate: (filePath: string) =>
+    invoke<MissionInfo>("import_mission_template", { filePath }),
+
+  // FM-10: Pre-flight & Contract
+  startPreflight: (request: StartPreflightRequest) =>
+    invoke<StartPreflightResponse>("start_preflight", { request }),
+
+  sendPreflightMessage: (request: SendPreflightMessageRequest) =>
+    invoke<void>("send_preflight_message", { request }),
+
+  addContractItem: (request: AddContractItemRequest) =>
+    invoke<ContractItemInfo>("add_contract_item", { request }),
+
+  removeContractItem: (request: RemoveContractItemRequest) =>
+    invoke<void>("remove_contract_item", { request }),
+
+  updateContractConfig: (request: UpdateContractConfigRequest) =>
+    invoke<void>("update_contract_config", { request }),
+
+  getContract: (missionId: string) =>
+    invoke<ContractInfo>("get_contract", { missionId }),
+
+  getPreflightSession: (missionId: string) =>
+    invoke<PreflightSessionInfo | null>("get_preflight_session", { missionId }),
+
+  signContract: (missionId: string) =>
+    invoke<PlanMissionResponse>("sign_contract", { missionId }),
 };

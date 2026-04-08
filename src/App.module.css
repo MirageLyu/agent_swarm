@@ -5,6 +5,13 @@
   overflow: hidden;
 }
 
+.sidebarSlot {
+  width: 64px;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 10;
+}
+
 .main {
   flex: 1;
   display: flex;

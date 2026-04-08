@@ -9,9 +9,9 @@
 .container {
   flex: 1;
   overflow: hidden;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-bg-secondary);
+  background-color: var(--dag-canvas-bg, #f0f0f3);
+  background-image: radial-gradient(circle, var(--dag-canvas-dot, rgba(0, 0, 0, 0.08)) 1px, transparent 1px);
+  background-size: 24px 24px;
   position: relative;
   touch-action: none;
 }

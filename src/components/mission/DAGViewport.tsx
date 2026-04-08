@@ -38,97 +38,116 @@ export function DAGViewport({
   const dragStart = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
   const [transitioning, setTransitioning] = useState(false);
 
-  const clampTranslate = useCallback(
+  const transformRef = useRef(transform);
+  transformRef.current = transform;
+
+  const onChangeRef = useRef(onTransformChange);
+  onChangeRef.current = onTransformChange;
+
+  const contentRef = useRef({ w: contentWidth, h: contentHeight });
+  contentRef.current = { w: contentWidth, h: contentHeight };
+
+  const clamp = useCallback(
     (tx: number, ty: number, scale: number): [number, number] => {
       const el = containerRef.current;
       if (!el) return [tx, ty];
       const vw = el.clientWidth;
       const vh = el.clientHeight;
-      const minTx = -(contentWidth + PAN_BOUNDARY) + vw / scale;
-      const maxTx = PAN_BOUNDARY;
-      const minTy = -(contentHeight + PAN_BOUNDARY) + vh / scale;
-      const maxTy = PAN_BOUNDARY;
+      const { w, h } = contentRef.current;
+      const rawMinTx = -(w + PAN_BOUNDARY) + vw / scale;
+      const rawMaxTx = PAN_BOUNDARY;
+      const rawMinTy = -(h + PAN_BOUNDARY) + vh / scale;
+      const rawMaxTy = PAN_BOUNDARY;
+      const loX = Math.min(rawMinTx, rawMaxTx);
+      const hiX = Math.max(rawMinTx, rawMaxTx);
+      const loY = Math.min(rawMinTy, rawMaxTy);
+      const hiY = Math.max(rawMinTy, rawMaxTy);
       return [
-        Math.max(minTx, Math.min(maxTx, tx)),
-        Math.max(minTy, Math.min(maxTy, ty)),
+        Math.max(loX, Math.min(hiX, tx)),
+        Math.max(loY, Math.min(hiY, ty)),
       ];
     },
-    [contentWidth, contentHeight],
+    [],
   );
 
-  const handleWheel = useCallback(
-    (e: WheelEvent) => {
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const t = transformRef.current;
+    const [cx, cy] = clamp(t.translateX, t.translateY, t.scale);
+    if (cx !== t.translateX || cy !== t.translateY) {
+      onChangeRef.current({ scale: t.scale, translateX: cx, translateY: cy });
+    }
+  }, [contentWidth, contentHeight, clamp]);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    function handleWheel(e: WheelEvent) {
       e.preventDefault();
-      const el = containerRef.current;
-      if (!el) return;
+      const t = transformRef.current;
 
       if (e.ctrlKey || e.metaKey) {
-        // Zoom (pinch or Ctrl+wheel)
-        const rect = el.getBoundingClientRect();
+        const rect = el!.getBoundingClientRect();
         const mx = e.clientX - rect.left;
         const my = e.clientY - rect.top;
 
-        const oldScale = transform.scale;
+        const oldScale = t.scale;
         const delta = -e.deltaY * ZOOM_SENSITIVITY;
         const newScale = Math.max(
           MIN_SCALE,
           Math.min(MAX_SCALE, oldScale * (1 + delta)),
         );
 
-        // Zoom-to-point: keep mouse position stable
-        const dagX = mx / oldScale - transform.translateX;
-        const dagY = my / oldScale - transform.translateY;
+        const dagX = mx / oldScale - t.translateX;
+        const dagY = my / oldScale - t.translateY;
         const newTx = mx / newScale - dagX;
         const newTy = my / newScale - dagY;
-        const [cx, cy] = clampTranslate(newTx, newTy, newScale);
+        const [cx, cy] = clamp(newTx, newTy, newScale);
 
-        onTransformChange({ scale: newScale, translateX: cx, translateY: cy });
+        onChangeRef.current({ scale: newScale, translateX: cx, translateY: cy });
       } else {
-        // Pan (two-finger scroll / regular wheel)
-        const newTx = transform.translateX - e.deltaX / transform.scale;
-        const newTy = transform.translateY - e.deltaY / transform.scale;
-        const [cx, cy] = clampTranslate(newTx, newTy, transform.scale);
-        onTransformChange({ ...transform, translateX: cx, translateY: cy });
+        const newTx = t.translateX - e.deltaX / t.scale;
+        const newTy = t.translateY - e.deltaY / t.scale;
+        const [cx, cy] = clamp(newTx, newTy, t.scale);
+        onChangeRef.current({ scale: t.scale, translateX: cx, translateY: cy });
       }
-    },
-    [transform, onTransformChange, clampTranslate],
-  );
+    }
 
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
     el.addEventListener("wheel", handleWheel, { passive: false });
     return () => el.removeEventListener("wheel", handleWheel);
-  }, [handleWheel]);
+  }, [clamp]);
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
-      // Only start drag on the viewport background, not on nodes
       if ((e.target as HTMLElement).closest("[data-dag-node]")) return;
       if (e.button !== 0) return;
+      const t = transformRef.current;
       setDragging(true);
       dragStart.current = {
         x: e.clientX,
         y: e.clientY,
-        tx: transform.translateX,
-        ty: transform.translateY,
+        tx: t.translateX,
+        ty: t.translateY,
       };
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
     },
-    [transform.translateX, transform.translateY],
+    [],
   );
 
   const handlePointerMove = useCallback(
     (e: React.PointerEvent) => {
       if (!dragging) return;
+      const t = transformRef.current;
       const dx = e.clientX - dragStart.current.x;
       const dy = e.clientY - dragStart.current.y;
-      const newTx = dragStart.current.tx + dx / transform.scale;
-      const newTy = dragStart.current.ty + dy / transform.scale;
-      const [cx, cy] = clampTranslate(newTx, newTy, transform.scale);
-      onTransformChange({ ...transform, translateX: cx, translateY: cy });
+      const newTx = dragStart.current.tx + dx / t.scale;
+      const newTy = dragStart.current.ty + dy / t.scale;
+      const [cx, cy] = clamp(newTx, newTy, t.scale);
+      onChangeRef.current({ scale: t.scale, translateX: cx, translateY: cy });
     },
-    [dragging, transform, onTransformChange, clampTranslate],
+    [dragging, clamp],
   );
 
   const handlePointerUp = useCallback(() => {
@@ -137,16 +156,17 @@ export function DAGViewport({
 
   const fitToView = useCallback(() => {
     const el = containerRef.current;
-    if (!el || contentWidth === 0 || contentHeight === 0) return;
+    const { w, h } = contentRef.current;
+    if (!el || w === 0 || h === 0) return;
     const vw = el.clientWidth;
     const vh = el.clientHeight;
-    const scale = Math.min(vw / contentWidth, vh / contentHeight, 1.0) * 0.9;
-    const tx = (vw / scale - contentWidth) / 2;
-    const ty = (vh / scale - contentHeight) / 2;
+    const scale = Math.min(vw / w, vh / h, 1.0) * 0.9;
+    const tx = (vw / scale - w) / 2;
+    const ty = (vh / scale - h) / 2;
     setTransitioning(true);
-    onTransformChange({ scale, translateX: tx, translateY: ty });
+    onChangeRef.current({ scale, translateX: tx, translateY: ty });
     setTimeout(() => setTransitioning(false), 300);
-  }, [contentWidth, contentHeight, onTransformChange]);
+  }, []);
 
   const zoomBy = useCallback(
     (delta: number) => {
@@ -156,21 +176,21 @@ export function DAGViewport({
       const vh = el.clientHeight;
       const mx = vw / 2;
       const my = vh / 2;
+      const t = transformRef.current;
 
-      const oldScale = transform.scale;
       const newScale = Math.max(
         MIN_SCALE,
-        Math.min(MAX_SCALE, oldScale + delta),
+        Math.min(MAX_SCALE, t.scale + delta),
       );
 
-      const dagX = mx / oldScale - transform.translateX;
-      const dagY = my / oldScale - transform.translateY;
+      const dagX = mx / t.scale - t.translateX;
+      const dagY = my / t.scale - t.translateY;
       const newTx = mx / newScale - dagX;
       const newTy = my / newScale - dagY;
-      const [cx, cy] = clampTranslate(newTx, newTy, newScale);
-      onTransformChange({ scale: newScale, translateX: cx, translateY: cy });
+      const [cx, cy] = clamp(newTx, newTy, newScale);
+      onChangeRef.current({ scale: newScale, translateX: cx, translateY: cy });
     },
-    [transform, onTransformChange, clampTranslate],
+    [clamp],
   );
 
   return (

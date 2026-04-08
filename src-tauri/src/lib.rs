@@ -3,6 +3,7 @@ pub mod commands;
 pub mod db;
 pub mod git;
 pub mod llm;
+pub mod mission_template;
 pub mod tools;
 
 use agent::{AgentRegistry, Scheduler};
@@ -56,6 +57,7 @@ pub fn run() {
             commands::update_task,
             commands::delete_task,
             commands::add_task,
+            commands::set_task_dependencies,
             commands::confirm_mission,
             commands::delete_mission,
             commands::get_config,
@@ -80,6 +82,16 @@ pub fn run() {
             commands::list_mission_notes,
             commands::stop_mission_execution,
             commands::restart_mission,
+            commands::export_mission_template,
+            commands::import_mission_template,
+            commands::start_preflight,
+            commands::send_preflight_message,
+            commands::add_contract_item,
+            commands::remove_contract_item,
+            commands::update_contract_config,
+            commands::get_contract,
+            commands::get_preflight_session,
+            commands::sign_contract,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

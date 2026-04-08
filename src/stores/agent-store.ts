@@ -32,13 +32,21 @@ export interface Agent {
   streamBuffer: string;
 }
 
-export type WorkspaceViewMode = "list" | "focus";
+export type WorkspaceViewMode = "list" | "focus" | "grid";
+
+export interface SidebarAgent {
+  id: string;
+  name: string;
+  status: AgentStatus;
+  taskTitle: string;
+}
 
 interface AgentState {
   agents: Record<string, Agent>;
   activeAgentId: string | null;
   viewMode: WorkspaceViewMode;
   filterMissionId: string | null;
+  sidebarAgents: SidebarAgent[];
 
   addAgent: (agent: Agent) => void;
   updateAgent: (id: string, updates: Partial<Agent>) => void;
@@ -51,6 +59,7 @@ interface AgentState {
   setFilterMissionId: (missionId: string | null) => void;
   hydrateEvents: (agentId: string, events: AgentEvent[]) => void;
   hydrateAgents: (agents: Agent[]) => void;
+  setSidebarAgents: (agents: SidebarAgent[]) => void;
 }
 
 export const useAgentStore = create<AgentState>((set) => ({
@@ -58,6 +67,7 @@ export const useAgentStore = create<AgentState>((set) => ({
   activeAgentId: null,
   viewMode: "list",
   filterMissionId: null,
+  sidebarAgents: [],
 
   addAgent: (agent) =>
     set((s) => ({ agents: { ...s.agents, [agent.id]: agent } })),
@@ -120,6 +130,8 @@ export const useAgentStore = create<AgentState>((set) => ({
 
   setFilterMissionId: (missionId) =>
     set({ filterMissionId: missionId }),
+
+  setSidebarAgents: (agents) => set({ sidebarAgents: agents }),
 
   hydrateEvents: (agentId, events) =>
     set((s) => {

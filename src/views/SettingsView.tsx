@@ -11,8 +11,20 @@ export function SettingsView() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
 
+  const [provider, setProvider] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [defaultModel, setDefaultModel] = useState("");
+  const [maxAgents, setMaxAgents] = useState("");
+  const [configDirty, setConfigDirty] = useState(false);
+
   useEffect(() => {
-    commands.getConfig().then(setConfig).catch(console.error);
+    commands.getConfig().then((c) => {
+      setConfig(c);
+      setProvider(c.provider);
+      setBaseUrl(c.base_url);
+      setDefaultModel(c.default_model);
+      setMaxAgents(String(c.max_concurrent_agents));
+    }).catch(console.error);
   }, []);
 
   const handleSaveKey = async () => {
@@ -31,6 +43,27 @@ export function SettingsView() {
     }
   };
 
+  const handleSaveConfig = async () => {
+    setSaving(true);
+    try {
+      await commands.updateConfig({
+        provider,
+        base_url: baseUrl,
+        default_model: defaultModel,
+        max_concurrent_agents: parseInt(maxAgents, 10) || 4,
+      });
+      setConfigDirty(false);
+      setMessage("Configuration saved");
+      setTimeout(() => setMessage(""), 2000);
+    } catch (e) {
+      setMessage(`Error: ${e}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const markDirty = () => setConfigDirty(true);
+
   return (
     <div className={styles.container}>
       <div className={styles.section}>
@@ -39,19 +72,31 @@ export function SettingsView() {
           <div className={styles.fieldHeader}>
             <span>Provider</span>
           </div>
-          <p className={styles.fieldValue}>{config?.provider ?? "..."}</p>
+          <Input
+            value={provider}
+            onChange={(e) => { setProvider(e.target.value); markDirty(); }}
+            placeholder="openai"
+          />
         </div>
         <div className={styles.field}>
           <div className={styles.fieldHeader}>
             <span>Base URL</span>
           </div>
-          <p className={styles.fieldValue}>{config?.base_url ?? "..."}</p>
+          <Input
+            value={baseUrl}
+            onChange={(e) => { setBaseUrl(e.target.value); markDirty(); }}
+            placeholder="https://api.openai.com/v1"
+          />
         </div>
         <div className={styles.field}>
           <div className={styles.fieldHeader}>
             <span>Model</span>
           </div>
-          <p className={styles.fieldValue}>{config?.default_model ?? "..."}</p>
+          <Input
+            value={defaultModel}
+            onChange={(e) => { setDefaultModel(e.target.value); markDirty(); }}
+            placeholder="gpt-4o"
+          />
         </div>
       </div>
 
@@ -86,9 +131,22 @@ export function SettingsView() {
           <div className={styles.fieldHeader}>
             <span>Max Concurrent Agents</span>
           </div>
-          <p className={styles.fieldValue}>{config?.max_concurrent_agents ?? "..."}</p>
+          <Input
+            type="number"
+            value={maxAgents}
+            onChange={(e) => { setMaxAgents(e.target.value); markDirty(); }}
+            placeholder="4"
+          />
         </div>
       </div>
+
+      {configDirty && (
+        <div className={styles.saveRow}>
+          <Button variant="primary" onClick={handleSaveConfig} disabled={saving}>
+            {saving ? "Saving..." : "Save Configuration"}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

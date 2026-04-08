@@ -1,4 +1,6 @@
+import { useState, useRef, useCallback } from "react";
 import { useUiStore, type ViewId } from "../stores/ui-store";
+import { SidebarAgentList } from "./SidebarAgentList";
 import styles from "./Sidebar.module.css";
 
 interface NavItem {
@@ -104,24 +106,72 @@ const navItems: NavItem[] = [
   },
 ];
 
+const EXPAND_DELAY = 0;
+const COLLAPSE_DELAY = 0;
+
 export function Sidebar() {
-  const { activeView, setActiveView, sidebarCollapsed } = useUiStore();
+  const { activeView, setActiveView } = useUiStore();
+  const [expanded, setExpanded] = useState(false);
+  const [tooltip, setTooltip] = useState<{ label: string; top: number } | null>(null);
+  const expandTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const collapseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleMouseEnter = useCallback(() => {
+    if (collapseTimer.current) clearTimeout(collapseTimer.current);
+    expandTimer.current = setTimeout(() => {
+      setExpanded(true);
+      setTooltip(null);
+    }, EXPAND_DELAY);
+  }, []);
+
+  const handleMouseLeave = useCallback(() => {
+    if (expandTimer.current) clearTimeout(expandTimer.current);
+    setTooltip(null);
+    collapseTimer.current = setTimeout(() => setExpanded(false), COLLAPSE_DELAY);
+  }, []);
+
+  const handleNavEnter = useCallback(
+    (e: React.MouseEvent, label: string) => {
+      if (expanded) return;
+      const rect = e.currentTarget.getBoundingClientRect();
+      setTooltip({ label, top: rect.top + rect.height / 2 });
+    },
+    [expanded],
+  );
+
+  const handleNavLeave = useCallback(() => {
+    setTooltip(null);
+  }, []);
 
   return (
-    <aside className={`${styles.sidebar} ${sidebarCollapsed ? styles.collapsed : ""}`}>
-      <div className={styles.trafficLightSpacer} />
-      <nav className={styles.nav}>
-        {navItems.map((item) => (
-          <button
-            key={item.id}
-            className={`${styles.navItem} ${activeView === item.id ? styles.active : ""}`}
-            onClick={() => setActiveView(item.id)}
-          >
-            <span className={styles.icon}>{item.icon}</span>
-            {!sidebarCollapsed && <span className={styles.label}>{item.label}</span>}
-          </button>
-        ))}
-      </nav>
-    </aside>
+    <>
+      <aside
+        className={`${styles.sidebar} ${expanded ? styles.expanded : ""}`}
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
+      >
+        <div className={styles.trafficLightSpacer} data-tauri-drag-region />
+        <nav className={styles.nav}>
+          {navItems.map((item) => (
+            <button
+              key={item.id}
+              className={`${styles.navItem} ${activeView === item.id ? styles.active : ""}`}
+              onClick={() => setActiveView(item.id)}
+              onMouseEnter={(e) => handleNavEnter(e, item.label)}
+              onMouseLeave={handleNavLeave}
+            >
+              <span className={styles.icon}>{item.icon}</span>
+              {expanded && <span className={styles.label}>{item.label}</span>}
+            </button>
+          ))}
+        </nav>
+        {expanded && <SidebarAgentList />}
+      </aside>
+      {!expanded && tooltip && (
+        <div className={styles.tooltip} style={{ top: tooltip.top }}>
+          {tooltip.label}
+        </div>
+      )}
+    </>
   );
 }

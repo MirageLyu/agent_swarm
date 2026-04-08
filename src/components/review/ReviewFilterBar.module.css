@@ -1,0 +1,104 @@
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 0.5px solid var(--color-separator);
+  flex-shrink: 0;
+}
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--color-bg-tertiary);
+  padding: 2px;
+  border-radius: 8px;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+}
+
+.tab:hover {
+  color: var(--color-text-primary);
+}
+
+.tabActive {
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+.count {
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-tertiary);
+  padding: 1px 5px;
+  border-radius: 100px;
+  min-width: 18px;
+  text-align: center;
+}
+
+.tabActive .count {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+.summary {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  margin-left: 12px;
+}
+
+.actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.approveBtn {
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-success);
+  border: 0.5px solid var(--color-success);
+  background: transparent;
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+}
+
+.approveBtn:hover:not(:disabled) {
+  background: var(--color-success);
+  color: #fff;
+}
+
+.approveBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.mergeBtn {
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #fff;
+  background: var(--color-accent);
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+}
+
+.mergeBtn:hover {
+  background: var(--color-accent-hover);
+}

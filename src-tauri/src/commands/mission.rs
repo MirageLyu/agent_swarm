@@ -365,6 +365,35 @@ pub fn delete_task(app: tauri::AppHandle, task_id: String) -> Result<(), String>
     .map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SetTaskDependenciesRequest {
+    pub task_id: String,
+    pub depends_on: Vec<String>,
+}
+
+#[tauri::command]
+pub fn set_task_dependencies(
+    app: tauri::AppHandle,
+    request: SetTaskDependenciesRequest,
+) -> Result<(), String> {
+    let db = app.state::<crate::db::Database>();
+
+    db.with_conn(|conn| {
+        conn.execute(
+            "DELETE FROM task_dependencies WHERE task_id = ?",
+            [&request.task_id],
+        )?;
+        for dep_id in &request.depends_on {
+            conn.execute(
+                "INSERT INTO task_dependencies (task_id, depends_on) VALUES (?, ?)",
+                rusqlite::params![&request.task_id, dep_id],
+            )?;
+        }
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn add_task(app: tauri::AppHandle, request: AddTaskRequest) -> Result<TaskInfo, String> {
     let db = app.state::<crate::db::Database>();
@@ -651,6 +680,140 @@ pub async fn restart_mission(
     );
 
     Ok(RestartResult { reset_count })
+}
+
+// ---------- template export / import ----------
+
+#[derive(Debug, Deserialize)]
+pub struct ExportMissionTemplateRequest {
+    pub mission_id: String,
+    pub file_path: String,
+}
+
+#[tauri::command]
+pub fn export_mission_template(
+    app: tauri::AppHandle,
+    request: ExportMissionTemplateRequest,
+) -> Result<(), String> {
+    let db = app.state::<crate::db::Database>();
+
+    let detail = db
+        .with_conn(|conn| {
+            let mission = query_mission_info(conn, &request.mission_id)?;
+
+            let mut task_stmt = conn.prepare(
+                "SELECT id, mission_id, title, description, status, complexity,
+                        assigned_agent_id, created_at, completed_at
+                 FROM tasks WHERE mission_id = ? ORDER BY created_at ASC",
+            )?;
+            let tasks: Vec<TaskInfo> = task_stmt
+                .query_map([&request.mission_id], |row| {
+                    Ok(TaskInfo {
+                        id: row.get(0)?,
+                        mission_id: row.get(1)?,
+                        title: row.get(2)?,
+                        description: row.get(3)?,
+                        status: row.get(4)?,
+                        complexity: row.get(5)?,
+                        assigned_agent_id: row.get(6)?,
+                        created_at: row.get(7)?,
+                        completed_at: row.get(8)?,
+                    })
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            let task_ids: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
+            let placeholders = task_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+
+            let dependencies: Vec<DependencyInfo> = if task_ids.is_empty() {
+                vec![]
+            } else {
+                let sql = format!(
+                    "SELECT task_id, depends_on FROM task_dependencies WHERE task_id IN ({placeholders})"
+                );
+                let mut dep_stmt = conn.prepare(&sql)?;
+                let params: Vec<&dyn rusqlite::types::ToSql> = task_ids
+                    .iter()
+                    .map(|id| id as &dyn rusqlite::types::ToSql)
+                    .collect();
+                let deps: Vec<DependencyInfo> = dep_stmt
+                    .query_map(params.as_slice(), |row| {
+                        Ok(DependencyInfo {
+                            task_id: row.get(0)?,
+                            depends_on: row.get(1)?,
+                        })
+                    })?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                deps
+            };
+
+            Ok(MissionDetail {
+                mission,
+                tasks,
+                dependencies,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let template = crate::mission_template::build_template(&detail);
+    let yaml =
+        crate::mission_template::serialize_yaml(&template).map_err(|e| e.to_string())?;
+
+    std::fs::write(&request.file_path, &yaml).map_err(|e| {
+        format!("Failed to write file '{}': {e}", request.file_path)
+    })?;
+
+    tracing::info!(
+        "Exported mission {} to {}",
+        request.mission_id,
+        request.file_path
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub fn import_mission_template(
+    app: tauri::AppHandle,
+    file_path: String,
+) -> Result<MissionInfo, String> {
+    let yaml = std::fs::read_to_string(&file_path)
+        .map_err(|e| format!("Failed to read file '{file_path}': {e}"))?;
+
+    let template =
+        crate::mission_template::parse_and_validate_yaml(&yaml).map_err(|e| e.to_string())?;
+
+    let (title, description, tasks_with_uuid, dependencies) =
+        crate::mission_template::template_to_db_records(&template);
+
+    let db = app.state::<crate::db::Database>();
+    let mission_id = Uuid::new_v4().to_string();
+
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO missions (id, title, description, status) VALUES (?, ?, ?, 'draft')",
+            rusqlite::params![mission_id, title, description],
+        )?;
+
+        for (uuid, task) in &tasks_with_uuid {
+            conn.execute(
+                "INSERT INTO tasks (id, mission_id, title, description, complexity, status)
+                 VALUES (?, ?, ?, ?, ?, 'pending')",
+                rusqlite::params![uuid, mission_id, task.title, task.description, task.complexity],
+            )?;
+        }
+
+        for (task_uuid, dep_uuid) in &dependencies {
+            conn.execute(
+                "INSERT INTO task_dependencies (task_id, depends_on) VALUES (?, ?)",
+                rusqlite::params![task_uuid, dep_uuid],
+            )?;
+        }
+
+        query_mission_info(conn, &mission_id)
+    })
+    .map_err(|e| e.to_string())
 }
 
 // ---------- helpers ----------

@@ -1,0 +1,66 @@
+.bar {
+  height: 36px;
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  background: var(--color-bg-sidebar);
+  backdrop-filter: var(--blur-sidebar);
+  -webkit-backdrop-filter: var(--blur-sidebar);
+  border-top: 0.5px solid var(--color-border);
+  flex-shrink: 0;
+  gap: 16px;
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+}
+
+.statusItem {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.statusDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-success);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.progressBg {
+  width: 100px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-bg-tertiary);
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--color-accent);
+  transition: width var(--duration-slow) var(--ease-out);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.hint {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--color-success);
+  font-weight: 500;
+}

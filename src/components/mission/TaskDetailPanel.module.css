@@ -1,0 +1,228 @@
+.panel {
+  flex-shrink: 0;
+  background: var(--color-bg-secondary);
+  border-top: 0.5px solid var(--color-separator);
+  overflow: hidden;
+}
+
+.header {
+  display: none;
+}
+
+.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--color-text-tertiary);
+  padding: 6px 12px;
+}
+
+.emptyIcon {
+  width: 16px;
+  height: 16px;
+  opacity: 0.3;
+}
+
+.emptyText {
+  font-size: 11px;
+}
+
+.body {
+  overflow-y: auto;
+  padding: 8px 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  align-items: flex-start;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 140px;
+}
+
+.sectionTitle {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.nameRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.taskName {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.3;
+}
+
+.focusBtn {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+  transition: all var(--duration-fast) var(--ease-out);
+}
+
+.focusBtn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-accent);
+}
+
+.taskDesc {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+  max-width: 320px;
+}
+
+.statusBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  width: fit-content;
+}
+
+.statusBadge[data-status="completed"] {
+  background: rgba(52, 199, 89, 0.12);
+  color: var(--color-success);
+}
+
+.statusBadge[data-status="running"] {
+  background: rgba(0, 122, 255, 0.12);
+  color: var(--color-accent);
+}
+
+.statusBadge[data-status="pending"],
+.statusBadge[data-status="ready"] {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+}
+
+.statusBadge[data-status="failed"],
+.statusBadge[data-status="cancelled"] {
+  background: rgba(255, 59, 48, 0.12);
+  color: var(--color-error);
+}
+
+.statusDot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  display: inline-block;
+}
+
+.detailRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 0;
+  font-size: 11px;
+  border-bottom: 0.5px solid var(--color-separator);
+}
+
+.detailRow:last-child {
+  border-bottom: none;
+}
+
+.detailLabel {
+  color: var(--color-text-secondary);
+}
+
+.detailValue {
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+
+.depList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.depItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  background: var(--color-bg-hover);
+  border-radius: 3px;
+  font-size: 11px;
+  color: var(--color-text-primary);
+  border: none;
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+}
+
+.depItem:hover {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+.depDot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.depDot[data-status="completed"] {
+  background: var(--color-success);
+}
+
+.depDot[data-status="running"] {
+  background: var(--color-accent);
+}
+
+.depDot[data-status="pending"],
+.depDot[data-status="ready"] {
+  background: var(--color-text-tertiary);
+}
+
+.depDot[data-status="failed"],
+.depDot[data-status="cancelled"] {
+  background: var(--color-error);
+}
+
+.closeBtn {
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  font-size: 13px;
+  color: var(--color-text-tertiary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.closeBtn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}

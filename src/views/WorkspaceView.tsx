@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../components/ui/Button";
 import {
   commands,
@@ -13,8 +13,11 @@ import type { TaskStatus, MissionStatus, MissionCostSummary } from "../ipc/comma
 import { useAgentStore } from "../stores/agent-store";
 import type { Agent, AgentEvent, AgentStatus } from "../stores/agent-store";
 import { useTaskStore } from "../stores/task-store";
+import { useUiStore } from "../stores/ui-store";
 import { AgentStreamList } from "../components/workspace/AgentStreamList";
-import { AgentTimeline } from "../components/workspace/AgentTimeline";
+import { AgentGridView } from "../components/workspace/AgentGridView";
+import { AgentTerminalPane } from "../components/workspace/AgentTerminalPane";
+import { AgentPaneMenu } from "../components/workspace/AgentPaneMenu";
 import { CostSummaryBar } from "../components/workspace/CostSummaryBar";
 import { MissionNoteBar } from "../components/workspace/MissionNoteBar";
 import styles from "./WorkspaceView.module.css";
@@ -37,14 +40,14 @@ function toAgentStatus(raw: string): AgentStatus {
   return valid.includes(raw as AgentStatus) ? (raw as AgentStatus) : "completed";
 }
 
+type ViewMode = "grid" | "list" | "focus";
+
 export function WorkspaceView() {
   const {
     agents,
     activeAgentId,
-    viewMode,
     filterMissionId,
     setActiveAgent,
-    setViewMode,
     setFilterMissionId,
     addAgent,
     updateAgent,
@@ -54,29 +57,41 @@ export function WorkspaceView() {
     hydrateEvents,
   } = useAgentStore();
 
+  const workspaceMode = useUiStore((s) => s.workspaceMode);
+  const setWorkspaceMode = useUiStore((s) => s.setWorkspaceMode);
+
   const { missions, updateTaskLocal, updateMissionStatus } = useTaskStore();
   const [costSummary, setCostSummary] = useState<MissionCostSummary>({
     total_cost: 0,
     total_input_tokens: 0,
     total_output_tokens: 0,
   });
+  const [taskTitleMap, setTaskTitleMap] = useState<Record<string, string>>({});
 
-  // Load mission list for the filter dropdown
   useEffect(() => {
     commands.listMissions().then((list) => {
       useTaskStore.getState().setMissions(list);
     }).catch(() => {});
   }, []);
 
-  // Load agents for the current mission filter (or all agents)
   useEffect(() => {
     const load = async () => {
       try {
         let agentList;
         if (filterMissionId) {
-          agentList = await commands.listAgentsByMission(filterMissionId);
+          const [agents, detail] = await Promise.all([
+            commands.listAgentsByMission(filterMissionId),
+            commands.getMissionDetail(filterMissionId),
+          ]);
+          agentList = agents;
+          const map: Record<string, string> = {};
+          for (const t of detail.tasks) {
+            map[t.id] = t.title;
+          }
+          setTaskTitleMap(map);
         } else {
           agentList = await commands.listAgents();
+          setTaskTitleMap({});
         }
         const hydrated: Agent[] = agentList.map((a) => ({
           id: a.id,
@@ -98,7 +113,6 @@ export function WorkspaceView() {
     load();
   }, [filterMissionId, hydrateAgents]);
 
-  // Load cost summary when mission filter changes
   useEffect(() => {
     if (!filterMissionId) {
       setCostSummary({ total_cost: 0, total_input_tokens: 0, total_output_tokens: 0 });
@@ -107,7 +121,6 @@ export function WorkspaceView() {
     commands.getMissionCostSummary(filterMissionId).then(setCostSummary).catch(() => {});
   }, [filterMissionId]);
 
-  // Auto-load historical events when an agent is selected and has no events
   useEffect(() => {
     if (!activeAgentId) return;
     const agent = agents[activeAgentId];
@@ -126,7 +139,6 @@ export function WorkspaceView() {
     }
   }, [activeAgentId, agents, hydrateEvents]);
 
-  // Realtime event subscriptions
   useEffect(() => {
     const unlistenEvent = onAgentEvent((payload: AgentEventPayload) => {
       const agentId = payload.agent_id;
@@ -234,7 +246,6 @@ export function WorkspaceView() {
     };
   }, [addAgent, updateAgent, appendEvent, appendStream, setActiveAgent, updateTaskLocal, updateMissionStatus]);
 
-  // Periodically refresh cost summary while a mission is running
   useEffect(() => {
     if (!filterMissionId) return;
     const interval = setInterval(() => {
@@ -259,14 +270,14 @@ export function WorkspaceView() {
   const handleSelectAgent = useCallback(
     (id: string) => {
       setActiveAgent(id);
-      setViewMode("focus");
+      setWorkspaceMode("focus");
     },
-    [setActiveAgent, setViewMode],
+    [setActiveAgent, setWorkspaceMode],
   );
 
-  const handleBackToList = useCallback(() => {
-    setViewMode("list");
-  }, [setViewMode]);
+  const handleBackToGrid = useCallback(() => {
+    setWorkspaceMode("grid");
+  }, [setWorkspaceMode]);
 
   const handleLoadHistory = useCallback(async () => {
     if (!filterMissionId) return;
@@ -292,30 +303,83 @@ export function WorkspaceView() {
     } catch {}
   }, [filterMissionId, hydrateEvents]);
 
+  const viewModes: { mode: ViewMode; label: string }[] = [
+    { mode: "grid", label: "Grid" },
+    { mode: "list", label: "List" },
+    { mode: "focus", label: "Focus" },
+  ];
+
+  const [filterOpen, setFilterOpen] = useState(false);
+  const filterRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!filterOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (filterRef.current && !filterRef.current.contains(e.target as Node)) {
+        setFilterOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [filterOpen]);
+
+  const selectedMissionLabel = filterMissionId
+    ? missions.find((m) => m.id === filterMissionId)?.title ?? "Mission"
+    : "All Agents";
+
   return (
     <div className={styles.container}>
       <div className={styles.toolbar}>
         <div className={styles.toolbarLeft}>
-          <select
-            className={styles.missionFilter}
-            value={filterMissionId ?? ""}
-            onChange={(e) => setFilterMissionId(e.target.value || null)}
-          >
-            <option value="">All Agents</option>
-            {missions.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.title} ({m.status})
-              </option>
-            ))}
-          </select>
+          <div className={styles.filterWrap} ref={filterRef}>
+            <button
+              className={`${styles.filterTrigger} ${filterOpen ? styles.filterTriggerOpen : ""}`}
+              onClick={() => setFilterOpen((v) => !v)}
+              type="button"
+            >
+              <span className={styles.filterLabel}>{selectedMissionLabel}</span>
+              <svg className={styles.filterChevron} width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="2.5,3.5 5,6.5 7.5,3.5" />
+              </svg>
+            </button>
+            {filterOpen && (
+              <div className={styles.filterDropdown}>
+                <button
+                  className={`${styles.filterOption} ${!filterMissionId ? styles.filterOptionActive : ""}`}
+                  onClick={() => { setFilterMissionId(null); setFilterOpen(false); }}
+                  type="button"
+                >
+                  All Agents
+                </button>
+                {missions.map((m) => (
+                  <button
+                    key={m.id}
+                    className={`${styles.filterOption} ${filterMissionId === m.id ? styles.filterOptionActive : ""}`}
+                    onClick={() => { setFilterMissionId(m.id); setFilterOpen(false); }}
+                    type="button"
+                  >
+                    <span className={styles.filterOptionTitle}>{m.title}</span>
+                    <span className={styles.filterOptionStatus}>{m.status}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
 
-          {viewMode === "list" && (
-            <div className={styles.viewToggle}>
-              <span className={styles.viewLabel}>
-                {filteredAgents.length} agent{filteredAgents.length !== 1 ? "s" : ""}
-              </span>
-            </div>
-          )}
+          <div className={styles.segmentedControl}>
+            {viewModes.map((vm) => (
+              <button
+                key={vm.mode}
+                className={`${styles.segBtn} ${workspaceMode === vm.mode ? styles.segBtnActive : ""}`}
+                onClick={() => setWorkspaceMode(vm.mode)}
+              >
+                {vm.label}
+              </button>
+            ))}
+          </div>
+
+          <span className={styles.viewLabel}>
+            {filteredAgents.length} agent{filteredAgents.length !== 1 ? "s" : ""}
+          </span>
         </div>
 
         <div className={styles.toolbarRight}>
@@ -351,11 +415,31 @@ export function WorkspaceView() {
               : "No agents running. Start a mission to see activity here."}
           </p>
         </div>
-      ) : viewMode === "focus" && activeAgent ? (
-        <AgentTimeline agent={activeAgent} onBack={handleBackToList} />
+      ) : workspaceMode === "focus" && activeAgent ? (
+        <div className={styles.focusContainer}>
+          <button className={styles.backBtn} onClick={handleBackToGrid}>
+            &larr; Back
+          </button>
+          <div className={styles.focusPane}>
+            <AgentTerminalPane
+              agent={activeAgent}
+              taskTitle={taskTitleMap[activeAgent.taskId]}
+              menuSlot={
+                <AgentPaneMenu agent={activeAgent} />
+              }
+            />
+          </div>
+        </div>
+      ) : workspaceMode === "grid" ? (
+        <AgentGridView
+          agents={filteredAgents}
+          taskTitleMap={taskTitleMap}
+          onFocusAgent={handleSelectAgent}
+        />
       ) : (
         <AgentStreamList
           agents={filteredAgents}
+          taskTitleMap={taskTitleMap}
           activeAgentId={activeAgentId}
           onSelectAgent={handleSelectAgent}
         />
