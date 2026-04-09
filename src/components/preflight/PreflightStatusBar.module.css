@@ -23,8 +23,18 @@
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--color-success);
+  background: var(--color-accent);
   animation: pulse 2s ease-in-out infinite;
+}
+
+.statusDotComplete {
+  animation: none;
+}
+
+.phaseLabel {
+  font-weight: 600;
+  font-size: var(--text-xs);
+  letter-spacing: 0.02em;
 }
 
 @keyframes pulse {

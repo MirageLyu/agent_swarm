@@ -40,10 +40,113 @@
   background: var(--color-bg-tertiary);
   color: var(--color-text-primary);
   border-bottom-left-radius: 4px;
+  border-left: 3px solid transparent;
+}
+
+/* Mode accent — left border color on agent bubbles */
+.modeScenario .bubble { border-left-color: var(--color-accent, #007AFF); }
+.modeDevil .bubble { border-left-color: #FF9500; }
+.modeRisk .bubble { border-left-color: #FF3B30; }
+
+.modeBadge {
+  margin-left: 6px;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  vertical-align: middle;
+}
+
+.modeDevil .modeBadge {
+  background: rgba(255, 149, 0, 0.12);
+  color: #FF9500;
+}
+
+.modeRisk .modeBadge {
+  background: rgba(255, 59, 48, 0.12);
+  color: #FF3B30;
 }
 
 .user .bubble {
   background: var(--color-accent);
   color: #ffffff;
   border-bottom-right-radius: 4px;
+}
+
+/* Markdown typography inside agent bubbles */
+
+.markdown {
+  line-height: 1.55;
+}
+
+.markdown > *:first-child {
+  margin-top: 0;
+}
+
+.markdown > *:last-child {
+  margin-bottom: 0;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  margin: 10px 0 4px;
+}
+
+.markdown h2 {
+  font-size: 13px;
+}
+
+.markdown p {
+  margin: 4px 0;
+}
+
+.markdown ul,
+.markdown ol {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.markdown li {
+  margin: 2px 0;
+}
+
+.markdown strong {
+  font-weight: 600;
+}
+
+.markdown code {
+  font-family: var(--font-mono, "SF Mono", monospace);
+  font-size: 0.88em;
+  background: rgba(0, 0, 0, 0.06);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.markdown pre {
+  background: rgba(0, 0, 0, 0.05);
+  padding: 8px 10px;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 6px 0;
+}
+
+.markdown pre code {
+  background: none;
+  padding: 0;
+}
+
+.markdown hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 8px 0;
+}
+
+.markdown blockquote {
+  border-left: 3px solid var(--color-border);
+  margin: 6px 0;
+  padding: 2px 10px;
+  color: var(--color-text-secondary);
 }

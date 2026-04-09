@@ -67,7 +67,7 @@ export function ContractPanel({
             >
               {signing ? (
                 <>
-                  <span className={styles.loading}>⏳</span>
+                  <span className={styles.spinner} />
                   签署中…
                 </>
               ) : (

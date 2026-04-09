@@ -1,22 +1,30 @@
+/* ---------- section card ---------- */
+
 .section {
   background: var(--color-bg-elevated);
   border-radius: 8px;
   border: 0.5px solid var(--color-border);
-  overflow: hidden;
   box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
+
+/* ---------- header ---------- */
 
 .sectionHeader {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
+  gap: 6px;
+  padding: 7px 10px;
   border-bottom: 0.5px solid var(--color-border);
+  flex-shrink: 0;
 }
 
 .dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
 }
@@ -27,49 +35,72 @@
 .dotAssumptions { background: var(--color-text-tertiary); }
 
 .sectionLabel {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--color-text-primary);
   flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .count {
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 500;
-  padding: 1px 6px;
-  border-radius: 8px;
+  padding: 1px 5px;
+  border-radius: 6px;
   background: var(--color-bg-tertiary);
   color: var(--color-text-secondary);
+  flex-shrink: 0;
 }
 
+/* ---------- scrollable item list ---------- */
+
 .items {
-  padding: 6px 14px 10px;
+  flex: 1;
+  min-height: 0;
+  padding: 4px 10px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
+  overflow-y: auto;
+  overscroll-behavior: none;
 }
+
+.items::-webkit-scrollbar { width: 3px; }
+.items::-webkit-scrollbar-track { background: transparent; }
+.items::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 1.5px;
+}
+.items::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-tertiary);
+}
+
+/* ---------- single item ---------- */
 
 .item {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
-  padding: 5px 0;
-  font-size: 12px;
-  line-height: 1.45;
+  gap: 6px;
+  padding: 3px 0;
+  font-size: 11px;
+  line-height: 1.4;
   color: var(--color-text-primary);
+  flex-shrink: 0;
   animation: itemFadeIn var(--duration-slow) var(--ease-out) both;
 }
 
 @keyframes itemFadeIn {
-  from { opacity: 0; transform: translateX(-8px); }
+  from { opacity: 0; transform: translateX(-6px); }
   to { opacity: 1; transform: translateX(0); }
 }
 
 .itemIcon {
-  font-size: var(--text-xs);
+  font-size: 10px;
   margin-top: 1px;
   flex-shrink: 0;
-  width: 16px;
+  width: 14px;
   text-align: center;
 }
 
@@ -80,31 +111,33 @@
 
 .itemText {
   flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  min-width: 0;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .itemTag {
-  font-size: 9px;
-  font-weight: 500;
-  padding: 1px 5px;
+  font-size: 8px;
+  font-weight: 600;
+  padding: 0 4px;
   border-radius: 3px;
   flex-shrink: 0;
   margin-top: 1px;
-  background: rgba(52, 199, 89, 0.1);
+  line-height: 1.5;
+  background: rgba(52, 199, 89, 0.12);
   color: var(--color-success);
   transition: opacity 1s ease;
 }
 
 .removeBtn {
   flex-shrink: 0;
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   border: none;
   background: transparent;
   color: var(--color-text-tertiary);
   cursor: pointer;
-  font-size: 12px;
+  font-size: 11px;
   padding: 0;
   display: flex;
   align-items: center;
@@ -123,9 +156,36 @@
   background: rgba(255, 59, 48, 0.1);
 }
 
+/* ---------- "N more items" indicators ---------- */
+
+.moreIndicator {
+  flex-shrink: 0;
+  padding: 2px 10px;
+  font-size: 9px;
+  font-weight: 500;
+  color: var(--color-text-tertiary);
+  text-align: center;
+  letter-spacing: 0.01em;
+}
+
+.moreAbove {
+  border-bottom: 0.5px solid var(--color-border);
+}
+
+.moreBelow {
+  border-top: 0.5px solid var(--color-border);
+}
+
+/* ---------- empty placeholder ---------- */
+
 .empty {
-  padding: 12px 14px;
-  font-size: var(--text-xs);
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 10px;
+  font-size: 11px;
   color: var(--color-text-tertiary);
   font-style: italic;
+  text-align: center;
 }

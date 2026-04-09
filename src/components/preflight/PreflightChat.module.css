@@ -24,7 +24,7 @@
 .typing {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   padding: 8px 12px;
   background: var(--color-bg-tertiary);
   border-radius: 14px;
@@ -38,9 +38,16 @@
   to { opacity: 1; transform: translateY(0); }
 }
 
+.typingDots {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
 .typingDot {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: var(--color-text-tertiary);
   animation: typingBounce 1.4s ease-in-out infinite;
@@ -51,7 +58,13 @@
 
 @keyframes typingBounce {
   0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
-  30% { transform: translateY(-4px); opacity: 1; }
+  30% { transform: translateY(-3px); opacity: 1; }
+}
+
+.typingLabel {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
 }
 
 .inputArea {
@@ -162,4 +175,21 @@
 
 @keyframes blink {
   50% { opacity: 0; }
+}
+
+.divider {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 8px 0;
+  animation: msgIn var(--duration-normal) var(--ease-out) both;
+}
+
+.divider span {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+  letter-spacing: 0.02em;
 }

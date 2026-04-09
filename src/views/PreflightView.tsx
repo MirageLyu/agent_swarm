@@ -2,9 +2,11 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { commands } from "../ipc/commands";
 import type {
   ContractInfo,
+  ContractItemInfo,
   PreflightMessageInfo,
   PreflightMode,
   PreflightChoice,
+  ConversationPhase,
 } from "../ipc/commands";
 import { onPreflightStream, type PreflightStreamPayload } from "../ipc/events";
 import { useUiStore } from "../stores/ui-store";
@@ -28,6 +30,10 @@ export function PreflightView() {
   const [contract, setContract] = useState<ContractInfo | null>(null);
   const [signing, setSigning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [convergenceScore, setConvergenceScore] = useState(0);
+  const [phase, setPhase] = useState<ConversationPhase>("exploring");
+  const [statusText, setStatusText] = useState("");
 
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
@@ -42,6 +48,9 @@ export function PreflightView() {
       if (session) {
         setMessages(session.messages);
         setMode(session.mode);
+        setConvergenceScore(session.convergence_score ?? 0);
+        setPhase(session.phase ?? "exploring");
+        if (session.messages.length > 0) setInitialLoading(false);
         if (!sessionId) {
           setActivePreflight(missionId, session.id);
         }
@@ -58,12 +67,34 @@ export function PreflightView() {
       if (kind === "start") {
         setStreaming(true);
         setStreamingText("");
+        setStatusText("");
+        setInitialLoading(false);
       } else if (kind === "text_delta") {
         setStreamingText((prev) => prev + content);
+        setStatusText("");
+        setInitialLoading(false);
+      } else if (kind === "status") {
+        setStatusText(content);
+      } else if (kind === "contract_item_added") {
+        try {
+          const item = JSON.parse(content) as ContractItemInfo;
+          setContract((prev) =>
+            prev ? { ...prev, items: [...prev.items, { ...item, created_at: new Date().toISOString() }] } : prev,
+          );
+        } catch { /* ignore parse errors */ }
+      } else if (kind === "suggest_sign") {
+        // For P0: just log; the LLM's text already suggests signing
+        tracing: console.info("[preflight] suggest_sign received:", content);
+      } else if (kind === "mode_switched") {
+        try {
+          const { mode: newMode } = JSON.parse(content);
+          setMode(newMode);
+        } catch { /* ignore */ }
       } else if (kind === "done") {
         setStreaming(false);
         setStreamingText("");
-        // Parse the done payload for the full response
+        setStatusText("");
+        setInitialLoading(false);
         try {
           const parsed = JSON.parse(content);
           setMessages((prev) => [
@@ -72,19 +103,30 @@ export function PreflightView() {
               role: "assistant",
               content: parsed.text,
               choices: parsed.choices ?? [],
+              mode: parsed.mode ?? undefined,
             },
           ]);
+          if (parsed.convergence_score !== undefined) {
+            setConvergenceScore(parsed.convergence_score);
+          }
+          if (parsed.phase) {
+            setPhase(parsed.phase);
+          }
         } catch {
-          // Fallback: reload session from backend
           if (missionId) {
             commands.getPreflightSession(missionId).then((session) => {
-              if (session) setMessages(session.messages);
+              if (session) {
+                setMessages(session.messages);
+                setConvergenceScore(session.convergence_score ?? 0);
+                setPhase(session.phase ?? "exploring");
+              }
             });
           }
         }
       } else if (kind === "error") {
         setStreaming(false);
         setStreamingText("");
+        setInitialLoading(false);
         setError(content);
       }
     });
@@ -96,6 +138,7 @@ export function PreflightView() {
     (text: string) => {
       if (!sessionId || !missionId) return;
 
+      setError(null);
       setMessages((prev) => [...prev, { role: "user", content: text, choices: [] }]);
       setStreaming(true);
       setStreamingText("");
@@ -114,9 +157,46 @@ export function PreflightView() {
     [sessionId, missionId, mode],
   );
 
+  const MODE_LABELS: Record<PreflightMode, string> = {
+    scenario_walk: "场景走查",
+    devils_advocate: "魔鬼代言人",
+    risk_highlighter: "风险标记",
+  };
+
+  const MODE_OPENERS: Record<PreflightMode, string> = {
+    scenario_walk: "请以场景走查模式继续审视之前的需求讨论，从下一个关键决策点开始提问。",
+    devils_advocate: "请以魔鬼代言人的角度重新审视当前需求，找出最关键的一个漏洞或隐含假设。",
+    risk_highlighter: "请以风险分析师的角度审视当前需求，找出最高影响的一个技术或安全风险。",
+  };
+
   const handleModeChange = useCallback((newMode: PreflightMode) => {
+    if (newMode === mode || !sessionId || !missionId) return;
+
     setMode(newMode);
-  }, []);
+
+    // Insert visual divider as a system message
+    const dividerMsg: PreflightMessageInfo = {
+      role: "assistant",
+      content: `── 切换到「${MODE_LABELS[newMode]}」模式 ──`,
+      choices: [],
+    };
+    setMessages((prev) => [...prev, dividerMsg]);
+
+    // Auto-send opener to trigger Agent response in new mode
+    setStreaming(true);
+    setStreamingText("");
+
+    commands
+      .sendPreflightMessage({
+        session_id: sessionId,
+        message: MODE_OPENERS[newMode],
+        mode: newMode,
+      })
+      .catch((e) => {
+        setError(String(e));
+        setStreaming(false);
+      });
+  }, [mode, sessionId, missionId]);
 
   const handleChoiceSelect = useCallback(
     (choice: PreflightChoice) => {
@@ -209,13 +289,20 @@ export function PreflightView() {
 
   return (
     <div className={styles.container}>
-      {error && <div className={styles.errorBanner}>{error}</div>}
+      {error && (
+        <div className={styles.errorBanner}>
+          <span>{error}</span>
+          <button className={styles.errorClose} onClick={() => setError(null)} title="关闭">×</button>
+        </div>
+      )}
       <div className={styles.main}>
         <PreflightChat
           messages={messages}
           mode={mode}
           streaming={streaming}
           streamingText={streamingText}
+          statusText={statusText}
+          initialLoading={initialLoading}
           onSend={handleSend}
           onModeChange={handleModeChange}
           onChoiceSelect={handleChoiceSelect}
@@ -228,7 +315,11 @@ export function PreflightView() {
           signing={signing}
         />
       </div>
-      <PreflightStatusBar messageCount={messages.length} />
+      <PreflightStatusBar
+        convergenceScore={convergenceScore}
+        phase={phase}
+        messageCount={messages.length}
+      />
     </div>
   );
 }

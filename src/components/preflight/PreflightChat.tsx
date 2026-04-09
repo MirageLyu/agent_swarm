@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
+import Markdown from "react-markdown";
 import type { PreflightMode, PreflightChoice, PreflightMessageInfo } from "../../ipc/commands";
 import { PreflightModeSwitch } from "./PreflightModeSwitch";
 import { ChatMessage } from "./ChatMessage";
@@ -10,6 +11,8 @@ interface PreflightChatProps {
   mode: PreflightMode;
   streaming: boolean;
   streamingText: string;
+  statusText?: string;
+  initialLoading?: boolean;
   onSend: (text: string) => void;
   onModeChange: (mode: PreflightMode) => void;
   onChoiceSelect: (choice: PreflightChoice) => void;
@@ -20,12 +23,29 @@ export function PreflightChat({
   mode,
   streaming,
   streamingText,
+  statusText,
+  initialLoading,
   onSend,
   onModeChange,
   onChoiceSelect,
 }: PreflightChatProps) {
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Hide cursor 400ms after the last text_delta stops arriving
+  const [cursorVisible, setCursorVisible] = useState(false);
+  const cursorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (streaming && streamingText) {
+      setCursorVisible(true);
+      if (cursorTimerRef.current) clearTimeout(cursorTimerRef.current);
+      cursorTimerRef.current = setTimeout(() => setCursorVisible(false), 400);
+    } else {
+      setCursorVisible(false);
+    }
+    return () => { if (cursorTimerRef.current) clearTimeout(cursorTimerRef.current); };
+  }, [streaming, streamingText]);
 
   const scrollToBottom = useCallback(() => {
     requestAnimationFrame(() => {
@@ -52,41 +72,71 @@ export function PreflightChat({
     [handleSend],
   );
 
+  const showTypingIndicator = (streaming && !streamingText) || initialLoading;
+  const typingLabel = statusText || "思考中…";
+
   return (
     <div className={styles.panel}>
       <PreflightModeSwitch mode={mode} onModeChange={onModeChange} />
 
       <div className={styles.messages}>
-        {messages.map((msg, i) => (
-          <div key={i}>
-            <ChatMessage role={msg.role as "user" | "assistant"} content={msg.content} />
-            {msg.role === "assistant" && msg.choices.length > 0 && (
-              <ChoiceButtons
-                choices={msg.choices}
-                onSelect={onChoiceSelect}
-                disabled={i < messages.length - 1}
-              />
-            )}
-          </div>
-        ))}
+        {messages.map((msg, i) => {
+          const isDivider = msg.role === "assistant"
+            && msg.content.startsWith("──")
+            && msg.content.endsWith("──");
+
+          if (isDivider) {
+            return (
+              <div key={i} className={styles.divider}>
+                <span>{msg.content}</span>
+              </div>
+            );
+          }
+
+          if (msg.role === "assistant" && !msg.content.trim() && msg.choices.length === 0) {
+            return null;
+          }
+
+          return (
+            <div key={i}>
+              {msg.content.trim() && (
+                <ChatMessage
+                  role={msg.role as "user" | "assistant"}
+                  content={msg.content}
+                  mode={msg.mode}
+                />
+              )}
+              {msg.role === "assistant" && msg.choices.length > 0 && (
+                <ChoiceButtons
+                  choices={msg.choices}
+                  onSelect={onChoiceSelect}
+                  disabled={i < messages.length - 1}
+                />
+              )}
+            </div>
+          );
+        })}
 
         {streaming && streamingText && (
           <div className={styles.streamingText}>
             <div className={styles.streamingLabel}>Swarm Agent</div>
             <div className={styles.streamingBubble}>
-              {streamingText}
-              <span className={styles.streamCursor} />
+              <Markdown>{streamingText}</Markdown>
+              {cursorVisible && <span className={styles.streamCursor} />}
             </div>
           </div>
         )}
 
-        {streaming && !streamingText && (
+        {showTypingIndicator ? (
           <div className={styles.typing}>
-            <div className={styles.typingDot} />
-            <div className={styles.typingDot} />
-            <div className={styles.typingDot} />
+            <div className={styles.typingDots}>
+              <div className={styles.typingDot} />
+              <div className={styles.typingDot} />
+              <div className={styles.typingDot} />
+            </div>
+            <span className={styles.typingLabel}>{typingLabel}</span>
           </div>
-        )}
+        ) : null}
 
         <div ref={messagesEndRef} />
       </div>
