@@ -1,3 +1,4 @@
+pub mod belief_state;
 mod engine;
 pub mod planner;
 mod registry;

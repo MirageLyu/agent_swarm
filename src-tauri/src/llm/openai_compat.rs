@@ -268,7 +268,16 @@ impl LlmProvider for OpenAICompatProvider {
         use futures::StreamExt;
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => {
+                    if !full_text.is_empty() {
+                        tracing::warn!("Stream decode error after receiving partial content ({} chars), using partial result: {e}", full_text.len());
+                        break;
+                    }
+                    bail!("网络连接中断，请检查网络后重试 (stream error: {e})");
+                }
+            };
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
             while let Some(pos) = buffer.find('\n') {

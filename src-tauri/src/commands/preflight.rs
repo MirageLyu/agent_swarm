@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::sync::Arc;
 use tauri::Manager;
 use uuid::Uuid;
 
-use crate::agent::planner::{self, ContractData, PreflightChoice};
+use crate::agent::belief_state::{self, PreflightBeliefState, SlotStatus};
+use crate::agent::planner::{self, ContractData, PreflightAction, PreflightChoice};
 use crate::commands::mission::{build_provider, PlanMissionResponse, TaskInfo};
 use crate::llm::{ContentBlock, Message, MessageRole};
 
@@ -78,6 +80,23 @@ pub struct PreflightMessageInfo {
 
 // ---------- helpers ----------
 
+fn friendlify_error(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+    if lower.contains("decoding response body") || lower.contains("stream error") || lower.contains("connection") {
+        "网络连接中断，请检查网络后重试".to_string()
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        "请求超时，LLM 响应时间过长，请稍后重试".to_string()
+    } else if lower.contains("api key") || lower.contains("unauthorized") || lower.contains("401") {
+        "API Key 无效或未配置，请在设置中检查".to_string()
+    } else if lower.contains("rate limit") || lower.contains("429") {
+        "请求过于频繁，请稍等片刻后重试".to_string()
+    } else if lower.contains("500") || lower.contains("502") || lower.contains("503") {
+        "LLM 服务暂时不可用，请稍后重试".to_string()
+    } else {
+        format!("对话出错：{}", raw)
+    }
+}
+
 fn get_or_create_contract(
     conn: &rusqlite::Connection,
     mission_id: &str,
@@ -100,6 +119,477 @@ fn get_or_create_contract(
         rusqlite::params![id, mission_id],
     )?;
     Ok(id)
+}
+
+// ---------- tool_call processing ----------
+
+fn load_belief_state(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> PreflightBeliefState {
+    let raw: String = conn
+        .query_row(
+            "SELECT belief_state FROM preflight_sessions WHERE id = ?",
+            [session_id],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| "{}".to_string());
+
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+fn save_belief_state(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    state: &PreflightBeliefState,
+) -> anyhow::Result<()> {
+    let json = serde_json::to_string(state)?;
+    conn.execute(
+        "UPDATE preflight_sessions SET belief_state = ?, convergence_score = ?, phase = ?, updated_at = datetime('now') WHERE id = ?",
+        rusqlite::params![json, state.convergence_score, state.phase.label(), session_id],
+    )?;
+    Ok(())
+}
+
+/// Process tool_call actions: execute DB side effects, update belief_state,
+/// return tool_result messages for conversation history.
+fn process_tool_actions(
+    conn: &rusqlite::Connection,
+    mission_id: &str,
+    actions: &[PreflightAction],
+    belief_state: &mut PreflightBeliefState,
+    app: &tauri::AppHandle,
+    session_id: &str,
+) -> Vec<serde_json::Value> {
+    let mut tool_results = Vec::new();
+
+    for action in actions {
+        match action {
+            PreflightAction::PresentChoices { id, args } => {
+                let choices_json = serde_json::to_string(&args.choices).unwrap_or_default();
+                planner::emit_preflight_event_pub(app, session_id, "choices", &choices_json);
+                tool_results.push(json!({
+                    "role": "tool",
+                    "tool_call_id": id,
+                    "content": json!({"presented": true, "choices_count": args.choices.len()}).to_string()
+                }));
+            }
+            PreflightAction::AddContractItem { id, args } => {
+                let contract_id = get_or_create_contract(conn, mission_id).unwrap_or_default();
+                let result = add_contract_item_internal(conn, &contract_id, &args.section, &args.item);
+
+                match result {
+                    Ok(item_id) => {
+                        // Update belief state
+                        let slot_status = match args.confidence.as_str() {
+                            "confirmed" => SlotStatus::Confirmed,
+                            _ => SlotStatus::Tentative,
+                        };
+                        if let Some(slot_id) = belief_state::map_contract_item_to_slot(&args.section, &args.item) {
+                            belief_state.update_slot(slot_id, slot_status, Some(args.item.clone()), belief_state.round);
+                        }
+
+                        let item_info = json!({
+                            "id": item_id,
+                            "section": args.section,
+                            "text": args.item,
+                            "source": "agent",
+                        });
+                        planner::emit_preflight_event_pub(
+                            app, session_id, "contract_item_added",
+                            &item_info.to_string(),
+                        );
+
+                        tool_results.push(json!({
+                            "role": "tool",
+                            "tool_call_id": id,
+                            "content": json!({"success": true, "item_id": item_id}).to_string()
+                        }));
+                    }
+                    Err(e) => {
+                        tracing::warn!("add_contract_item via tool_call failed: {e}");
+                        tool_results.push(json!({
+                            "role": "tool",
+                            "tool_call_id": id,
+                            "content": json!({"success": false, "reason": e.to_string()}).to_string()
+                        }));
+                    }
+                }
+            }
+            PreflightAction::UpdateContractItem { id, args } => {
+                let result = update_contract_item_internal(conn, &args.item_id, &args.new_content);
+                match result {
+                    Ok(()) => {
+                        tool_results.push(json!({
+                            "role": "tool",
+                            "tool_call_id": id,
+                            "content": json!({"success": true}).to_string()
+                        }));
+                    }
+                    Err(e) => {
+                        tool_results.push(json!({
+                            "role": "tool",
+                            "tool_call_id": id,
+                            "content": json!({"success": false, "reason": e.to_string()}).to_string()
+                        }));
+                    }
+                }
+            }
+            PreflightAction::SuggestSign { id, args } => {
+                let suggest_json = serde_json::to_string(args).unwrap_or_default();
+                planner::emit_preflight_event_pub(app, session_id, "suggest_sign", &suggest_json);
+                tool_results.push(json!({
+                    "role": "tool",
+                    "tool_call_id": id,
+                    "content": json!({"suggested": true}).to_string()
+                }));
+            }
+            PreflightAction::SwitchClarificationMode { id, args } => {
+                let db_mode = match args.mode.as_str() {
+                    "devils_advocate" => "devils_advocate",
+                    "risk_tagging" => "risk_highlighter",
+                    _ => "scenario_walk",
+                };
+                let _ = conn.execute(
+                    "UPDATE preflight_sessions SET mode = ? WHERE id = ?",
+                    rusqlite::params![db_mode, session_id],
+                );
+                planner::emit_preflight_event_pub(
+                    app, session_id, "mode_switched",
+                    &json!({"mode": db_mode}).to_string(),
+                );
+                tool_results.push(json!({
+                    "role": "tool",
+                    "tool_call_id": id,
+                    "content": json!({"success": true, "new_mode": db_mode}).to_string()
+                }));
+            }
+        }
+    }
+
+    tool_results
+}
+
+fn add_contract_item_internal(
+    conn: &rusqlite::Connection,
+    contract_id: &str,
+    section: &str,
+    text: &str,
+) -> anyhow::Result<String> {
+    let existing: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM contract_items WHERE contract_id = ? AND section = ? AND text = ?",
+        rusqlite::params![contract_id, section, text],
+        |row| row.get(0),
+    )?;
+
+    if existing {
+        anyhow::bail!("duplicate");
+    }
+
+    let item_id = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO contract_items (id, contract_id, section, text, source) VALUES (?, ?, ?, ?, 'agent')",
+        rusqlite::params![item_id, contract_id, section, text],
+    )?;
+    Ok(item_id)
+}
+
+fn update_contract_item_internal(
+    conn: &rusqlite::Connection,
+    item_id: &str,
+    new_content: &str,
+) -> anyhow::Result<()> {
+    let updated = conn.execute(
+        "UPDATE contract_items SET text = ? WHERE id = ?",
+        rusqlite::params![new_content, item_id],
+    )?;
+    if updated == 0 {
+        anyhow::bail!("not_found");
+    }
+    Ok(())
+}
+
+/// Reconstruct LLM message history from stored JSON messages.
+/// Handles user, assistant (with optional tool_calls), and tool result messages.
+fn reconstruct_history(stored_msgs: &[serde_json::Value]) -> Vec<Message> {
+    let mut history = Vec::new();
+
+    for m in stored_msgs {
+        match m["role"].as_str().unwrap_or("user") {
+            "assistant" => {
+                let mut content = Vec::new();
+                if let Some(text) = m["content"].as_str() {
+                    if !text.is_empty() {
+                        content.push(ContentBlock::Text {
+                            text: text.to_string(),
+                        });
+                    }
+                }
+                if let Some(tool_calls) = m["tool_calls"].as_array() {
+                    for tc in tool_calls {
+                        let id = tc["id"].as_str().unwrap_or("").to_string();
+                        let name = tc["name"].as_str().unwrap_or("").to_string();
+                        let args_str = tc["arguments"].as_str().unwrap_or("{}");
+                        let input: serde_json::Value =
+                            serde_json::from_str(args_str).unwrap_or(json!({}));
+                        content.push(ContentBlock::ToolUse { id, name, input });
+                    }
+                }
+                if !content.is_empty() {
+                    history.push(Message {
+                        role: MessageRole::Assistant,
+                        content,
+                    });
+                }
+            }
+            "tool" => {
+                history.push(Message {
+                    role: MessageRole::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: m["tool_call_id"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string(),
+                        content: m["content"].as_str().unwrap_or("").to_string(),
+                        is_error: false,
+                    }],
+                });
+            }
+            _ => {
+                let text = m["content"].as_str().unwrap_or("").to_string();
+                history.push(Message {
+                    role: MessageRole::User,
+                    content: vec![ContentBlock::Text { text }],
+                });
+            }
+        }
+    }
+
+    history
+}
+
+/// Build an assistant stored message with optional tool_calls.
+fn build_assistant_stored_msg(
+    response: &planner::PreflightResponse,
+) -> serde_json::Value {
+    let mut msg = json!({
+        "role": "assistant",
+        "content": response.text,
+        "choices": response.choices,
+    });
+
+    if !response.tool_calls.is_empty() {
+        let tool_calls: Vec<serde_json::Value> = response
+            .tool_calls
+            .iter()
+            .map(|tc| {
+                json!({
+                    "id": tc.id,
+                    "name": tc.name,
+                    "arguments": serde_json::to_string(&tc.arguments).unwrap_or_default(),
+                })
+            })
+            .collect();
+        msg["tool_calls"] = json!(tool_calls);
+    }
+
+    msg
+}
+
+/// Emit the "done" event with belief_state info.
+fn emit_done_with_belief_state(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    response: &planner::PreflightResponse,
+    belief_state: &PreflightBeliefState,
+    mode: &str,
+) {
+    let done_payload = json!({
+        "text": response.text,
+        "choices": response.choices,
+        "convergence_score": belief_state.convergence_score,
+        "phase": belief_state.phase.label(),
+        "mode": mode,
+    });
+    planner::emit_preflight_event_pub(app, session_id, "done", &done_payload.to_string());
+}
+
+// ---------- tool_call continuation loop ----------
+
+const MAX_TOOL_CONTINUATION_ROUNDS: usize = 5;
+
+/// Run a preflight chat round with automatic tool_call continuation.
+///
+/// When the LLM responds with only side-effect tool_calls (e.g. add_contract_item)
+/// without presenting choices or suggesting sign-off, this function automatically
+/// sends tool_results back and re-invokes the LLM until it produces user-facing output.
+async fn preflight_with_continuation(
+    provider: Arc<dyn crate::llm::LlmProvider>,
+    model: &str,
+    mode: &str,
+    mut history: Vec<Message>,
+    stored_msgs: &mut Vec<serde_json::Value>,
+    session_id: &str,
+    mission_id: &str,
+    app: &tauri::AppHandle,
+) {
+    let mut combined_text = String::new();
+
+    for iteration in 0..MAX_TOOL_CONTINUATION_ROUNDS {
+        let response = match planner::preflight_chat(
+            provider.clone(), model, mode, history.clone(), session_id, app,
+        ).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Preflight chat failed (iteration {iteration}): {e}");
+                let user_msg = friendlify_error(&e.to_string());
+                planner::emit_preflight_event_pub(app, session_id, "error", &user_msg);
+                return;
+            }
+        };
+
+        // Accumulate text across continuation rounds
+        if !response.text.trim().is_empty() {
+            if !combined_text.is_empty() {
+                combined_text.push_str("\n\n");
+            }
+            combined_text.push_str(&response.text);
+        }
+
+        let (actions, _) = planner::parse_tool_calls_from_response(&response);
+        let has_choices = !response.choices.is_empty();
+        let has_suggest_sign = actions.iter().any(|a| matches!(a, PreflightAction::SuggestSign { .. }));
+        let has_tool_calls = !response.tool_calls.is_empty();
+
+        // Process tool_call side effects
+        let db = app.state::<crate::db::Database>();
+        let process_result = db.with_conn(|conn| {
+            let mut belief_state = load_belief_state(conn, session_id);
+            if iteration == 0 {
+                belief_state.increment_round();
+            }
+
+            let tool_results = process_tool_actions(
+                conn, mission_id, &actions, &mut belief_state, app, session_id,
+            );
+
+            belief_state.compute_convergence_score();
+            belief_state.update_phase();
+            save_belief_state(conn, session_id, &belief_state)?;
+
+            Ok::<_, anyhow::Error>((tool_results, belief_state))
+        });
+
+        let (tool_result_msgs, belief_state) = match process_result {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Tool processing failed: {e}");
+                return;
+            }
+        };
+
+        // Store assistant message + tool results in conversation history
+        let assistant_msg = build_assistant_stored_msg(&response);
+        stored_msgs.push(assistant_msg);
+        stored_msgs.extend(tool_result_msgs.clone());
+
+        // Decide: continue the loop, or stop and return to user?
+        let needs_continuation = has_tool_calls && !has_choices && !has_suggest_sign;
+
+        if needs_continuation {
+            // Append assistant message (with tool_calls) to LLM history
+            let mut assistant_content = Vec::new();
+            if !response.text.is_empty() {
+                assistant_content.push(ContentBlock::Text {
+                    text: response.text,
+                });
+            }
+            for tc in &response.tool_calls {
+                assistant_content.push(ContentBlock::ToolUse {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    input: tc.arguments.clone(),
+                });
+            }
+            history.push(Message {
+                role: MessageRole::Assistant,
+                content: assistant_content,
+            });
+
+            // Append tool_results to LLM history
+            for tr in &tool_result_msgs {
+                history.push(Message {
+                    role: MessageRole::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: tr["tool_call_id"].as_str().unwrap_or("").to_string(),
+                        content: tr["content"].as_str().unwrap_or("").to_string(),
+                        is_error: false,
+                    }],
+                });
+            }
+
+            tracing::info!(
+                iteration = iteration + 1,
+                tool_names = response.tool_calls.iter().map(|tc| tc.name.as_str()).collect::<Vec<_>>().join(","),
+                "preflight continuing with tool_results"
+            );
+
+            planner::emit_preflight_event_pub(app, session_id, "status", "正在准备下一个问题…");
+            continue;
+        }
+
+        // --- Stop: save state and emit done ---
+        let _ = db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE preflight_sessions SET messages = ?, updated_at = datetime('now') WHERE id = ?",
+                rusqlite::params![serde_json::to_string(stored_msgs).unwrap_or_default(), session_id],
+            )?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        let final_response = planner::PreflightResponse {
+            text: combined_text,
+            choices: response.choices,
+            tool_calls: response.tool_calls.clone(),
+            fallback_used: response.fallback_used.clone(),
+        };
+        emit_done_with_belief_state(app, session_id, &final_response, &belief_state, mode);
+
+        let tool_names: Vec<&str> = response.tool_calls.iter().map(|tc| tc.name.as_str()).collect();
+        tracing::info!(
+            round = belief_state.round,
+            iterations = iteration + 1,
+            tool_calls_count = response.tool_calls.len(),
+            tool_names = tool_names.join(","),
+            fallback_used = %response.fallback_used,
+            convergence_score = belief_state.convergence_score,
+            phase = %belief_state.phase.label(),
+            "preflight round completed"
+        );
+        return;
+    }
+
+    // Max iterations exhausted — save what we have and stop
+    tracing::warn!("preflight reached max continuation rounds ({MAX_TOOL_CONTINUATION_ROUNDS})");
+    let db = app.state::<crate::db::Database>();
+    let _ = db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE preflight_sessions SET messages = ?, updated_at = datetime('now') WHERE id = ?",
+            rusqlite::params![serde_json::to_string(stored_msgs).unwrap_or_default(), session_id],
+        )?;
+        Ok::<(), anyhow::Error>(())
+    });
+
+    let belief_state = db
+        .with_conn(|conn| Ok::<_, anyhow::Error>(load_belief_state(conn, session_id)))
+        .unwrap_or_default();
+    let final_response = planner::PreflightResponse {
+        text: combined_text,
+        choices: vec![],
+        tool_calls: vec![],
+        fallback_used: "none".into(),
+    };
+    emit_done_with_belief_state(app, session_id, &final_response, &belief_state, mode);
 }
 
 // ---------- commands ----------
@@ -147,46 +637,27 @@ pub async fn start_preflight(
     let sid = session_id.clone();
 
     let app_clone = app.clone();
+    let mid = mission_id.clone();
     tokio::spawn(async move {
-        match planner::preflight_chat(
-            provider,
-            &model,
-            "scenario_walk",
-            vec![initial_message.clone()],
-            &sid,
-            &app_clone,
-        )
-        .await
-        {
-            Ok(response) => {
-                let db = app_clone.state::<crate::db::Database>();
-                let _ = db.with_conn(|conn| {
-                    let user_msg = serde_json::json!({
-                        "role": "user",
-                        "content": initial_message.content.iter().filter_map(|b| match b {
-                            ContentBlock::Text { text } => Some(text.as_str()),
-                            _ => None,
-                        }).collect::<String>(),
-                        "choices": []
-                    });
-                    let assistant_msg = serde_json::json!({
-                        "role": "assistant",
-                        "content": response.text,
-                        "choices": response.choices
-                    });
+        // Build the initial user message for storage
+        let user_text: String = initial_message.content.iter().filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        }).collect();
+        let mut stored_msgs = vec![json!({
+            "role": "user",
+            "content": user_text,
+            "choices": []
+        })];
 
-                    let msgs = serde_json::json!([user_msg, assistant_msg]);
-                    conn.execute(
-                        "UPDATE preflight_sessions SET messages = ?, updated_at = datetime('now') WHERE id = ?",
-                        rusqlite::params![msgs.to_string(), sid],
-                    )?;
-                    Ok::<(), anyhow::Error>(())
-                });
-            }
-            Err(e) => {
-                tracing::error!("Preflight initial chat failed: {e}");
-            }
-        }
+        planner::emit_preflight_event_pub(&app_clone, &sid, "start", "");
+
+        preflight_with_continuation(
+            provider, &model, "scenario_walk",
+            vec![initial_message],
+            &mut stored_msgs,
+            &sid, &mid, &app_clone,
+        ).await;
     });
 
     Ok(StartPreflightResponse {
@@ -227,54 +698,28 @@ pub async fn send_preflight_message(
         return Err("Conversation limit reached (50 rounds). Please sign the contract.".into());
     }
 
-    stored_msgs.push(serde_json::json!({
+    stored_msgs.push(json!({
         "role": "user",
         "content": request.message,
         "choices": []
     }));
 
-    let history: Vec<Message> = stored_msgs
-        .iter()
-        .map(|m| {
-            let role = match m["role"].as_str().unwrap_or("user") {
-                "assistant" => MessageRole::Assistant,
-                _ => MessageRole::User,
-            };
-            let content = m["content"].as_str().unwrap_or("").to_string();
-            Message {
-                role,
-                content: vec![ContentBlock::Text { text: content }],
-            }
-        })
-        .collect();
+    let history = reconstruct_history(&stored_msgs);
 
     let sid = request.session_id.clone();
     let mode = request.mode.clone();
+    let mid = _mission_id.clone();
 
     let app_clone = app.clone();
     tokio::spawn(async move {
-        match planner::preflight_chat(provider, &model, &mode, history, &sid, &app_clone).await {
-            Ok(response) => {
-                let db = app_clone.state::<crate::db::Database>();
-                let _ = db.with_conn(|conn| {
-                    stored_msgs.push(serde_json::json!({
-                        "role": "assistant",
-                        "content": response.text,
-                        "choices": response.choices
-                    }));
+        planner::emit_preflight_event_pub(&app_clone, &sid, "start", "");
 
-                    conn.execute(
-                        "UPDATE preflight_sessions SET messages = ?, updated_at = datetime('now') WHERE id = ?",
-                        rusqlite::params![serde_json::to_string(&stored_msgs).unwrap_or_default(), sid],
-                    )?;
-                    Ok::<(), anyhow::Error>(())
-                });
-            }
-            Err(e) => {
-                tracing::error!("Preflight chat failed: {e}");
-                planner::emit_preflight_event_pub(&app_clone, &sid, "error", &e.to_string());
-            }
-        }
+        preflight_with_continuation(
+            provider, &model, &mode,
+            history,
+            &mut stored_msgs,
+            &sid, &mid, &app_clone,
+        ).await;
     });
 
     Ok(())
@@ -443,18 +888,20 @@ pub fn get_preflight_session(
 
     db.with_conn(|conn| {
         let result = conn.query_row(
-            "SELECT id, mode, messages FROM preflight_sessions WHERE mission_id = ? ORDER BY created_at DESC LIMIT 1",
+            "SELECT id, mode, messages, convergence_score, phase FROM preflight_sessions WHERE mission_id = ? ORDER BY created_at DESC LIMIT 1",
             [&mission_id],
             |row| {
                 let id: String = row.get(0)?;
                 let mode: String = row.get(1)?;
                 let messages_json: String = row.get(2)?;
-                Ok((id, mode, messages_json))
+                let convergence_score: f64 = row.get(3)?;
+                let phase: String = row.get(4)?;
+                Ok((id, mode, messages_json, convergence_score, phase))
             },
         );
 
         match result {
-            Ok((id, mode, messages_json)) => {
+            Ok((id, mode, messages_json, convergence_score, phase)) => {
                 let stored: Vec<serde_json::Value> =
                     serde_json::from_str(&messages_json).unwrap_or_default();
 
@@ -482,6 +929,8 @@ pub fn get_preflight_session(
                     id,
                     mode,
                     messages,
+                    convergence_score,
+                    phase,
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -496,6 +945,8 @@ pub struct PreflightSessionInfo {
     pub id: String,
     pub mode: String,
     pub messages: Vec<PreflightMessageInfo>,
+    pub convergence_score: f64,
+    pub phase: String,
 }
 
 #[tauri::command]

@@ -312,13 +312,18 @@ export interface PreflightMessageInfo {
   role: "user" | "assistant";
   content: string;
   choices: PreflightChoice[];
+  mode?: PreflightMode;
 }
 
 export interface PreflightSessionInfo {
   id: string;
   mode: PreflightMode;
   messages: PreflightMessageInfo[];
+  convergence_score: number;
+  phase: ConversationPhase;
 }
+
+export type ConversationPhase = "exploring" | "narrowing" | "confirming" | "ready_to_sign";
 
 // ---------- FM-08: Mission Lifecycle ----------
 

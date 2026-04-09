@@ -75,7 +75,17 @@ export function onMissionStatusChanged(
 export interface PreflightStreamPayload {
   session_id: string;
   chunk: {
-    kind: "start" | "text_delta" | "reasoning_delta" | "done" | "error";
+    kind:
+      | "start"
+      | "text_delta"
+      | "reasoning_delta"
+      | "done"
+      | "error"
+      | "status"
+      | "choices"
+      | "contract_item_added"
+      | "suggest_sign"
+      | "mode_switched";
     content: string;
   };
 }

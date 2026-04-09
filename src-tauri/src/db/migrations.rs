@@ -228,6 +228,15 @@ const MIGRATIONS: &[(&str, &str)] = &[(
         PRAGMA foreign_keys=ON;
         "#,
     ),
+    (
+        "010_belief_state",
+        r#"
+        ALTER TABLE preflight_sessions ADD COLUMN belief_state TEXT NOT NULL DEFAULT '{}';
+        ALTER TABLE preflight_sessions ADD COLUMN convergence_score REAL NOT NULL DEFAULT 0.0;
+        ALTER TABLE preflight_sessions ADD COLUMN phase TEXT NOT NULL DEFAULT 'exploring'
+            CHECK (phase IN ('exploring', 'narrowing', 'confirming', 'ready_to_sign'));
+        "#,
+    ),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
