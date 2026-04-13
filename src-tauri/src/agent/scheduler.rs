@@ -7,7 +7,7 @@ use tokio::time::{interval, Duration};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::agent::{AgentEngine, AgentRegistry, AgentStatus};
+use crate::agent::{AgentEngine, AgentRegistry, AgentStatus, EvaluatorAgent};
 use crate::commands::{build_provider, ConfigManager};
 use crate::db::queries;
 use crate::db::Database;
@@ -438,6 +438,9 @@ impl Scheduler {
                         );
                     }
                 }
+
+                // FM-11: Trigger Evaluator Agent (runs in background, doesn't block)
+                Self::spawn_evaluator(&aid, &repo_path_owned, &app_clone);
             }
 
             // Terminal detection + merge is handled exclusively by poll_and_dispatch
@@ -448,5 +451,56 @@ impl Scheduler {
         });
 
         Ok(())
+    }
+
+    /// Spawn an Evaluator Agent in the background for a completed coding agent.
+    /// Evaluators don't count against max_concurrent_agents (NFR).
+    /// Timeout: 30s (BT-05). Duplicate prevention: BT-07.
+    fn spawn_evaluator(
+        agent_id: &str,
+        repo_path: &PathBuf,
+        app: &tauri::AppHandle,
+    ) {
+        let (provider, model) = match build_provider(app) {
+            Ok(pm) => pm,
+            Err(e) => {
+                tracing::error!("Evaluator: cannot build provider for agent {agent_id}: {e}");
+                return;
+            }
+        };
+
+        let db = app.state::<Database>();
+        let mission_id = match db.with_conn(|conn| queries::get_mission_id_for_agent(conn, agent_id)) {
+            Ok(Some(mid)) => mid,
+            _ => {
+                tracing::warn!("Evaluator: cannot find mission for agent {agent_id}, skipping");
+                return;
+            }
+        };
+
+        let aid = agent_id.to_string();
+        let rp = repo_path.clone();
+        let app_clone = app.clone();
+
+        tokio::spawn(async move {
+            let evaluator = EvaluatorAgent::new(provider, model, app_clone);
+            let result = tokio::time::timeout(
+                tokio::time::Duration::from_secs(30),
+                evaluator.evaluate(&aid, &mission_id, &rp),
+            )
+            .await;
+
+            match result {
+                Ok(Ok(())) => {
+                    tracing::info!("Evaluator: finished for agent {aid}");
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("Evaluator: failed for agent {aid}: {e}");
+                }
+                Err(_) => {
+                    tracing::warn!("Evaluator: timed out for agent {aid} (BT-05)");
+                }
+            }
+        });
     }
 }

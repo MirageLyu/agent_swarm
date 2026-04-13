@@ -704,6 +704,206 @@ pub fn reset_orphaned_running_tasks(conn: &Connection, mission_id: &str) -> Resu
     Ok(rows as u64)
 }
 
+// ---- FM-11: Evaluator reviews & annotations ----
+
+pub fn insert_evaluator_review(
+    conn: &Connection,
+    id: &str,
+    agent_id: &str,
+    mission_id: &str,
+    overall_score: f64,
+    summary: &str,
+    contract_compliance: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO evaluator_reviews (id, agent_id, mission_id, overall_score, summary, contract_compliance)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, agent_id, mission_id, overall_score, summary, contract_compliance],
+    )?;
+    Ok(())
+}
+
+pub fn insert_evaluator_annotation(
+    conn: &Connection,
+    id: &str,
+    review_id: &str,
+    agent_id: &str,
+    file_path: &str,
+    line_number: i64,
+    ann_type: &str,
+    severity: &str,
+    message: &str,
+    suggestion: Option<&str>,
+    auto_fixable: bool,
+    original_code: Option<&str>,
+    fixed_code: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO evaluator_annotations
+         (id, review_id, agent_id, file_path, line_number, type, severity, message,
+          suggestion, auto_fixable, original_code, fixed_code)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            id, review_id, agent_id, file_path, line_number,
+            ann_type, severity, message, suggestion,
+            auto_fixable as i32, original_code, fixed_code
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn update_annotation_status(conn: &Connection, annotation_id: &str, status: &str) -> Result<bool> {
+    let rows = conn.execute(
+        "UPDATE evaluator_annotations SET status = ?1 WHERE id = ?2",
+        params![status, annotation_id],
+    )?;
+    Ok(rows > 0)
+}
+
+pub struct EvaluatorReviewRow {
+    pub id: String,
+    pub agent_id: String,
+    pub mission_id: String,
+    pub overall_score: f64,
+    pub summary: String,
+    pub contract_compliance: Option<String>,
+    pub created_at: String,
+}
+
+pub fn get_evaluator_review_for_agent(
+    conn: &Connection,
+    agent_id: &str,
+) -> Result<Option<EvaluatorReviewRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, mission_id, overall_score, summary, contract_compliance, created_at
+         FROM evaluator_reviews WHERE agent_id = ?1
+         ORDER BY created_at DESC LIMIT 1",
+    )?;
+    let row = stmt
+        .query_row(params![agent_id], |row| {
+            Ok(EvaluatorReviewRow {
+                id: row.get(0)?,
+                agent_id: row.get(1)?,
+                mission_id: row.get(2)?,
+                overall_score: row.get(3)?,
+                summary: row.get(4)?,
+                contract_compliance: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })
+        .ok();
+    Ok(row)
+}
+
+pub struct AnnotationRow {
+    pub id: String,
+    pub review_id: String,
+    pub agent_id: String,
+    pub file_path: String,
+    pub line_number: i64,
+    pub ann_type: String,
+    pub severity: String,
+    pub status: String,
+    pub message: String,
+    pub suggestion: Option<String>,
+    pub auto_fixable: bool,
+    pub original_code: Option<String>,
+    pub fixed_code: Option<String>,
+    pub created_at: String,
+}
+
+pub fn get_annotations_for_agent(
+    conn: &Connection,
+    agent_id: &str,
+    file_path: Option<&str>,
+) -> Result<Vec<AnnotationRow>> {
+    let (sql, param_values): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(fp) = file_path {
+        (
+            "SELECT id, review_id, agent_id, file_path, line_number, type, severity, status,
+                    message, suggestion, auto_fixable, original_code, fixed_code, created_at
+             FROM evaluator_annotations
+             WHERE agent_id = ?1 AND file_path = ?2
+             ORDER BY file_path, line_number",
+            vec![Box::new(agent_id.to_string()), Box::new(fp.to_string())],
+        )
+    } else {
+        (
+            "SELECT id, review_id, agent_id, file_path, line_number, type, severity, status,
+                    message, suggestion, auto_fixable, original_code, fixed_code, created_at
+             FROM evaluator_annotations
+             WHERE agent_id = ?1
+             ORDER BY file_path, line_number",
+            vec![Box::new(agent_id.to_string())],
+        )
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(AnnotationRow {
+                id: row.get(0)?,
+                review_id: row.get(1)?,
+                agent_id: row.get(2)?,
+                file_path: row.get(3)?,
+                line_number: row.get(4)?,
+                ann_type: row.get(5)?,
+                severity: row.get(6)?,
+                status: row.get(7)?,
+                message: row.get(8)?,
+                suggestion: row.get(9)?,
+                auto_fixable: row.get::<_, i32>(10)? != 0,
+                original_code: row.get(11)?,
+                fixed_code: row.get(12)?,
+                created_at: row.get(13)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn has_evaluator_review(conn: &Connection, agent_id: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM evaluator_reviews WHERE agent_id = ?1",
+        params![agent_id],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+pub fn get_contract_quality_threshold(
+    conn: &Connection,
+    mission_id: &str,
+) -> Result<Option<f64>> {
+    let result: Option<f64> = conn
+        .query_row(
+            "SELECT quality_threshold FROM mission_contracts
+             WHERE mission_id = ?1 AND status = 'signed'",
+            params![mission_id],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(result)
+}
+
+pub fn get_task_id_for_agent(conn: &Connection, agent_id: &str) -> Result<Option<String>> {
+    let result: Option<String> = conn
+        .query_row(
+            "SELECT task_id FROM agents WHERE id = ?1",
+            params![agent_id],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(result)
+}
+
+pub fn mark_task_needs_revision(conn: &Connection, task_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE tasks SET status = 'failed' WHERE id = ?1",
+        params![task_id],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

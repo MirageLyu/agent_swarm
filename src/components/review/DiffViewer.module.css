@@ -22,6 +22,14 @@
   color: var(--color-text-primary);
 }
 
+.annotationsPanel {
+  max-height: 240px;
+  overflow-y: auto;
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 0.5px solid var(--color-separator);
+  flex-shrink: 0;
+}
+
 .editorWrapper {
   flex: 1;
   min-height: 0;

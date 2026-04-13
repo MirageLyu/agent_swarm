@@ -32,21 +32,6 @@ export function PreflightChat({
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Hide cursor 400ms after the last text_delta stops arriving
-  const [cursorVisible, setCursorVisible] = useState(false);
-  const cursorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    if (streaming && streamingText) {
-      setCursorVisible(true);
-      if (cursorTimerRef.current) clearTimeout(cursorTimerRef.current);
-      cursorTimerRef.current = setTimeout(() => setCursorVisible(false), 400);
-    } else {
-      setCursorVisible(false);
-    }
-    return () => { if (cursorTimerRef.current) clearTimeout(cursorTimerRef.current); };
-  }, [streaming, streamingText]);
-
   const scrollToBottom = useCallback(() => {
     requestAnimationFrame(() => {
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -122,7 +107,7 @@ export function PreflightChat({
             <div className={styles.streamingLabel}>Swarm Agent</div>
             <div className={styles.streamingBubble}>
               <Markdown>{streamingText}</Markdown>
-              {cursorVisible && <span className={styles.streamCursor} />}
+              <span className={styles.streamEllipsis} />
             </div>
           </div>
         )}

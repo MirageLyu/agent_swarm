@@ -26,6 +26,14 @@ export type {
   DeleteMissionRequest,
   RestartMissionRequest,
   RestartResult,
+  AnnotationType,
+  AnnotationSeverity,
+  AnnotationStatus,
+  EvaluationResult,
+  AnnotationInfo,
+  GetAnnotationsRequest,
+  UpdateAnnotationStatusRequest,
+  TriggerEvaluationResponse,
 } from "./commands";
 export {
   onAgentEvent,
@@ -34,6 +42,7 @@ export {
   onTaskStatusChanged,
   onMissionStatusChanged,
   onPlannerStream,
+  onEvaluationComplete,
 } from "./events";
 export type {
   AgentEventPayload,
@@ -42,4 +51,5 @@ export type {
   TaskStatusChangedPayload,
   MissionStatusChangedPayload,
   PlannerStreamPayload,
+  EvaluationCompletePayload,
 } from "./events";

@@ -1,0 +1,29 @@
+---
+description: npm/pnpm network troubleshooting - proxy and SSL workaround when install hangs
+alwaysApply: false
+---
+
+# 包管理器网络问题 Workaround
+
+当 `npm install` 或 `pnpm add` 卡住无响应时，按以下步骤排查：
+
+**注意**: 本项目使用 **pnpm**（lockfile 为 `pnpm-lock.yaml`），不要用 `npm install`。
+
+## 1. 设置代理
+
+```bash
+export ALL_PROXY=http://127.0.0.1:7890
+```
+
+## 2. 关闭 SSL 校验（仅在代理环境下）
+
+```bash
+npm config set strict-ssl false
+```
+
+## 3. 恢复（问题解决后）
+
+```bash
+npm config set strict-ssl true
+unset ALL_PROXY
+```

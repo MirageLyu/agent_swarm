@@ -91,7 +91,12 @@ pub fn run() {
             commands::update_contract_config,
             commands::get_contract,
             commands::get_preflight_session,
+            commands::get_decision_log,
             commands::sign_contract,
+            commands::trigger_evaluation,
+            commands::get_evaluation_result,
+            commands::get_annotations,
+            commands::update_annotation_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

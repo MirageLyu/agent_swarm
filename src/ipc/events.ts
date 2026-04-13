@@ -98,6 +98,22 @@ export function onPreflightStream(
   });
 }
 
+// FM-11: Evaluator events
+
+export interface EvaluationCompletePayload {
+  agent_id: string;
+  overall_score: number;
+  annotation_count: number;
+}
+
+export function onEvaluationComplete(
+  callback: (payload: EvaluationCompletePayload) => void,
+): Promise<UnlistenFn> {
+  return listen<EvaluationCompletePayload>("evaluation-complete", (event) => {
+    callback(event.payload);
+  });
+}
+
 // FM-07: Planner stream events
 
 export interface PlannerStreamPayload {

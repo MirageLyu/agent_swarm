@@ -1,0 +1,26 @@
+.score {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px var(--space-2);
+  border-radius: 4px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  user-select: none;
+}
+
+.high {
+  background: rgba(52, 199, 89, 0.12);
+  color: var(--color-success);
+}
+
+.medium {
+  background: rgba(255, 159, 10, 0.12);
+  color: var(--color-warning);
+}
+
+.low {
+  background: rgba(255, 59, 48, 0.12);
+  color: var(--color-error);
+}

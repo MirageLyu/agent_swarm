@@ -2,10 +2,12 @@ import { useMemo } from "react";
 import type { ContractInfo, ContractSection as SectionType } from "../../ipc/commands";
 import { ContractSection } from "./ContractSection";
 import { ContractConfigCards } from "./ContractConfigCards";
+import { DecisionTimeline } from "./DecisionTimeline";
 import styles from "./ContractPanel.module.css";
 
 interface ContractPanelProps {
   contract: ContractInfo;
+  sessionId: string | null;
   onRemoveItem: (itemId: string) => void;
   onUpdateConfig: (field: string, value: number) => void;
   onSign: () => void;
@@ -16,6 +18,7 @@ const SECTIONS: SectionType[] = ["scope", "constraints", "exclusions", "assumpti
 
 export function ContractPanel({
   contract,
+  sessionId,
   onRemoveItem,
   onUpdateConfig,
   onSign,
@@ -51,6 +54,7 @@ export function ContractPanel({
       </div>
 
       <div className={styles.footer}>
+        <DecisionTimeline sessionId={sessionId} />
         <ContractConfigCards
           budgetUsd={contract.budget_usd}
           qualityThreshold={contract.quality_threshold}

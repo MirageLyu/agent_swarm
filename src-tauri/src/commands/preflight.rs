@@ -5,9 +5,9 @@ use tauri::Manager;
 use uuid::Uuid;
 
 use crate::agent::belief_state::{self, PreflightBeliefState, SlotStatus};
-use crate::agent::planner::{self, ContractData, PreflightAction, PreflightChoice};
+use crate::agent::planner::{self, ContractData, PreflightAction, PreflightChoice, DecisionEntry, Alternative};
 use crate::commands::mission::{build_provider, PlanMissionResponse, TaskInfo};
-use crate::llm::{ContentBlock, Message, MessageRole};
+use crate::llm::{ContentBlock, Message, MessageRole, TokenUsage};
 
 // ---------- request / response types ----------
 
@@ -151,8 +151,85 @@ fn save_belief_state(
     Ok(())
 }
 
+/// Load contract items as (section, text, confidence) tuples for prompt injection.
+fn load_contract_items(
+    conn: &rusqlite::Connection,
+    mission_id: &str,
+) -> Vec<(String, String, String)> {
+    let contract_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM mission_contracts WHERE mission_id = ?",
+            [mission_id],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let Some(contract_id) = contract_id else { return vec![] };
+
+    let mut stmt = conn.prepare(
+        "SELECT section, text, source FROM contract_items WHERE contract_id = ? ORDER BY created_at ASC"
+    ).unwrap();
+
+    stmt.query_map([&contract_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2).unwrap_or_else(|_| "confirmed".into()),
+        ))
+    }).unwrap().filter_map(|r| r.ok()).collect()
+}
+
+/// Load rejected alternatives from decision_log for prompt injection (FM-10.6.5).
+fn load_rejected_alternatives(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> Vec<(String, u32, String)> {
+    let mut stmt = conn.prepare(
+        "SELECT description, round, rationale FROM decision_log WHERE session_id = ? AND decision_type = 'rejected' ORDER BY round DESC LIMIT 10"
+    ).unwrap();
+
+    stmt.query_map([session_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, u32>(1)?,
+            row.get::<_, String>(2).unwrap_or_default(),
+        ))
+    }).unwrap().filter_map(|r| r.ok()).collect()
+}
+
+/// Insert a decision entry into the database (FM-10.6).
+fn insert_decision_entry(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    round: u32,
+    decision_type: &str,
+    description: &str,
+    rationale: &str,
+    alternatives: &[Alternative],
+    contract_item_id: Option<&str>,
+) {
+    let id = Uuid::new_v4().to_string();
+    let alts_json = serde_json::to_string(alternatives).unwrap_or_else(|_| "[]".to_string());
+    let _ = conn.execute(
+        "INSERT INTO decision_log (id, session_id, round, decision_type, description, rationale, alternatives, contract_item_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![id, session_id, round, decision_type, description, rationale, alts_json, contract_item_id],
+    );
+}
+
+/// Save token usage metrics after each round (FM-10.5.4.1).
+fn save_token_usage(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    usage: &TokenUsage,
+) {
+    let _ = conn.execute(
+        "UPDATE preflight_sessions SET last_input_tokens = ?, last_output_tokens = ?, cumulative_input_tokens = cumulative_input_tokens + ?, cumulative_output_tokens = cumulative_output_tokens + ?, updated_at = datetime('now') WHERE id = ?",
+        rusqlite::params![usage.input_tokens as i64, usage.output_tokens as i64, usage.input_tokens as i64, usage.output_tokens as i64, session_id],
+    );
+}
+
 /// Process tool_call actions: execute DB side effects, update belief_state,
-/// return tool_result messages for conversation history.
+/// record decisions, return tool_result messages for conversation history.
 fn process_tool_actions(
     conn: &rusqlite::Connection,
     mission_id: &str,
@@ -180,7 +257,6 @@ fn process_tool_actions(
 
                 match result {
                     Ok(item_id) => {
-                        // Update belief state
                         let slot_status = match args.confidence.as_str() {
                             "confirmed" => SlotStatus::Confirmed,
                             _ => SlotStatus::Tentative,
@@ -188,6 +264,19 @@ fn process_tool_actions(
                         if let Some(slot_id) = belief_state::map_contract_item_to_slot(&args.section, &args.item) {
                             belief_state.update_slot(slot_id, slot_status, Some(args.item.clone()), belief_state.round);
                         }
+
+                        // FM-10.6: Auto-record decision
+                        let decision_type = match args.confidence.as_str() {
+                            "confirmed" => "confirmed",
+                            "inferred" => "inferred",
+                            _ => "confirmed",
+                        };
+                        insert_decision_entry(
+                            conn, session_id, belief_state.round, decision_type,
+                            &args.item,
+                            args.rationale.as_deref().unwrap_or(""),
+                            &[], Some(&item_id),
+                        );
 
                         let item_info = json!({
                             "id": item_id,
@@ -217,9 +306,27 @@ fn process_tool_actions(
                 }
             }
             PreflightAction::UpdateContractItem { id, args } => {
+                // FM-10.6: Record the old content before update
+                let old_content: Option<String> = conn
+                    .query_row("SELECT text FROM contract_items WHERE id = ?", [&args.item_id], |row| row.get(0))
+                    .ok();
+
                 let result = update_contract_item_internal(conn, &args.item_id, &args.new_content);
                 match result {
                     Ok(()) => {
+                        // FM-10.6: Record Revised decision
+                        let desc = if let Some(old) = &old_content {
+                            format!("{} → {}", old, args.new_content)
+                        } else {
+                            args.new_content.clone()
+                        };
+                        insert_decision_entry(
+                            conn, session_id, belief_state.round, "revised",
+                            &desc,
+                            args.reason.as_deref().unwrap_or(""),
+                            &[], Some(&args.item_id),
+                        );
+
                         tool_results.push(json!({
                             "role": "tool",
                             "tool_call_id": id,
@@ -339,6 +446,7 @@ fn reconstruct_history(stored_msgs: &[serde_json::Value]) -> Vec<Message> {
                     history.push(Message {
                         role: MessageRole::Assistant,
                         content,
+                        cache_control: None,
                     });
                 }
             }
@@ -353,6 +461,7 @@ fn reconstruct_history(stored_msgs: &[serde_json::Value]) -> Vec<Message> {
                         content: m["content"].as_str().unwrap_or("").to_string(),
                         is_error: false,
                     }],
+                    cache_control: None,
                 });
             }
             _ => {
@@ -360,6 +469,7 @@ fn reconstruct_history(stored_msgs: &[serde_json::Value]) -> Vec<Message> {
                 history.push(Message {
                     role: MessageRole::User,
                     content: vec![ContentBlock::Text { text }],
+                    cache_control: None,
                 });
             }
         }
@@ -435,9 +545,162 @@ async fn preflight_with_continuation(
 ) {
     let mut combined_text = String::new();
 
+    // Load model capabilities for dynamic prompt assembly
+    let db = app.state::<crate::db::Database>();
+    let caps = {
+        let config_mgr = app.state::<crate::commands::ConfigManager>();
+        let config = config_mgr.get_config_snapshot();
+        // Detect actual provider from base_url or provider field
+        let provider_name = if config.base_url.contains("dashscope") {
+            "dashscope"
+        } else if config.provider == "anthropic" {
+            "anthropic"
+        } else if config.base_url.contains("deepseek") {
+            "deepseek"
+        } else if config.base_url.contains("openai") {
+            "openai"
+        } else {
+            &config.provider
+        };
+        crate::llm::registry::get_capabilities(provider_name, model)
+    };
+
     for iteration in 0..MAX_TOOL_CONTINUATION_ROUNDS {
-        let response = match planner::preflight_chat(
+        // Load current state for dynamic prompt
+        let (contract_items, belief_state_snapshot, rejected_alts) = db.with_conn(|conn| {
+            let items = load_contract_items(conn, mission_id);
+            let bs = load_belief_state(conn, session_id);
+            let alts = load_rejected_alternatives(conn, session_id);
+            Ok::<_, anyhow::Error>((items, bs, alts))
+        }).unwrap_or_default();
+
+        // FM-10.5: Full Compaction check (only on first iteration of each round)
+        if iteration == 0 {
+            let compact_state = db.with_conn(|conn| {
+                let last_input: Option<u64> = conn
+                    .query_row("SELECT last_input_tokens FROM preflight_sessions WHERE id = ?", [session_id], |row| row.get(0))
+                    .ok().flatten();
+                let failures: u32 = conn
+                    .query_row("SELECT compaction_failures FROM preflight_sessions WHERE id = ?", [session_id], |row| row.get(0))
+                    .unwrap_or(0);
+                let already_compacted: bool = conn
+                    .query_row("SELECT compacted_at IS NOT NULL FROM preflight_sessions WHERE id = ?", [session_id], |row| row.get(0))
+                    .unwrap_or(false);
+                Ok::<_, anyhow::Error>((last_input, failures, already_compacted))
+            }).unwrap_or((None, 0, false));
+
+            let (needs_compact, needs_warn) = planner::should_compact(
+                compact_state.0,
+                caps.context_window,
+                belief_state_snapshot.round,
+                compact_state.1,
+                false,
+            );
+
+            if needs_warn {
+                planner::emit_preflight_event_pub(app, session_id, "status", "上下文较长，建议尽快完成澄清");
+            }
+
+            if needs_compact {
+                tracing::info!(round = belief_state_snapshot.round, "triggering full compaction");
+                planner::emit_preflight_event_pub(app, session_id, "status", "正在优化对话上下文…");
+
+                let scope_count = contract_items.iter().filter(|(s, _, _)| s == "scope").count();
+                let constraints_count = contract_items.iter().filter(|(s, _, _)| s == "constraints").count();
+                let exclusions_count = contract_items.iter().filter(|(s, _, _)| s == "exclusions").count();
+                let assumptions_count = contract_items.iter().filter(|(s, _, _)| s == "assumptions").count();
+
+                let compaction_prompt = planner::build_compaction_prompt(
+                    scope_count, constraints_count, exclusions_count, assumptions_count,
+                );
+
+                let mut compact_msgs = history.clone();
+                compact_msgs.push(Message {
+                    role: MessageRole::User,
+                    content: vec![ContentBlock::Text { text: compaction_prompt }],
+                    cache_control: None,
+                });
+
+                let compact_request = crate::llm::LlmRequest {
+                    model: model.to_string(),
+                    system: None,
+                    messages: compact_msgs,
+                    tools: vec![],
+                    max_tokens: 1500,
+                };
+
+                let compact_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    provider.chat(&compact_request),
+                ).await;
+
+                match compact_result {
+                    Ok(Ok(resp)) => {
+                        let summary: String = resp.content.iter().filter_map(|b| match b {
+                            ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        }).collect();
+
+                        if summary.len() > 50 {
+                            let original_req = history.first();
+                            let recent_count = std::cmp::min(6, history.len());
+                            let recent = &history[history.len() - recent_count..];
+                            history = planner::build_compacted_messages(&summary, original_req, recent);
+
+                            let _ = db.with_conn(|conn| {
+                                conn.execute(
+                                    "UPDATE preflight_sessions SET compacted_at = ?, compaction_summary = ?, compaction_failures = 0 WHERE id = ?",
+                                    rusqlite::params![belief_state_snapshot.round as i64, &summary, session_id],
+                                )?;
+                                Ok::<_, anyhow::Error>(())
+                            });
+
+                            tracing::info!(
+                                round = belief_state_snapshot.round,
+                                summary_len = summary.len(),
+                                "full compaction succeeded"
+                            );
+                        } else {
+                            tracing::warn!("compaction summary too short, using truncation fallback");
+                            history = planner::truncate_messages(&history);
+                            let _ = db.with_conn(|conn| {
+                                conn.execute(
+                                    "UPDATE preflight_sessions SET compaction_failures = compaction_failures + 1 WHERE id = ?",
+                                    [session_id],
+                                )?;
+                                Ok::<_, anyhow::Error>(())
+                            });
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("compaction LLM call failed: {e}, using truncation fallback");
+                        history = planner::truncate_messages(&history);
+                        let _ = db.with_conn(|conn| {
+                            conn.execute(
+                                "UPDATE preflight_sessions SET compaction_failures = compaction_failures + 1 WHERE id = ?",
+                                [session_id],
+                            )?;
+                            Ok::<_, anyhow::Error>(())
+                        });
+                    }
+                    Err(_) => {
+                        tracing::error!("compaction timed out (>30s), using truncation fallback");
+                        history = planner::truncate_messages(&history);
+                        let _ = db.with_conn(|conn| {
+                            conn.execute(
+                                "UPDATE preflight_sessions SET compaction_failures = compaction_failures + 1 WHERE id = ?",
+                                [session_id],
+                            )?;
+                            Ok::<_, anyhow::Error>(())
+                        });
+                    }
+                }
+            }
+        }
+
+        let (response, usage) = match planner::preflight_chat(
             provider.clone(), model, mode, history.clone(), session_id, app,
+            &contract_items, &belief_state_snapshot, &rejected_alts, &caps,
         ).await {
             Ok(r) => r,
             Err(e) => {
@@ -461,8 +724,7 @@ async fn preflight_with_continuation(
         let has_suggest_sign = actions.iter().any(|a| matches!(a, PreflightAction::SuggestSign { .. }));
         let has_tool_calls = !response.tool_calls.is_empty();
 
-        // Process tool_call side effects
-        let db = app.state::<crate::db::Database>();
+        // Process tool_call side effects + save token usage
         let process_result = db.with_conn(|conn| {
             let mut belief_state = load_belief_state(conn, session_id);
             if iteration == 0 {
@@ -476,6 +738,9 @@ async fn preflight_with_continuation(
             belief_state.compute_convergence_score();
             belief_state.update_phase();
             save_belief_state(conn, session_id, &belief_state)?;
+
+            // FM-10.5.4.1: Persist token usage
+            save_token_usage(conn, session_id, &usage);
 
             Ok::<_, anyhow::Error>((tool_results, belief_state))
         });
@@ -514,6 +779,7 @@ async fn preflight_with_continuation(
             history.push(Message {
                 role: MessageRole::Assistant,
                 content: assistant_content,
+                cache_control: None,
             });
 
             // Append tool_results to LLM history
@@ -525,6 +791,7 @@ async fn preflight_with_continuation(
                         content: tr["content"].as_str().unwrap_or("").to_string(),
                         is_error: false,
                     }],
+                    cache_control: None,
                 });
             }
 
@@ -632,6 +899,7 @@ pub async fn start_preflight(
                 request.description
             ),
         }],
+        cache_control: None,
     };
 
     let sid = session_id.clone();
@@ -949,6 +1217,60 @@ pub struct PreflightSessionInfo {
     pub phase: String,
 }
 
+// ---------- FM-10.6: Decision Log commands ----------
+
+#[derive(Debug, Deserialize)]
+pub struct GetDecisionLogRequest {
+    pub session_id: String,
+    pub decision_type: Option<String>,
+}
+
+#[tauri::command]
+pub fn get_decision_log(
+    app: tauri::AppHandle,
+    request: GetDecisionLogRequest,
+) -> Result<Vec<DecisionEntry>, String> {
+    let db = app.state::<crate::db::Database>();
+
+    db.with_conn(|conn| {
+        let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(ref dt) = request.decision_type {
+            (
+                "SELECT id, session_id, round, decision_type, description, rationale, alternatives, contract_item_id, created_at FROM decision_log WHERE session_id = ? AND decision_type = ? ORDER BY round ASC".into(),
+                vec![Box::new(request.session_id.clone()), Box::new(dt.clone())],
+            )
+        } else {
+            (
+                "SELECT id, session_id, round, decision_type, description, rationale, alternatives, contract_item_id, created_at FROM decision_log WHERE session_id = ? ORDER BY round ASC".into(),
+                vec![Box::new(request.session_id.clone())],
+            )
+        };
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let entries: Vec<DecisionEntry> = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                let alts_json: String = row.get(6)?;
+                let alternatives: Vec<Alternative> = serde_json::from_str(&alts_json).unwrap_or_default();
+                Ok(DecisionEntry {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    round: row.get(2)?,
+                    decision_type: row.get(3)?,
+                    description: row.get(4)?,
+                    rationale: row.get(5)?,
+                    alternatives,
+                    contract_item_id: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(entries)
+    })
+    .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn sign_contract(
     app: tauri::AppHandle,
@@ -1032,6 +1354,7 @@ pub async fn sign_contract(
         content: vec![ContentBlock::Text {
             text: description.clone(),
         }],
+        cache_control: None,
     }];
 
     let request = crate::llm::LlmRequest {
@@ -1100,7 +1423,20 @@ pub async fn sign_contract(
                 }
             }
 
+            // Promote root tasks (no dependencies) to 'ready'
+            conn.execute(
+                "UPDATE tasks SET status = 'ready'
+                 WHERE mission_id = ?1 AND status = 'pending'
+                   AND id NOT IN (SELECT task_id FROM task_dependencies)",
+                [&mission_id],
+            )?;
+
             for ti in &mut task_infos {
+                ti.status = conn.query_row(
+                    "SELECT status FROM tasks WHERE id = ?",
+                    [&ti.id],
+                    |row| row.get(0),
+                )?;
                 ti.created_at = conn.query_row(
                     "SELECT created_at FROM tasks WHERE id = ?",
                     [&ti.id],

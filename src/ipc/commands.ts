@@ -325,6 +325,80 @@ export interface PreflightSessionInfo {
 
 export type ConversationPhase = "exploring" | "narrowing" | "confirming" | "ready_to_sign";
 
+// ---------- FM-10.6: Decision Log ----------
+
+export type DecisionType = "confirmed" | "rejected" | "inferred" | "revised" | "skipped";
+
+export interface Alternative {
+  label: string;
+  reason_rejected: string;
+}
+
+export interface DecisionEntry {
+  id: string;
+  session_id: string;
+  round: number;
+  decision_type: DecisionType;
+  description: string;
+  rationale: string;
+  alternatives: Alternative[];
+  contract_item_id: string | null;
+  created_at: string;
+}
+
+export interface GetDecisionLogRequest {
+  session_id: string;
+  decision_type?: DecisionType;
+}
+
+// ---------- FM-11: Evaluator Agent ----------
+
+export type AnnotationType = "bug" | "style" | "performance" | "security" | "suggestion";
+export type AnnotationSeverity = "error" | "warning" | "info";
+export type AnnotationStatus = "open" | "auto_fixed" | "revision_requested" | "dismissed";
+
+export interface TriggerEvaluationResponse {
+  evaluator_agent_id: string;
+}
+
+export interface EvaluationResult {
+  agent_id: string;
+  overall_score: number;
+  summary: string;
+  contract_compliance: string | null;
+  annotation_count: number;
+  auto_fixed_count: number;
+  needs_review_count: number;
+  created_at: string;
+}
+
+export interface AnnotationInfo {
+  id: string;
+  review_id: string;
+  agent_id: string;
+  file_path: string;
+  line_number: number;
+  type: AnnotationType;
+  severity: AnnotationSeverity;
+  status: AnnotationStatus;
+  message: string;
+  suggestion: string | null;
+  auto_fixable: boolean;
+  original_code: string | null;
+  fixed_code: string | null;
+  created_at: string;
+}
+
+export interface GetAnnotationsRequest {
+  agent_id: string;
+  file_path?: string;
+}
+
+export interface UpdateAnnotationStatusRequest {
+  annotation_id: string;
+  status: AnnotationStatus;
+}
+
 // ---------- FM-08: Mission Lifecycle ----------
 
 export interface DeleteMissionRequest {
@@ -472,4 +546,20 @@ export const commands = {
 
   signContract: (missionId: string) =>
     invoke<PlanMissionResponse>("sign_contract", { missionId }),
+
+  getDecisionLog: (request: GetDecisionLogRequest) =>
+    invoke<DecisionEntry[]>("get_decision_log", { request }),
+
+  // FM-11: Evaluator Agent
+  triggerEvaluation: (agentId: string) =>
+    invoke<TriggerEvaluationResponse>("trigger_evaluation", { agentId }),
+
+  getEvaluationResult: (agentId: string) =>
+    invoke<EvaluationResult | null>("get_evaluation_result", { agentId }),
+
+  getAnnotations: (request: GetAnnotationsRequest) =>
+    invoke<AnnotationInfo[]>("get_annotations", { request }),
+
+  updateAnnotationStatus: (request: UpdateAnnotationStatusRequest) =>
+    invoke<void>("update_annotation_status", { request }),
 };

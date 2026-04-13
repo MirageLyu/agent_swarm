@@ -1,10 +1,12 @@
 import type { DiffFile } from "../../ipc";
+import { FileScore } from "./FileScore";
 import styles from "./DiffFileTree.module.css";
 
 interface DiffFileTreeProps {
   files: DiffFile[];
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  fileScores?: Record<string, number>;
 }
 
 const statusChar: Record<string, string> = {
@@ -13,7 +15,7 @@ const statusChar: Record<string, string> = {
   deleted: "D",
 };
 
-export function DiffFileTree({ files, selectedPath, onSelect }: DiffFileTreeProps) {
+export function DiffFileTree({ files, selectedPath, onSelect, fileScores }: DiffFileTreeProps) {
   return (
     <div className={styles.container}>
       <div className={styles.header}>
@@ -34,6 +36,9 @@ export function DiffFileTree({ files, selectedPath, onSelect }: DiffFileTreeProp
                 {statusChar[file.status] ?? "?"}
               </span>
               <span className={styles.fileName}>{file.path}</span>
+              {fileScores?.[file.path] != null && (
+                <FileScore score={fileScores[file.path]} />
+              )}
             </button>
           ))
         )}

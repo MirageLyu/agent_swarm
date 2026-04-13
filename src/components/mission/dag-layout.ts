@@ -14,6 +14,8 @@ export interface EdgeLayout {
   y1: number;
   x2: number;
   y2: number;
+  /** SVG path "d" attribute for the edge curve */
+  path: string;
 }
 
 export interface DagLayout {
@@ -25,10 +27,11 @@ export interface DagLayout {
 
 export const NODE_WIDTH = 200;
 export const NODE_HEIGHT = 72;
-const LAYER_GAP = 80;
-const NODE_GAP = 24;
-const PADDING = 40;
+const LAYER_GAP = 120;
+const NODE_GAP = 32;
+const PADDING = 48;
 const PORT_MARGIN = 12;
+const BARYCENTRIC_ITERATIONS = 6;
 
 export function computeDagLayout(
   tasks: TaskInfo[],
@@ -38,7 +41,7 @@ export function computeDagLayout(
     return { nodes: [], edges: [], width: 0, height: 0 };
   }
 
-  // Deduplicate dependencies
+  // --- Deduplicate dependencies ---
   const depSet = new Set<string>();
   const uniqueDeps: DependencyInfo[] = [];
   for (const dep of dependencies) {
@@ -49,13 +52,18 @@ export function computeDagLayout(
     }
   }
 
+  // depMap: task_id → set of upstream ids (task depends on these)
   const depMap = new Map<string, Set<string>>();
+  // successors: source_id → set of downstream ids (these depend on source)
+  const successors = new Map<string, Set<string>>();
   for (const dep of uniqueDeps) {
     if (!depMap.has(dep.task_id)) depMap.set(dep.task_id, new Set());
     depMap.get(dep.task_id)!.add(dep.depends_on);
+    if (!successors.has(dep.depends_on)) successors.set(dep.depends_on, new Set());
+    successors.get(dep.depends_on)!.add(dep.task_id);
   }
 
-  // Assign layers via longest-path (max dependency depth + 1)
+  // --- Layer assignment (longest-path) ---
   const layerOf = new Map<string, number>();
 
   function getLayer(id: string, visited: Set<string>): number {
@@ -90,11 +98,63 @@ export function computeDagLayout(
 
   const numLayers = Math.max(...layers.keys()) + 1;
 
+  // --- Barycentric ordering (Sugiyama-style crossing reduction) ---
+  // Initial order: by original task array index
   const taskIndex = new Map(tasks.map((t, i) => [t.id, i]));
   for (const [, ids] of layers) {
     ids.sort((a, b) => (taskIndex.get(a) ?? 0) - (taskIndex.get(b) ?? 0));
   }
 
+  // positionInLayer: nodeId → index within its layer (updated each iteration)
+  const positionInLayer = new Map<string, number>();
+  function refreshPositions() {
+    for (const [, ids] of layers) {
+      for (let i = 0; i < ids.length; i++) {
+        positionInLayer.set(ids[i], i);
+      }
+    }
+  }
+  refreshPositions();
+
+  function neighbors(id: string, direction: "up" | "down"): string[] {
+    if (direction === "up") {
+      return [...(depMap.get(id) ?? [])];
+    }
+    return [...(successors.get(id) ?? [])];
+  }
+
+  function barycenter(id: string, direction: "up" | "down"): number | null {
+    const nbrs = neighbors(id, direction);
+    if (nbrs.length === 0) return null;
+    let sum = 0;
+    for (const n of nbrs) {
+      sum += positionInLayer.get(n) ?? 0;
+    }
+    return sum / nbrs.length;
+  }
+
+  for (let iter = 0; iter < BARYCENTRIC_ITERATIONS; iter++) {
+    const direction: "up" | "down" = iter % 2 === 0 ? "down" : "up";
+    const layerOrder = direction === "down"
+      ? Array.from({ length: numLayers }, (_, i) => i)
+      : Array.from({ length: numLayers }, (_, i) => numLayers - 1 - i);
+
+    for (const l of layerOrder) {
+      const ids = layers.get(l);
+      if (!ids || ids.length <= 1) continue;
+
+      const baryValues = new Map<string, number>();
+      for (const id of ids) {
+        const bc = barycenter(id, direction === "down" ? "up" : "down");
+        baryValues.set(id, bc ?? positionInLayer.get(id)!);
+      }
+
+      ids.sort((a, b) => baryValues.get(a)! - baryValues.get(b)!);
+    }
+    refreshPositions();
+  }
+
+  // --- Coordinate assignment ---
   const nodeMap = new Map<string, NodeLayout>();
   let maxNodesInLayer = 0;
   for (const [, ids] of layers) {
@@ -115,10 +175,9 @@ export function computeDagLayout(
     }
   }
 
-  // Build port maps: for each node, collect outgoing and incoming edges,
-  // then assign vertically distributed y-offsets along the node's side.
-  const outgoing = new Map<string, string[]>(); // sourceId → [targetIds]
-  const incoming = new Map<string, string[]>(); // targetId → [sourceIds]
+  // --- Port assignment ---
+  const outgoing = new Map<string, string[]>();
+  const incoming = new Map<string, string[]>();
 
   for (const dep of uniqueDeps) {
     if (!nodeMap.has(dep.depends_on) || !nodeMap.has(dep.task_id)) continue;
@@ -128,7 +187,6 @@ export function computeDagLayout(
     incoming.get(dep.task_id)!.push(dep.depends_on);
   }
 
-  // Sort ports by the y-position of the connected node to minimize crossings
   for (const [, targets] of outgoing) {
     targets.sort(
       (a, b) => (nodeMap.get(a)?.y ?? 0) - (nodeMap.get(b)?.y ?? 0),
@@ -156,19 +214,82 @@ export function computeDagLayout(
     return node.y + PORT_MARGIN + idx * step;
   }
 
+  // --- Edge routing ---
+  // Collect occupied Y ranges per layer for avoidance
+  const layerNodeRanges = new Map<number, Array<{ top: number; bottom: number }>>();
+  for (let l = 0; l < numLayers; l++) {
+    const ids = layers.get(l) ?? [];
+    const ranges = ids.map((id) => {
+      const n = nodeMap.get(id)!;
+      return { top: n.y - 4, bottom: n.y + NODE_HEIGHT + 4 };
+    });
+    layerNodeRanges.set(l, ranges);
+  }
+
+  function buildEdgePath(
+    x1: number, y1: number, x2: number, y2: number,
+    fromLayer: number, toLayer: number,
+  ): string {
+    const layerSpan = toLayer - fromLayer;
+
+    if (layerSpan <= 1) {
+      const cx = (x1 + x2) / 2;
+      return `M ${x1} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${x2} ${y2}`;
+    }
+
+    // For multi-layer edges, route through the gaps between layers
+    // to avoid crossing over intermediate nodes
+    const points: Array<{ x: number; y: number }> = [{ x: x1, y: y1 }];
+
+    for (let l = fromLayer + 1; l < toLayer; l++) {
+      const gapX = PADDING + l * (NODE_WIDTH + LAYER_GAP) - LAYER_GAP / 2;
+      const progress = (l - fromLayer) / layerSpan;
+      let idealY = y1 + (y2 - y1) * progress;
+
+      // Check if idealY passes through a node in this layer and nudge
+      const ranges = layerNodeRanges.get(l) ?? [];
+      for (const r of ranges) {
+        if (idealY >= r.top && idealY <= r.bottom) {
+          const distToTop = idealY - r.top;
+          const distToBottom = r.bottom - idealY;
+          idealY = distToTop < distToBottom ? r.top - 8 : r.bottom + 8;
+          break;
+        }
+      }
+
+      points.push({ x: gapX, y: idealY });
+    }
+
+    points.push({ x: x2, y: y2 });
+
+    // Build smooth cubic bezier spline through waypoints
+    let d = `M ${points[0].x} ${points[0].y}`;
+    for (let i = 0; i < points.length - 1; i++) {
+      const p0 = points[i];
+      const p1 = points[i + 1];
+      const tension = 0.4;
+      const dx = (p1.x - p0.x) * tension;
+      d += ` C ${p0.x + dx} ${p0.y}, ${p1.x - dx} ${p1.y}, ${p1.x} ${p1.y}`;
+    }
+    return d;
+  }
+
   const edges: EdgeLayout[] = [];
   for (const dep of uniqueDeps) {
     const from = nodeMap.get(dep.depends_on);
     const to = nodeMap.get(dep.task_id);
     if (!from || !to) continue;
 
+    const x1 = from.x + NODE_WIDTH;
+    const y1v = portY(dep.depends_on, dep.task_id, outgoing);
+    const x2 = to.x;
+    const y2v = portY(dep.task_id, dep.depends_on, incoming);
+
     edges.push({
       from: dep.depends_on,
       to: dep.task_id,
-      x1: from.x + NODE_WIDTH,
-      y1: portY(dep.depends_on, dep.task_id, outgoing),
-      x2: to.x,
-      y2: portY(dep.task_id, dep.depends_on, incoming),
+      x1, y1: y1v, x2, y2: y2v,
+      path: buildEdgePath(x1, y1v, x2, y2v, from.layer, to.layer),
     });
   }
 

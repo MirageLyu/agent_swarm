@@ -163,18 +163,23 @@
   word-break: break-word;
 }
 
-.streamCursor {
-  display: inline-block;
-  width: 2px;
-  height: 14px;
-  background: var(--color-accent);
+.streamEllipsis {
+  display: inline;
   margin-left: 2px;
-  animation: blink 1s step-end infinite;
-  vertical-align: text-bottom;
+  color: var(--color-text-tertiary);
+  font-weight: 500;
+  letter-spacing: 1px;
 }
 
-@keyframes blink {
-  50% { opacity: 0; }
+.streamEllipsis::after {
+  content: ".";
+  animation: ellipsis 1.2s steps(1) infinite;
+}
+
+@keyframes ellipsis {
+  0%   { content: "."; }
+  33%  { content: ".."; }
+  66%  { content: "..."; }
 }
 
 .divider {

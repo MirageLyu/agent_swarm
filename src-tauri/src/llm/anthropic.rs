@@ -70,6 +70,12 @@ impl LlmProvider for AnthropicProvider {
         let usage = TokenUsage {
             input_tokens: data["usage"]["input_tokens"].as_u64().unwrap_or(0),
             output_tokens: data["usage"]["output_tokens"].as_u64().unwrap_or(0),
+            cache_read_input_tokens: data["usage"]["cache_read_input_tokens"]
+                .as_u64()
+                .unwrap_or(0),
+            cache_creation_input_tokens: data["usage"]["cache_creation_input_tokens"]
+                .as_u64()
+                .unwrap_or(0),
         };
 
         Ok(LlmResponse {

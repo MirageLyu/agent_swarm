@@ -136,6 +136,7 @@ impl AgentEngine {
             messages.push(Message {
                 role: MessageRole::Assistant,
                 content: response.content.clone(),
+                cache_control: None,
             });
 
             let step_cost = self.provider.estimate_cost(
@@ -235,6 +236,7 @@ impl AgentEngine {
             messages.push(Message {
                 role: MessageRole::User,
                 content: tool_results,
+                cache_control: None,
             });
 
             if self.cancel_token.is_cancelled() {

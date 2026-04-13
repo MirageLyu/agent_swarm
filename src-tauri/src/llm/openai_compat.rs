@@ -36,10 +36,31 @@ impl OpenAICompatProvider {
         let mut oai_messages = Vec::new();
 
         if let Some(system) = &request.system {
-            oai_messages.push(json!({
-                "role": "system",
-                "content": system,
-            }));
+            // Split system prompt at __DYNAMIC_BOUNDARY__ for caching.
+            // The static prefix gets cache_control, the dynamic suffix does not.
+            if system.contains("__DYNAMIC_BOUNDARY__") {
+                let parts: Vec<&str> = system.splitn(2, "═══ __DYNAMIC_BOUNDARY__ ═══").collect();
+                if parts.len() == 2 {
+                    let mut static_msg = json!({
+                        "role": "system",
+                        "content": parts[0].trim_end(),
+                        "cache_control": {"type": "ephemeral"},
+                    });
+                    // Only include cache_control if the static prefix is substantial
+                    if parts[0].len() < 500 {
+                        static_msg.as_object_mut().unwrap().remove("cache_control");
+                    }
+                    oai_messages.push(static_msg);
+                    oai_messages.push(json!({
+                        "role": "system",
+                        "content": parts[1].trim_start(),
+                    }));
+                } else {
+                    oai_messages.push(json!({ "role": "system", "content": system }));
+                }
+            } else {
+                oai_messages.push(json!({ "role": "system", "content": system }));
+            }
         }
 
         for msg in &request.messages {
@@ -67,10 +88,14 @@ impl OpenAICompatProvider {
                     }
 
                     if !text_parts.is_empty() {
-                        oai_messages.push(json!({
+                        let mut user_msg = json!({
                             "role": "user",
                             "content": text_parts.join("\n"),
-                        }));
+                        });
+                        if msg.cache_control.is_some() {
+                            user_msg["cache_control"] = json!({"type": "ephemeral"});
+                        }
+                        oai_messages.push(user_msg);
                     }
                     oai_messages.extend(tool_results);
                 }
@@ -113,15 +138,21 @@ impl OpenAICompatProvider {
     fn convert_tools(&self, tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
         tools
             .iter()
-            .map(|t| {
-                json!({
+            .enumerate()
+            .map(|(_i, t)| {
+                let mut tool = json!({
                     "type": "function",
                     "function": {
                         "name": t.name,
                         "description": t.description,
                         "parameters": t.input_schema,
                     }
-                })
+                });
+                // FM-10.4: Apply cache_control to the last tool definition
+                if t.cache_control.is_some() {
+                    tool["cache_control"] = json!({"type": "ephemeral"});
+                }
+                tool
             })
             .collect()
     }
@@ -186,6 +217,8 @@ impl OpenAICompatProvider {
         let usage = TokenUsage {
             input_tokens: data["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
             output_tokens: data["usage"]["completion_tokens"].as_u64().unwrap_or(0),
+            cache_read_input_tokens: data["usage"]["cache_read_input_tokens"].as_u64().unwrap_or(0),
+            cache_creation_input_tokens: data["usage"]["cache_creation_input_tokens"].as_u64().unwrap_or(0),
         };
 
         Ok(LlmResponse {
@@ -350,6 +383,13 @@ impl LlmProvider for OpenAICompatProvider {
                         }
                         if let Some(ct) = u["completion_tokens"].as_u64() {
                             usage.output_tokens = ct;
+                        }
+                        // FM-10.4: Parse cache metrics from DashScope response
+                        if let Some(crt) = u["cache_read_input_tokens"].as_u64() {
+                            usage.cache_read_input_tokens = crt;
+                        }
+                        if let Some(cct) = u["cache_creation_input_tokens"].as_u64() {
+                            usage.cache_creation_input_tokens = cct;
                         }
                     }
                 }

@@ -309,6 +309,7 @@ export function PreflightView() {
         />
         <ContractPanel
           contract={contract}
+          sessionId={sessionId ?? null}
           onRemoveItem={handleRemoveItem}
           onUpdateConfig={handleUpdateConfig}
           onSign={handleSign}

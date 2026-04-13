@@ -1,17 +1,25 @@
-import { useCallback, useEffect, useState } from "react";
-import { commands } from "../ipc";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { commands, onEvaluationComplete } from "../ipc";
 import type {
   MissionInfo,
   MissionAgentInfo,
   DiffFile,
   ReviewAction,
+  EvaluationResult,
+  AnnotationInfo,
 } from "../ipc";
 import { AgentReviewTabs } from "../components/review/AgentReviewTabs";
 import { DiffFileTree } from "../components/review/DiffFileTree";
 import { DiffViewer } from "../components/review/DiffViewer";
 import { ReviewActionBar } from "../components/review/ReviewActionBar";
 import { ReviewFilterBar, type ReviewFilter } from "../components/review/ReviewFilterBar";
+import { EvalSummaryBar } from "../components/review/EvalSummaryBar";
 import styles from "./ReviewView.module.css";
+
+interface EvalBadge {
+  score: number | null;
+  evaluating: boolean;
+}
 
 function usePrefersDark(): boolean {
   const [dark, setDark] = useState(
@@ -40,6 +48,16 @@ export function ReviewView() {
   const [error, setError] = useState<string | null>(null);
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
 
+  // FM-11: Evaluator state
+  const [evalResult, setEvalResult] = useState<EvaluationResult | null>(null);
+  const [annotations, setAnnotations] = useState<AnnotationInfo[]>([]);
+  const [fileScores, setFileScores] = useState<Record<string, number>>({});
+  const [evalBadges, setEvalBadges] = useState<Record<string, EvalBadge>>({});
+  const [evaluatingCurrent, setEvaluatingCurrent] = useState(false);
+
+  const selectedAgentIdRef = useRef(selectedAgentId);
+  selectedAgentIdRef.current = selectedAgentId;
+
   const docTheme = document.documentElement.getAttribute("data-theme");
   const editorTheme: "light" | "dark" =
     docTheme === "dark" ? "dark" : docTheme === "light" ? "light" : prefersDark ? "dark" : "light";
@@ -54,6 +72,7 @@ export function ReviewView() {
     });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Load agents + batch-fetch their eval badges
   useEffect(() => {
     if (!selectedMissionId) {
       setAgents([]);
@@ -61,7 +80,7 @@ export function ReviewView() {
       return;
     }
 
-    commands.listAgentsByMission(selectedMissionId).then((list) => {
+    commands.listAgentsByMission(selectedMissionId).then(async (list) => {
       setAgents(list);
       if (list.length > 0) {
         setSelectedAgentId(list[0].id);
@@ -70,8 +89,79 @@ export function ReviewView() {
       }
       setDiffFiles([]);
       setSelectedFilePath(null);
+
+      // Batch-load eval badges for all agents
+      const badges: Record<string, EvalBadge> = {};
+      for (const agent of list) {
+        try {
+          const r = await commands.getEvaluationResult(agent.id);
+          badges[agent.id] = {
+            score: r?.overall_score ?? null,
+            evaluating: false,
+          };
+        } catch {
+          badges[agent.id] = { score: null, evaluating: false };
+        }
+      }
+      setEvalBadges(badges);
     });
   }, [selectedMissionId]);
+
+  // Listen for evaluation-complete events (all agents, not just selected)
+  useEffect(() => {
+    const unlisten = onEvaluationComplete((payload) => {
+      // Update badge for that agent
+      setEvalBadges((prev) => ({
+        ...prev,
+        [payload.agent_id]: { score: payload.overall_score, evaluating: false },
+      }));
+
+      // If this is the currently selected agent, refresh its details
+      if (payload.agent_id === selectedAgentIdRef.current) {
+        setEvaluatingCurrent(false);
+        loadEvaluation(payload.agent_id);
+      }
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const loadEvaluation = useCallback(async (agentId: string) => {
+    try {
+      const result = await commands.getEvaluationResult(agentId);
+      setEvalResult(result);
+
+      if (result) {
+        const anns = await commands.getAnnotations({ agent_id: agentId });
+        setAnnotations(anns);
+
+        const scores: Record<string, number> = {};
+        const fileAnnotations = new Map<string, AnnotationInfo[]>();
+        for (const ann of anns) {
+          const existing = fileAnnotations.get(ann.file_path) ?? [];
+          existing.push(ann);
+          fileAnnotations.set(ann.file_path, existing);
+        }
+
+        for (const [filePath, fileAnns] of fileAnnotations) {
+          const errorCount = fileAnns.filter((a) => a.severity === "error").length;
+          const warningCount = fileAnns.filter((a) => a.severity === "warning").length;
+          const penalty = errorCount * 2 + warningCount * 0.5;
+          scores[filePath] = Math.max(0, Math.min(10, result.overall_score - penalty));
+        }
+
+        setFileScores(scores);
+      } else {
+        setAnnotations([]);
+        setFileScores({});
+      }
+    } catch {
+      setEvalResult(null);
+      setAnnotations([]);
+      setFileScores({});
+    }
+  }, []);
 
   const loadDiff = useCallback(async (agentId: string) => {
     setLoadingDiff(true);
@@ -92,13 +182,40 @@ export function ReviewView() {
     } finally {
       setLoadingDiff(false);
     }
-  }, []);
+
+    await loadEvaluation(agentId);
+
+    // Check if badge shows evaluating for this agent
+    setEvaluatingCurrent((prev) => {
+      const badge = evalBadges[agentId];
+      return badge?.evaluating ?? prev;
+    });
+  }, [loadEvaluation, evalBadges]);
 
   useEffect(() => {
     if (selectedAgentId) {
       loadDiff(selectedAgentId);
     }
   }, [selectedAgentId, loadDiff]);
+
+  const handleTriggerEvaluation = useCallback(async () => {
+    if (!selectedAgentId) return;
+    setEvaluatingCurrent(true);
+    setEvalBadges((prev) => ({
+      ...prev,
+      [selectedAgentId]: { score: null, evaluating: true },
+    }));
+    try {
+      await commands.triggerEvaluation(selectedAgentId);
+    } catch (e) {
+      setError(String(e));
+      setEvaluatingCurrent(false);
+      setEvalBadges((prev) => ({
+        ...prev,
+        [selectedAgentId]: { score: null, evaluating: false },
+      }));
+    }
+  }, [selectedAgentId]);
 
   const handleReviewAction = useCallback(
     async (action: ReviewAction, comment?: string) => {
@@ -136,6 +253,18 @@ export function ReviewView() {
     alert("Merge All is not yet implemented.");
   }, []);
 
+  const handleAnnotationStatusChange = useCallback(
+    (id: string, newStatus: string) => {
+      setAnnotations((prev) =>
+        prev.map((a) => (a.id === id ? { ...a, status: newStatus as AnnotationInfo["status"] } : a)),
+      );
+      if (selectedAgentId) {
+        commands.getEvaluationResult(selectedAgentId).then((r) => setEvalResult(r));
+      }
+    },
+    [selectedAgentId],
+  );
+
   const filteredAgents = agents.filter((a) => {
     if (reviewFilter === "all") return true;
     if (reviewFilter === "needs_review") return reviewStatuses[a.id] !== "approved";
@@ -144,6 +273,14 @@ export function ReviewView() {
   });
 
   const selectedFile = diffFiles.find((f) => f.path === selectedFilePath) ?? null;
+  const fileAnnotations = selectedFilePath
+    ? annotations.filter((a) => a.file_path === selectedFilePath)
+    : [];
+  const currentFileScore = selectedFilePath ? (fileScores[selectedFilePath] ?? null) : null;
+
+  const selectedAgent = agents.find((a) => a.id === selectedAgentId);
+  const canTriggerEval =
+    selectedAgent?.status === "completed" && !evalResult && !evaluatingCurrent;
 
   if (missions.length === 0) {
     return (
@@ -186,6 +323,15 @@ export function ReviewView() {
         </select>
       </div>
 
+      {(evalResult || evaluatingCurrent || canTriggerEval) && (
+        <EvalSummaryBar
+          result={evalResult}
+          evaluating={evaluatingCurrent}
+          onTrigger={handleTriggerEvaluation}
+          canTrigger={canTriggerEval}
+        />
+      )}
+
       <ReviewFilterBar
         filter={reviewFilter}
         onFilterChange={setReviewFilter}
@@ -201,6 +347,7 @@ export function ReviewView() {
           agents={filteredAgents}
           selectedAgentId={selectedAgentId}
           reviewStatuses={reviewStatuses}
+          evalBadges={evalBadges}
           onSelect={setSelectedAgentId}
         />
 
@@ -222,8 +369,15 @@ export function ReviewView() {
               files={diffFiles}
               selectedPath={selectedFilePath}
               onSelect={setSelectedFilePath}
+              fileScores={fileScores}
             />
-            <DiffViewer file={selectedFile} theme={editorTheme} />
+            <DiffViewer
+              file={selectedFile}
+              theme={editorTheme}
+              annotations={fileAnnotations}
+              fileScore={currentFileScore}
+              onAnnotationStatusChange={handleAnnotationStatusChange}
+            />
           </div>
         )}
 

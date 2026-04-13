@@ -96,7 +96,7 @@ describe("DAG Layout (UT-02)", () => {
     const ys = layout.nodes.map((n) => n.y).sort((a, b) => a - b);
     for (let i = 1; i < ys.length; i++) {
       const gap = ys[i] - ys[i - 1];
-      expect(gap).toBe(NODE_HEIGHT + 24);
+      expect(gap).toBe(NODE_HEIGHT + 32);
     }
   });
 

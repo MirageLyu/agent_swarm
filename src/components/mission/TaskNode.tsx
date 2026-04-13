@@ -14,6 +14,7 @@ interface TaskNodeProps {
   selected?: boolean;
   onDrag?: (taskId: string, dx: number, dy: number) => void;
   viewportScale?: number;
+  onElevate?: (taskId: string | null) => void;
 }
 
 const COMPLEXITY_COLORS: Record<string, string> = {
@@ -31,7 +32,7 @@ const STATUS_ICONS: Record<string, string> = {
   cancelled: "\u2014",
 };
 
-export function TaskNode({ task, layout, onEdit, onDelete, onSelect, selected, onDrag, viewportScale }: TaskNodeProps) {
+export function TaskNode({ task, layout, onEdit, onDelete, onSelect, selected, onDrag, viewportScale, onElevate }: TaskNodeProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [tooltip, setTooltip] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -43,11 +44,12 @@ export function TaskNode({ task, layout, onEdit, onDelete, onSelect, selected, o
     function handleClick(e: MouseEvent) {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         setMenuOpen(false);
+        onElevate?.(null);
       }
     }
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
-  }, [menuOpen]);
+  }, [menuOpen, onElevate]);
 
   const [dragging, setDragging] = useState(false);
   const nodeRef = useRef<HTMLDivElement>(null);
@@ -114,8 +116,8 @@ export function TaskNode({ task, layout, onEdit, onDelete, onSelect, selected, o
         className={`${styles.node} ${selected ? styles.selected : ""}`}
         data-status={task.status}
         style={{ cursor: dragging ? "grabbing" : "default" }}
-        onMouseEnter={() => setTooltip(true)}
-        onMouseLeave={() => { setTooltip(false); }}
+        onMouseEnter={() => { setTooltip(true); onElevate?.(task.id); }}
+        onMouseLeave={() => { setTooltip(false); if (!menuOpen) onElevate?.(null); }}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
@@ -129,7 +131,12 @@ export function TaskNode({ task, layout, onEdit, onDelete, onSelect, selected, o
             type="button"
             onClick={(e) => {
               e.stopPropagation();
-              setMenuOpen((v) => !v);
+              setMenuOpen((v) => {
+                const next = !v;
+                if (next) onElevate?.(task.id);
+                else onElevate?.(null);
+                return next;
+              });
               setTooltip(false);
             }}
           >

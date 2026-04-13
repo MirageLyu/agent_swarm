@@ -38,6 +38,11 @@ export function TaskDAG({
 }: TaskDAGProps) {
   const dagSelectedTaskId = useUiStore((s) => s.dagSelectedTaskId);
   const setDagSelectedTaskId = useUiStore((s) => s.setDagSelectedTaskId);
+  const [elevatedNodeId, setElevatedNodeId] = useState<string | null>(null);
+
+  const handleElevate = useCallback((id: string | null) => {
+    setElevatedNodeId(id);
+  }, []);
 
   const layout = useMemo(
     () => computeDagLayout(tasks, dependencies),
@@ -200,21 +205,62 @@ export function TaskDAG({
               const dy1 = fromOver && fromOrig ? fromOver.y - fromOrig.y : 0;
               const dx2 = toOver && toOrig ? toOver.x - toOrig.x : 0;
               const dy2 = toOver && toOrig ? toOver.y - toOrig.y : 0;
-              const adjustedEdge = (dx1 || dy1 || dx2 || dy2)
-                ? { ...edge, x1: edge.x1 + dx1, y1: edge.y1 + dy1, x2: edge.x2 + dx2, y2: edge.y2 + dy2 }
-                : edge;
+              if (dx1 || dy1 || dx2 || dy2) {
+                const ax1 = edge.x1 + dx1, ay1 = edge.y1 + dy1;
+                const ax2 = edge.x2 + dx2, ay2 = edge.y2 + dy2;
+                const cx = (ax1 + ax2) / 2;
+                const adjustedEdge = {
+                  ...edge,
+                  x1: ax1, y1: ay1, x2: ax2, y2: ay2,
+                  path: `M ${ax1} ${ay1} C ${cx} ${ay1}, ${cx} ${ay2}, ${ax2} ${ay2}`,
+                };
+                return (
+                  <TaskEdge
+                    key={`${edge.from}-${edge.to}`}
+                    edge={adjustedEdge}
+                    status={sourceTask?.status}
+                  />
+                );
+              }
               return (
                 <TaskEdge
                   key={`${edge.from}-${edge.to}`}
-                  edge={adjustedEdge}
+                  edge={edge}
                   status={sourceTask?.status}
                 />
               );
             })}
-            {tasks.map((task) => {
-              const nl = nodeMap.get(task.id);
-              if (!nl) return null;
-              const override = positionOverrides[task.id];
+            {/* Render non-elevated nodes first, elevated node last so its
+                tooltip/menu paints on top (SVG uses document order, not z-index) */}
+            {tasks
+              .filter((t) => t.id !== elevatedNodeId)
+              .map((task) => {
+                const nl = nodeMap.get(task.id);
+                if (!nl) return null;
+                const override = positionOverrides[task.id];
+                const effectiveLayout = override
+                  ? { ...nl, x: override.x, y: override.y }
+                  : nl;
+                return (
+                  <TaskNode
+                    key={task.id}
+                    task={task}
+                    layout={effectiveLayout}
+                    onEdit={onEditTask}
+                    onDelete={onDeleteTask}
+                    onSelect={setDagSelectedTaskId}
+                    selected={dagSelectedTaskId === task.id}
+                    onDrag={handleNodeDrag}
+                    viewportScale={transform.scale}
+                    onElevate={handleElevate}
+                  />
+                );
+              })}
+            {elevatedNodeId && (() => {
+              const task = taskMap.get(elevatedNodeId);
+              const nl = nodeMap.get(elevatedNodeId);
+              if (!task || !nl) return null;
+              const override = positionOverrides[elevatedNodeId];
               const effectiveLayout = override
                 ? { ...nl, x: override.x, y: override.y }
                 : nl;
@@ -229,9 +275,10 @@ export function TaskDAG({
                   selected={dagSelectedTaskId === task.id}
                   onDrag={handleNodeDrag}
                   viewportScale={transform.scale}
+                  onElevate={handleElevate}
                 />
               );
-            })}
+            })()}
           </svg>
         </DAGViewport>
       </div>

@@ -237,6 +237,75 @@ const MIGRATIONS: &[(&str, &str)] = &[(
             CHECK (phase IN ('exploring', 'narrowing', 'confirming', 'ready_to_sign'));
         "#,
     ),
+    (
+        "011_decision_log",
+        r#"
+        CREATE TABLE IF NOT EXISTS decision_log (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES preflight_sessions(id) ON DELETE CASCADE,
+            round INTEGER NOT NULL,
+            decision_type TEXT NOT NULL CHECK (decision_type IN ('confirmed', 'rejected', 'inferred', 'revised', 'skipped')),
+            description TEXT NOT NULL,
+            rationale TEXT NOT NULL DEFAULT '',
+            alternatives TEXT NOT NULL DEFAULT '[]',
+            contract_item_id TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_decision_log_session ON decision_log(session_id);
+        "#,
+    ),
+    (
+        "012_compaction",
+        r#"
+        ALTER TABLE preflight_sessions ADD COLUMN compacted_at INTEGER;
+        ALTER TABLE preflight_sessions ADD COLUMN compaction_summary TEXT;
+        ALTER TABLE preflight_sessions ADD COLUMN last_input_tokens INTEGER;
+        ALTER TABLE preflight_sessions ADD COLUMN last_output_tokens INTEGER;
+        ALTER TABLE preflight_sessions ADD COLUMN cumulative_input_tokens INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE preflight_sessions ADD COLUMN cumulative_output_tokens INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE preflight_sessions ADD COLUMN compaction_failures INTEGER NOT NULL DEFAULT 0;
+        "#,
+    ),
+    (
+        "013_evaluator",
+        r#"
+        CREATE TABLE IF NOT EXISTS evaluator_reviews (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+            mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+            overall_score REAL NOT NULL DEFAULT 0.0,
+            summary TEXT NOT NULL DEFAULT '',
+            contract_compliance TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS evaluator_annotations (
+            id TEXT PRIMARY KEY,
+            review_id TEXT NOT NULL REFERENCES evaluator_reviews(id) ON DELETE CASCADE,
+            agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+            file_path TEXT NOT NULL,
+            line_number INTEGER NOT NULL,
+            type TEXT NOT NULL
+                CHECK (type IN ('bug', 'style', 'performance', 'security', 'suggestion')),
+            severity TEXT NOT NULL DEFAULT 'info'
+                CHECK (severity IN ('error', 'warning', 'info')),
+            status TEXT NOT NULL DEFAULT 'open'
+                CHECK (status IN ('open', 'auto_fixed', 'revision_requested', 'dismissed')),
+            message TEXT NOT NULL,
+            suggestion TEXT,
+            auto_fixable INTEGER NOT NULL DEFAULT 0,
+            original_code TEXT,
+            fixed_code TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_evaluator_reviews_agent ON evaluator_reviews(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_evaluator_annotations_review ON evaluator_annotations(review_id);
+        CREATE INDEX IF NOT EXISTS idx_evaluator_annotations_agent ON evaluator_annotations(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_evaluator_annotations_file ON evaluator_annotations(agent_id, file_path);
+        "#,
+    ),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

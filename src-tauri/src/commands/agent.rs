@@ -387,6 +387,22 @@ pub async fn start_mission_execution(
         }
     }
 
+    // Ensure root tasks (no unmet dependencies) are promoted to 'ready'
+    let promoted = db
+        .with_conn(|conn| {
+            let rows = conn.execute(
+                "UPDATE tasks SET status = 'ready'
+                 WHERE mission_id = ?1 AND status = 'pending'
+                   AND id NOT IN (SELECT task_id FROM task_dependencies)",
+                rusqlite::params![request.mission_id],
+            )?;
+            Ok(rows as u64)
+        })
+        .map_err(|e| e.to_string())?;
+    if promoted > 0 {
+        tracing::info!("Promoted {promoted} root tasks to ready for mission {}", request.mission_id);
+    }
+
     let worktrees_dir = repo_path.join(".worktrees");
     std::fs::create_dir_all(&worktrees_dir)
         .map_err(|e| format!("Failed to create .worktrees directory: {e}"))?;

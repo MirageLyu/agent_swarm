@@ -13,6 +13,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 },
                 "required": ["path"]
             }),
+            cache_control: None,
         },
         ToolDefinition {
             name: "write_file".to_string(),
@@ -25,6 +26,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 },
                 "required": ["path", "content"]
             }),
+            cache_control: None,
         },
         ToolDefinition {
             name: "search_files".to_string(),
@@ -37,6 +39,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 },
                 "required": ["pattern"]
             }),
+            cache_control: None,
         },
         ToolDefinition {
             name: "shell_exec".to_string(),
@@ -48,6 +51,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 },
                 "required": ["command"]
             }),
+            cache_control: None,
         },
         ToolDefinition {
             name: "list_files".to_string(),
@@ -58,6 +62,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                     "path": { "type": "string", "description": "Directory path (default: workspace root)" }
                 }
             }),
+            cache_control: None,
         },
     ]
 }

@@ -16,14 +16,16 @@ const STATUS_COLORS: Record<string, { stroke: string; dash?: string }> = {
 };
 
 export function TaskEdge({ edge, status }: TaskEdgeProps) {
-  const midX = (edge.x1 + edge.x2) / 2;
   const cfg = STATUS_COLORS[status ?? "pending"] ?? STATUS_COLORS.pending;
   const markerId = status ? `arrowhead-${status}` : "arrowhead";
+
+  const d = edge.path
+    ?? `M ${edge.x1} ${edge.y1} C ${(edge.x1 + edge.x2) / 2} ${edge.y1}, ${(edge.x1 + edge.x2) / 2} ${edge.y2}, ${edge.x2} ${edge.y2}`;
 
   return (
     <g>
       <path
-        d={`M ${edge.x1} ${edge.y1} C ${midX} ${edge.y1}, ${midX} ${edge.y2}, ${edge.x2} ${edge.y2}`}
+        d={d}
         fill="none"
         stroke={cfg.stroke}
         strokeWidth={1.5}

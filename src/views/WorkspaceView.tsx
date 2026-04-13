@@ -121,6 +121,7 @@ export function WorkspaceView() {
     commands.getMissionCostSummary(filterMissionId).then(setCostSummary).catch(() => {});
   }, [filterMissionId]);
 
+  // Load events for the focused agent (focus/list mode)
   useEffect(() => {
     if (!activeAgentId) return;
     const agent = agents[activeAgentId];
@@ -138,6 +139,32 @@ export function WorkspaceView() {
       }).catch(() => {});
     }
   }, [activeAgentId, agents, hydrateEvents]);
+
+  // Auto-load events for all non-running agents so grid cards aren't empty
+  const hydratedAgentIdsRef = useRef(new Set<string>());
+  useEffect(() => {
+    const agentList = Object.values(agents);
+    for (const agent of agentList) {
+      if (
+        agent.events.length === 0 &&
+        agent.status !== "running" &&
+        !hydratedAgentIdsRef.current.has(agent.id)
+      ) {
+        hydratedAgentIdsRef.current.add(agent.id);
+        commands.getAgentEvents(agent.id).then((events) => {
+          const mapped: AgentEvent[] = events.map((e) => ({
+            id: e.id,
+            agentId: e.agent_id,
+            step: e.step,
+            kind: e.kind as AgentEvent["kind"],
+            content: e.content,
+            timestamp: e.created_at,
+          }));
+          hydrateEvents(agent.id, mapped);
+        }).catch(() => {});
+      }
+    }
+  }, [agents, hydrateEvents]);
 
   useEffect(() => {
     const unlistenEvent = onAgentEvent((payload: AgentEventPayload) => {
