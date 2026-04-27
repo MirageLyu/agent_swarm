@@ -4,6 +4,8 @@ import { useUiStore } from "../../stores/ui-store";
 import { computeDagLayout, NODE_WIDTH, NODE_HEIGHT } from "./dag-layout";
 import { TaskNode } from "./TaskNode";
 import { TaskEdge } from "./TaskEdge";
+import { ArtifactBadge } from "./ArtifactBadge";
+import { parseArtifactRefs } from "./task-meta";
 import { DagSummaryBar } from "./DagSummaryBar";
 import { DAGViewport, type ViewportTransform } from "./DAGViewport";
 import styles from "./TaskDAG.module.css";
@@ -127,6 +129,26 @@ export function TaskDAG({
     setDagSelectedTaskId(null);
   }, [setDagSelectedTaskId]);
 
+  // 所有 hooks 必须在 early return 之前调用，否则会触发 Rules of Hooks 违例。
+  // FM-15 v2.2 (S4): dependencies key=`${task_id}->${depends_on}`，
+  // 反向映射成 layout.edges 的 (from -> to)：layout.edges[i] 上 from 是 producer，
+  // to 是 consumer，所以 edge.from === dep.depends_on，edge.to === dep.task_id。
+  const artifactRefMap = useMemo(() => {
+    const m = new Map<string, string[]>();
+    for (const dep of dependencies) {
+      const refs = parseArtifactRefs(dep);
+      if (refs.length > 0) {
+        m.set(`${dep.depends_on}->${dep.task_id}`, refs);
+      }
+    }
+    return m;
+  }, [dependencies]);
+  const taskMap = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
+  const nodeMap = useMemo(
+    () => new Map(layout.nodes.map((n) => [n.id, n])),
+    [layout.nodes],
+  );
+
   if (tasks.length === 0) {
     return (
       <div className={styles.empty}>
@@ -138,8 +160,6 @@ export function TaskDAG({
     );
   }
 
-  const taskMap = new Map(tasks.map((t) => [t.id, t]));
-  const nodeMap = new Map(layout.nodes.map((n) => [n.id, n]));
   const hasOverrides = Object.keys(positionOverrides).length > 0;
 
   return (
@@ -230,11 +250,46 @@ export function TaskDAG({
                 />
               );
             })}
-            {/* Render non-elevated nodes first, elevated node last so its
-                tooltip/menu paints on top (SVG uses document order, not z-index) */}
-            {tasks
-              .filter((t) => t.id !== elevatedNodeId)
-              .map((task) => {
+            {/* FM-15 v2.2 (S4): edge 上的 ArtifactBadge——单独一层，便于 z-index 管理 */}
+            {layout.edges.map((edge) => {
+              const refs = artifactRefMap.get(`${edge.from}->${edge.to}`);
+              if (!refs || refs.length === 0) return null;
+              const fromOrig = nodeMap.get(edge.from);
+              const toOrig = nodeMap.get(edge.to);
+              const fromOver = positionOverrides[edge.from];
+              const toOver = positionOverrides[edge.to];
+              const dx1 = fromOver && fromOrig ? fromOver.x - fromOrig.x : 0;
+              const dy1 = fromOver && fromOrig ? fromOver.y - fromOrig.y : 0;
+              const dx2 = toOver && toOrig ? toOver.x - toOrig.x : 0;
+              const dy2 = toOver && toOrig ? toOver.y - toOrig.y : 0;
+              const x1 = edge.x1 + dx1;
+              const y1 = edge.y1 + dy1;
+              const x2 = edge.x2 + dx2;
+              const y2 = edge.y2 + dy2;
+              const mx = (x1 + x2) / 2;
+              const my = (y1 + y2) / 2;
+              return (
+                <ArtifactBadge
+                  key={`badge-${edge.from}-${edge.to}`}
+                  artifactRefs={refs}
+                  x={mx}
+                  y={my}
+                />
+              );
+            })}
+            {/* 所有节点统一在一个 map 里渲染：把 elevated 节点排到数组末尾，
+                让 SVG document order 把它绘制在最上层。
+                关键：必须保持单一 children slot，否则 React 在多 JSX 分支之间
+                移动节点会触发 unmount+remount，TaskNode 内部的 tooltipAnchor
+                等 useState 会被重置为初始值，导致 hover tooltip 立即消失。 */}
+            {(() => {
+              const ordered = elevatedNodeId
+                ? [
+                    ...tasks.filter((t) => t.id !== elevatedNodeId),
+                    ...tasks.filter((t) => t.id === elevatedNodeId),
+                  ]
+                : tasks;
+              return ordered.map((task) => {
                 const nl = nodeMap.get(task.id);
                 if (!nl) return null;
                 const override = positionOverrides[task.id];
@@ -255,29 +310,7 @@ export function TaskDAG({
                     onElevate={handleElevate}
                   />
                 );
-              })}
-            {elevatedNodeId && (() => {
-              const task = taskMap.get(elevatedNodeId);
-              const nl = nodeMap.get(elevatedNodeId);
-              if (!task || !nl) return null;
-              const override = positionOverrides[elevatedNodeId];
-              const effectiveLayout = override
-                ? { ...nl, x: override.x, y: override.y }
-                : nl;
-              return (
-                <TaskNode
-                  key={task.id}
-                  task={task}
-                  layout={effectiveLayout}
-                  onEdit={onEditTask}
-                  onDelete={onDeleteTask}
-                  onSelect={setDagSelectedTaskId}
-                  selected={dagSelectedTaskId === task.id}
-                  onDrag={handleNodeDrag}
-                  viewportScale={transform.scale}
-                  onElevate={handleElevate}
-                />
-              );
+              });
             })()}
           </svg>
         </DAGViewport>

@@ -311,30 +311,9 @@ pub async fn start_mission_execution(
 ) -> Result<(), String> {
     let repo_path = PathBuf::from(&request.repo_path);
 
-    // Auto-create directory if it doesn't exist
-    std::fs::create_dir_all(&repo_path)
-        .map_err(|e| format!("Failed to create directory '{}': {e}", request.repo_path))?;
-
-    // Auto git-init + initial commit if the directory isn't a git repo.
-    // Worktrees require at least one commit (HEAD must not be unborn).
-    if git2::Repository::open(&repo_path).is_err() {
-        let repo = git2::Repository::init(&repo_path)
-            .map_err(|e| format!("Failed to initialize git repository: {e}"))?;
-        let sig = repo
-            .signature()
-            .or_else(|_| git2::Signature::now("Miragenty", "miragenty@localhost"))
-            .map_err(|e| format!("Failed to create git signature: {e}"))?;
-        let tree_id = repo
-            .index()
-            .and_then(|mut idx| idx.write_tree())
-            .map_err(|e| format!("Failed to write tree: {e}"))?;
-        let tree = repo
-            .find_tree(tree_id)
-            .map_err(|e| format!("Failed to find tree: {e}"))?;
-        repo.commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[])
-            .map_err(|e| format!("Failed to create initial commit: {e}"))?;
-        tracing::info!("Auto-initialized git repo at {}", repo_path.display());
-    }
+    // FM-15 v2.2 (S2): 复用 ensure_git_repo helper（idempotent: dir/init/commit）
+    crate::git::ensure_git_repo(&repo_path)
+        .map_err(|e| format!("Failed to ensure git repo at '{}': {e}", request.repo_path))?;
 
     let db = app.state::<Database>();
 
@@ -462,7 +441,7 @@ pub fn get_default_workspace_path(
     })
 }
 
-fn slugify(s: &str) -> String {
+pub(crate) fn slugify(s: &str) -> String {
     s.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() {

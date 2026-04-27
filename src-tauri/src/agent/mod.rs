@@ -1,8 +1,18 @@
+pub mod artifacts;
 pub mod belief_state;
+pub mod chat;
+pub mod codebase_intel;
+pub mod conflict_resolver;
 mod engine;
 pub mod evaluator;
+pub mod guardrail;
 pub mod planner;
+pub mod planner_engine;
+pub mod planner_fetch;
+pub mod planner_state;
+pub mod planner_tools;
 mod registry;
+pub mod roles;
 pub mod scheduler;
 mod types;
 

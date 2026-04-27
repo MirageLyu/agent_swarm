@@ -1,4 +1,25 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+
+/**
+ * 包一层 invoke：当 Tauri IPC bridge 不可用（例如开发时直接用浏览器访问
+ * vite dev server，或者 webview 还没注入 `window.__TAURI_INTERNALS__`）时，
+ * `invoke()` 会**同步**抛出 `Cannot read properties of undefined (reading 'invoke')`。
+ *
+ * 该同步 throw 会把任何 useEffect 回调炸掉，React 在没有 ErrorBoundary
+ * 兜底时会 unmount 整棵 tree，最终表现为白屏。
+ *
+ * 这里把同步 throw 转成 rejected promise，让所有 `.catch(...)` 路径正常
+ * 工作。配合 `App.tsx` 里的 ErrorBoundary，至少 UI 不会再因 IPC 不可用而全白。
+ */
+function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    return tauriInvoke<T>(cmd, args);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(`[ipc] invoke("${cmd}") threw synchronously, IPC bridge unavailable`, err);
+    return Promise.reject(err instanceof Error ? err : new Error(String(err)));
+  }
+}
 
 export interface AppInfo {
   version: string;
@@ -32,11 +53,21 @@ export interface TaskInfo {
   assigned_agent_id: string | null;
   created_at: string;
   completed_at: string | null;
+  /** FM-15 v2.2 (S4): 角色 / 富语义字段。后端始终下发；旧 mission 默认值为 implementer。 */
+  role?: string;
+  expected_output?: string | null;
+  /** 列表型字段以原始 JSON 字符串透传（后端写入时即为 JSON），前端按需 parse。 */
+  additional_skills_json?: string | null;
+  produces_artifacts_json?: string | null;
+  consumes_artifacts_json?: string | null;
+  file_scope_hints_json?: string | null;
 }
 
 export interface DependencyInfo {
   task_id: string;
   depends_on: string;
+  /** FM-15 v2.2 (S4): 该依赖边上承载的 artifact id 列表，JSON 字符串。 */
+  artifact_refs_json?: string | null;
 }
 
 export interface MissionDetail {
@@ -45,18 +76,62 @@ export interface MissionDetail {
   dependencies: DependencyInfo[];
 }
 
+export type RepoOrigin = "from_scratch" | "from_existing";
+
 export interface CreateMissionRequest {
   title: string;
   description: string;
+  /** FM-15 v2.2 / FR-18: 必填（S3 起前端全量传值）。 */
+  repo_origin?: RepoOrigin;
+  /** from_existing 必填；from_scratch 时由后端按 mission slug 生成。 */
+  repo_path?: string;
+}
+
+export interface CreateMissionResponse extends MissionInfo {
+  repo_path: string | null;
+  repo_origin: RepoOrigin | null;
 }
 
 export interface PlanMissionRequest {
-  description: string;
+  /** FM-15 v2.2 (S2): mission-first。先 createMission 拿到 mission_id，再 plan。 */
+  mission_id: string;
 }
 
 export interface PlanMissionResponse {
   mission_id: string;
   tasks: TaskInfo[];
+  /** FM-15 v2.2: PlannerEngine 路径下产生的 session id（旧路径为 null/undefined） */
+  planner_session_id?: string | null;
+}
+
+// FM-15 v2.2 Slice 1: Planner Loop session inspection
+
+export interface PlannerSessionRow {
+  id: string;
+  mission_id: string | null;
+  kind: string;
+  contract_id: string | null;
+  repo_path: string;
+  description: string;
+  status: "running" | "completed" | "failed" | "cancelled";
+  total_steps: number;
+  total_tokens: number;
+  error_message: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface PlannerStepRow {
+  id: string;
+  session_id: string;
+  step_no: number;
+  kind: string;
+  tool_name: string | null;
+  tool_args: string | null;
+  tool_result: string | null;
+  text_content: string | null;
+  tokens_used: number;
+  created_at: string;
 }
 
 export interface UpdateTaskRequest {
@@ -246,7 +321,8 @@ export type ContractSection = "scope" | "constraints" | "exclusions" | "assumpti
 export type ContractStatus = "drafting" | "signed";
 
 export interface StartPreflightRequest {
-  description: string;
+  /** FM-15 v2.2 (S2): mission-first。先 createMission 拿到 mission_id，再 startPreflight。 */
+  mission_id: string;
 }
 
 export interface StartPreflightResponse {
@@ -399,6 +475,139 @@ export interface UpdateAnnotationStatusRequest {
   status: AnnotationStatus;
 }
 
+// ---------- FM-15 FR-02: Skills ----------
+
+export type SkillSource = "builtin" | "user" | "project";
+
+export interface SkillMeta {
+  id: string;
+  description: string;
+  /** 可选 tool 白名单（YAML frontmatter 里 `tools:`），SKILL.md 没声明就是 null */
+  tools?: string[] | null;
+  /** 可选兼容角色（YAML frontmatter 里 `compatible_roles:`） */
+  compatible_roles?: string[] | null;
+  source: SkillSource;
+  source_path: string;
+}
+
+export interface ListSkillsResponse {
+  skills: SkillMeta[];
+}
+
+// ---------- FM-15 FR-05.x: Planner fetch_url confirmation ----------
+
+export type FetchDecision = "allow_once" | "allow_session" | "deny";
+
+export interface PlannerFetchConfirmationEvent {
+  request_id: string;
+  session_id: string;
+  url: string;
+  host: string;
+  reason: string;
+}
+
+export interface ConfirmPlannerFetchRequest {
+  request_id: string;
+  decision: FetchDecision;
+}
+
+export interface ConfirmPlannerFetchResponse {
+  /** false = request_id 已经过期/超时/被其他人 resolve */
+  delivered: boolean;
+}
+
+// ---------- FM-15 FR-03: Artifacts ----------
+
+export type ArtifactType =
+  | "design_doc"
+  | "api_spec"
+  | "schema"
+  | "code_module"
+  | "test_module"
+  | "config"
+  | "docs"
+  | "report";
+
+export interface ArtifactInfo {
+  id: string;
+  mission_id: string;
+  producer_task_id: string;
+  type: ArtifactType;
+  local_name: string;
+  summary: string;
+  file_paths: string[];
+  /** false = Planner 声明，但 Coding Agent 还没产出；true = 已发布 */
+  published: boolean;
+  created_at: string;
+}
+
+export interface ListArtifactsResponse {
+  artifacts: ArtifactInfo[];
+}
+
+// ---------- FM-15 v2.2 P4-S5: Follow-up Chat ----------
+
+export type ChatMessageRole = "user" | "assistant" | "system";
+
+export interface ChatMessageInfo {
+  id: string;
+  mission_id: string;
+  role: ChatMessageRole;
+  content: string;
+  tool_calls?: string | null;
+  artifact_refs?: string | null;
+  proposed_followup_mission_id?: string | null;
+  created_at: string;
+}
+
+export interface SendChatMessageRequest {
+  mission_id: string;
+  content: string;
+  force_direct?: boolean;
+}
+
+export interface FollowupProposedSummary {
+  mission_id: string;
+  chat_message_id: string;
+  title: string;
+  rationale: string;
+  estimated_tasks: number;
+  request_summary: string;
+}
+
+export type ChatTurnStatus =
+  | "committed"
+  | "answered"
+  | "proposed"
+  | "rejected_oversize"
+  | "commit_failed"
+  | "failed"
+  | "timeout";
+
+export interface ChatTurnSummary {
+  mission_id: string;
+  user_message_id: string;
+  assistant_message_id: string;
+  status: ChatTurnStatus;
+  commit_hash?: string | null;
+  files_changed?: number | null;
+  lines_changed?: number | null;
+  error?: string | null;
+  proposed_followup?: FollowupProposedSummary | null;
+}
+
+export interface ConfirmFollowupRequest {
+  parent_mission_id: string;
+  title: string;
+  request_summary: string;
+  repo_path_override?: string;
+}
+
+export interface ConfirmFollowupResponse {
+  child_mission_id: string;
+  repo_path: string;
+}
+
 // ---------- FM-08: Mission Lifecycle ----------
 
 export interface DeleteMissionRequest {
@@ -424,12 +633,18 @@ export const commands = {
 
   // Mission CRUD
   createMission: (request: CreateMissionRequest) =>
-    invoke<MissionInfo>("create_mission", { request }),
+    invoke<CreateMissionResponse>("create_mission", { request }),
 
   listMissions: () => invoke<MissionInfo[]>("list_missions"),
 
   planMission: (request: PlanMissionRequest) =>
     invoke<PlanMissionResponse>("plan_mission", { request }),
+
+  getPlannerSession: (sessionId: string) =>
+    invoke<PlannerSessionRow | null>("get_planner_session", { sessionId }),
+
+  listPlannerSteps: (sessionId: string) =>
+    invoke<PlannerStepRow[]>("list_planner_steps", { sessionId }),
 
   getMissionDetail: (missionId: string) =>
     invoke<MissionDetail>("get_mission_detail", { missionId }),
@@ -562,4 +777,41 @@ export const commands = {
 
   updateAnnotationStatus: (request: UpdateAnnotationStatusRequest) =>
     invoke<void>("update_annotation_status", { request }),
+
+  // FM-15 FR-02: Skills
+  listSkills: () => invoke<ListSkillsResponse>("list_skills"),
+
+  // FM-15 FR-03: Artifacts
+  listMissionArtifacts: (missionId: string) =>
+    invoke<ListArtifactsResponse>("list_mission_artifacts", { missionId }),
+
+  listTaskArtifacts: (taskId: string) =>
+    invoke<ListArtifactsResponse>("list_task_artifacts", { taskId }),
+
+  // FM-15 FR-05.x: Planner fetch_url confirmation
+  confirmPlannerFetch: (request: ConfirmPlannerFetchRequest) =>
+    invoke<ConfirmPlannerFetchResponse>("confirm_planner_fetch", { request }),
+
+  // FM-15 v2.2 P4-S4: Mission delivery one-click open
+  openInEditor: (path: string, editor?: string) =>
+    invoke<void>("open_in_editor", { path, editor: editor ?? null }),
+
+  openInTerminal: (path: string) =>
+    invoke<void>("open_in_terminal", { path }),
+
+  openInFinder: (path: string) =>
+    invoke<void>("open_in_finder", { path }),
+
+  // FM-15 v2.2 P4-S5: Follow-up Chat
+  listChatMessages: (missionId: string) =>
+    invoke<ChatMessageInfo[]>("list_chat_messages", { missionId }),
+
+  sendChatMessage: (request: SendChatMessageRequest) =>
+    invoke<ChatTurnSummary>("send_chat_message", { request }),
+
+  confirmFollowupProposal: (request: ConfirmFollowupRequest) =>
+    invoke<ConfirmFollowupResponse>("confirm_followup_proposal", { request }),
+
+  rejectFollowupProposal: (missionId: string) =>
+    invoke<void>("reject_followup_proposal", { request: { mission_id: missionId } }),
 };

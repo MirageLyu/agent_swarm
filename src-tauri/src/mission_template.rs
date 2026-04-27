@@ -42,6 +42,14 @@ impl TemplateTask {
             description: self.description.clone(),
             complexity: self.complexity.clone(),
             depends_on: self.depends_on.clone(),
+            // YAML 模板 v1 schema 不带 role / expected_output / 富语义字段；
+            // FM-15 S2 之后再扩展模板 schema_version
+            expected_output: None,
+            role: None,
+            additional_skills: Vec::new(),
+            produces_artifacts: Vec::new(),
+            consumes_artifacts: Vec::new(),
+            file_scope_hints: Default::default(),
         }
     }
 }
@@ -224,6 +232,12 @@ mod tests {
                     assigned_agent_id: None,
                     created_at: "2026-01-01".into(),
                     completed_at: None,
+                    role: "implementer".into(),
+                    expected_output: None,
+                    additional_skills_json: None,
+                    produces_artifacts_json: None,
+                    consumes_artifacts_json: None,
+                    file_scope_hints_json: None,
                 })
                 .collect(),
             dependencies: deps
@@ -231,6 +245,7 @@ mod tests {
                 .map(|(tid, dep)| DependencyInfo {
                     task_id: tid.to_string(),
                     depends_on: dep.to_string(),
+                    artifact_refs_json: None,
                 })
                 .collect(),
         }

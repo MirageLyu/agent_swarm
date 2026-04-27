@@ -2356,6 +2356,7 @@ dependencies = [
  "dirs",
  "futures",
  "git2",
+ "glob",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

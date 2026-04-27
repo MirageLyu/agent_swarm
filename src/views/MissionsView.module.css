@@ -58,6 +58,21 @@
   min-width: 0;
 }
 
+.deliverySection {
+  padding: var(--space-3) var(--space-3) 0 var(--space-3);
+  flex-shrink: 0;
+  max-height: 50%;
+  overflow-y: auto;
+}
+
+.chatSection {
+  padding: var(--space-3);
+  flex-shrink: 0;
+  max-height: 50%;
+  overflow-y: auto;
+  border-top: 0.5px solid var(--color-separator);
+}
+
 .actionBar {
   display: flex;
   justify-content: flex-end;

@@ -2,8 +2,11 @@ import { useEffect } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { Titlebar } from "./components/Titlebar";
 import { CommandPalette } from "./components/CommandPalette";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { PlannerFetchConfirmDialog } from "./components/mission";
 import { useUiStore } from "./stores/ui-store";
 import { useTheme } from "./hooks/useTheme";
+import { usePlannerEventSync } from "./hooks/usePlannerEventSync";
 import { MissionsView } from "./views/MissionsView";
 import { PreflightView } from "./views/PreflightView";
 import { WorkspaceView } from "./views/WorkspaceView";
@@ -30,11 +33,16 @@ function ActiveView() {
       return <InsightsView />;
     case "settings":
       return <SettingsView />;
+    default:
+      // 兜底：activeView 一旦出现非法值不至于回退到 undefined 让根组件返回空。
+      return <MissionsView />;
   }
 }
 
 export default function App() {
   useTheme();
+  // 全局订阅 planner 事件（必须在 App 根，不能在 view 内）。
+  usePlannerEventSync();
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -48,18 +56,32 @@ export default function App() {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, []);
 
+  // 切 view 时 boundary 自动 reset，避免上一个 view 的错误把新 view 也卡死。
+  const activeView = useUiStore((s) => s.activeView);
+
   return (
     <div className={styles.shell} data-component="Shell">
       <div className={styles.sidebarSlot}>
-        <Sidebar />
+        <ErrorBoundary scope="Sidebar">
+          <Sidebar />
+        </ErrorBoundary>
       </div>
       <div className={styles.main} data-component="Main">
-        <Titlebar />
+        <ErrorBoundary scope="Titlebar">
+          <Titlebar />
+        </ErrorBoundary>
         <div className={styles.content} data-component="Content">
-          <ActiveView />
+          <ErrorBoundary key={activeView} scope={`view:${activeView}`}>
+            <ActiveView />
+          </ErrorBoundary>
         </div>
       </div>
-      <CommandPalette />
+      <ErrorBoundary scope="CommandPalette">
+        <CommandPalette />
+      </ErrorBoundary>
+      <ErrorBoundary scope="PlannerFetchConfirmDialog">
+        <PlannerFetchConfirmDialog />
+      </ErrorBoundary>
     </div>
   );
 }

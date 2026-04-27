@@ -14,6 +14,7 @@ import { useTaskStore } from "../stores/task-store";
 import { PreflightChat } from "../components/preflight/PreflightChat";
 import { ContractPanel } from "../components/preflight/ContractPanel";
 import { PreflightStatusBar } from "../components/preflight/PreflightStatusBar";
+import { PlannerLoopPanel } from "../components/mission";
 import styles from "./PreflightView.module.css";
 
 export function PreflightView() {
@@ -316,6 +317,9 @@ export function PreflightView() {
           signing={signing}
         />
       </div>
+      {signing && (
+        <PlannerLoopPanel label="Pre-flight planner" isLive />
+      )}
       <PreflightStatusBar
         convergenceScore={convergenceScore}
         phase={phase}

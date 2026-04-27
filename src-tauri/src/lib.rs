@@ -4,8 +4,10 @@ pub mod db;
 pub mod git;
 pub mod llm;
 pub mod mission_template;
+pub mod skills;
 pub mod tools;
 
+use agent::planner_fetch::PlannerFetchCoordinator;
 use agent::{AgentRegistry, Scheduler};
 use commands::ConfigManager;
 use db::Database;
@@ -37,6 +39,14 @@ pub fn run() {
 
             app.manage(AgentRegistry::new());
             app.manage(Scheduler::new());
+
+            // FM-15 v2.2 (S3-4): Planner fetch_url 用户确认协调器
+            app.manage(PlannerFetchCoordinator::new());
+
+            // FM-15 v2.2 (S3-2): 启动时初始化 skill 全局注册表（builtin + 用户级 SKILL.md）。
+            // 项目级 skill 在 plan/dispatch 时基于 mission.repo_path 临时叠加，避免串扰。
+            let skill_count = crate::skills::registry::init_global().all().len();
+            tracing::info!("[skills] global registry loaded {skill_count} skills");
 
             tracing::info!("Miragenty initialized, data_dir: {}", data_dir.display());
 
@@ -84,6 +94,12 @@ pub fn run() {
             commands::restart_mission,
             commands::export_mission_template,
             commands::import_mission_template,
+            commands::get_planner_session,
+            commands::list_planner_steps,
+            commands::list_skills,
+            commands::list_mission_artifacts,
+            commands::list_task_artifacts,
+            commands::confirm_planner_fetch,
             commands::start_preflight,
             commands::send_preflight_message,
             commands::add_contract_item,
@@ -97,6 +113,15 @@ pub fn run() {
             commands::get_evaluation_result,
             commands::get_annotations,
             commands::update_annotation_status,
+            commands::list_merge_records,
+            commands::list_task_base_conflicts,
+            commands::open_in_editor,
+            commands::open_in_terminal,
+            commands::open_in_finder,
+            commands::list_chat_messages,
+            commands::send_chat_message,
+            commands::confirm_followup_proposal,
+            commands::reject_followup_proposal,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -11,7 +11,31 @@ pub struct AppConfig {
     pub base_url: String,
     pub provider: String,
     pub max_concurrent_agents: u32,
+
+    // FM-15 v2.2 (S3-1, S3-4): Planner Agent Loop tuning + fetch_url 守卫。
+    // 缺省值与 requirements.md「新增配置项」一致；旧 config.json 反序列化时会用 default。
+    #[serde(default = "default_planner_max_steps")]
+    pub planner_max_steps: u32,
+    #[serde(default = "default_planner_timeout_seconds")]
+    pub planner_timeout_seconds: u64,
+    /// 永久白名单（顶级域名，如 `example.com`），匹配 `host` 末尾。
+    #[serde(default)]
+    pub planner_fetch_allowlist: Vec<String>,
+    #[serde(default = "default_planner_max_fetches")]
+    pub planner_max_fetches_per_session: u32,
+
+    // FM-15 v2.2 (Phase 3, FR-11): Coding Agent 步数 + 超时硬上限。
+    #[serde(default = "default_max_agent_steps")]
+    pub max_agent_steps: u32,
+    #[serde(default = "default_agent_timeout_seconds")]
+    pub agent_timeout_seconds: u64,
 }
+
+fn default_planner_max_steps() -> u32 { 80 }
+fn default_planner_timeout_seconds() -> u64 { 600 }
+fn default_planner_max_fetches() -> u32 { 10 }
+fn default_max_agent_steps() -> u32 { 50 }
+fn default_agent_timeout_seconds() -> u64 { 600 }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -21,6 +45,12 @@ impl Default for AppConfig {
             base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
             provider: "openai_compat".to_string(),
             max_concurrent_agents: 3,
+            planner_max_steps: default_planner_max_steps(),
+            planner_timeout_seconds: default_planner_timeout_seconds(),
+            planner_fetch_allowlist: Vec::new(),
+            planner_max_fetches_per_session: default_planner_max_fetches(),
+            max_agent_steps: default_max_agent_steps(),
+            agent_timeout_seconds: default_agent_timeout_seconds(),
         }
     }
 }

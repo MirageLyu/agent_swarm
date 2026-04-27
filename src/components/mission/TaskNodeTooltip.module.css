@@ -1,0 +1,45 @@
+/**
+ * Portal-rendered tooltip 样式。
+ *
+ * 注：hover 范围判定由父组件 TaskNode 通过 document mousemove + 几何 hit-test
+ * 处理，本元素不再依赖 onMouseEnter/Leave 合成事件。`pointer-events: auto`
+ * 仍保留，确保 tooltip 内部可滚动 + 可选中文本。
+ */
+.tooltip {
+  position: fixed;
+  z-index: 1000;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  box-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.06),
+    0 8px 24px rgba(0, 0, 0, 0.12);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+  color: var(--color-text-primary);
+  overflow: auto;
+  pointer-events: auto;
+  /* Firefox：纤细滚动条 */
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
+
+/* WebKit（Chrome/Safari/Tauri WebView）：极细滚动条 */
+.tooltip::-webkit-scrollbar {
+  width: 2.5px;
+  height: 2.5px;
+}
+.tooltip::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 2px;
+}
+.tooltip::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-tertiary);
+}
+.tooltip::-webkit-scrollbar-track {
+  background: transparent;
+}
+.tooltip::-webkit-scrollbar-corner {
+  background: transparent;
+}

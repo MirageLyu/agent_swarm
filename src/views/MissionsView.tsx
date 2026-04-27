@@ -1,8 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { commands } from "../ipc/commands";
-import type { TaskInfo, Complexity } from "../ipc/commands";
-import { onPlannerStream, type PlannerStreamPayload } from "../ipc/events";
+import type { TaskInfo, Complexity, CreateMissionResponse } from "../ipc/commands";
 import { useTaskStore } from "../stores/task-store";
 import { useUiStore } from "../stores/ui-store";
 import type { MissionAction } from "../components/mission/MissionListItem";
@@ -17,10 +16,11 @@ import {
 } from "../components/mission";
 import { TaskDetailPanel } from "../components/mission/TaskDetailPanel";
 import { PlanMissionDialog } from "../components/mission/PlanMissionDialog";
-import {
-  PlannerStreamPanel,
-  type PlannerStreamState,
-} from "../components/mission/PlannerStreamPanel";
+import { PlannerStreamPanel } from "../components/mission/PlannerStreamPanel";
+import { PlannerLoopPanel } from "../components/mission/PlannerLoopPanel";
+import { MissionDeliveryPanel } from "../components/mission/MissionDeliveryPanel";
+import { MissionChatPanel } from "../components/mission/MissionChatPanel";
+import { onMissionDelivered, type MissionDeliveredPayload } from "../ipc/events";
 import { Button } from "../components/ui";
 import styles from "./MissionsView.module.css";
 
@@ -43,6 +43,10 @@ export function MissionsView() {
     removeTaskLocal,
     setPlanning,
     setError,
+    livePlannerSessionId,
+    setLivePlannerSessionId,
+    plannerStream: stream,
+    setPlannerStream: setStream,
   } = useTaskStore();
 
   const setActiveView = useUiStore((s) => s.setActiveView);
@@ -55,6 +59,12 @@ export function MissionsView() {
   const [startDialogOpen, setStartDialogOpen] = useState(false);
   const [planDialogOpen, setPlanDialogOpen] = useState(false);
 
+  // FM-15 v2.2 P4-S4: mission-delivered payload 缓存，按 mission_id 索引。
+  // 在 mission 完成时显示交付面板，切换 mission 后保留——便于回头查看。
+  const [deliveredPayloads, setDeliveredPayloads] = useState<
+    Record<string, MissionDeliveredPayload>
+  >({});
+
   // FM-08 dialog state
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
@@ -62,18 +72,9 @@ export function MissionsView() {
   const [restartTargetId, setRestartTargetId] = useState<string | null>(null);
   const [restartMode, setRestartMode] = useState<"full" | "failed_only">("full");
 
-  // Planner stream state (lifted from PlanInput)
-  const [stream, setStream] = useState<PlannerStreamState>({
-    visible: false,
-    text: "",
-    tokenCount: 0,
-    elapsedMs: 0,
-    status: "streaming",
-    collapsed: false,
-  });
+  // FM-15 v2.2: planner stream state 已提到 task-store + planner 事件订阅
+  // 已提到 App 级 usePlannerEventSync。这里只保留计时器（驱动 elapsedMs 更新）。
   const streamTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const streamStartRef = useRef<number>(0);
-  const streamCancelledRef = useRef(false);
 
   const selectedMission = missions.find((m) => m.id === selectedMissionId);
 
@@ -103,67 +104,45 @@ export function MissionsView() {
     }
   }, [missions, selectedMissionId, selectMission]);
 
-  // Start/stop stream timer when planning state changes
+  // FM-15 v2.2 P4-S4: 监听 mission-delivered 事件并存进缓存，
+  // 切 view / 切 mission 不丢；多个 mission 各自独立缓存。
   useEffect(() => {
-    if (planning) {
-      streamCancelledRef.current = false;
-      streamStartRef.current = Date.now();
-      setStream({
-        visible: true,
-        text: "",
-        tokenCount: 0,
-        elapsedMs: 0,
-        status: "streaming",
-        collapsed: false,
+    let unlisten: (() => void) | null = null;
+    onMissionDelivered((payload) => {
+      setDeliveredPayloads((prev) => ({ ...prev, [payload.missionId]: payload }));
+    })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch((err) => {
+        console.warn("[MissionsView] failed to subscribe mission-delivered", err);
       });
-      streamTimerRef.current = setInterval(() => {
-        setStream((s) => ({
-          ...s,
-          elapsedMs: Date.now() - streamStartRef.current,
-        }));
-      }, 200);
-    } else {
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  // FM-15 v2.2: 计时器跟随 store 的 planning + startTime。
+  // 事件订阅在 App 级 usePlannerEventSync，这里不再处理。
+  useEffect(() => {
+    if (!planning) {
       if (streamTimerRef.current) {
         clearInterval(streamTimerRef.current);
         streamTimerRef.current = null;
       }
+      return;
     }
+    streamTimerRef.current = setInterval(() => {
+      setStream((s) => ({
+        ...s,
+        elapsedMs: s.startTime ? Date.now() - s.startTime : s.elapsedMs,
+      }));
+    }, 200);
     return () => {
       if (streamTimerRef.current) clearInterval(streamTimerRef.current);
+      streamTimerRef.current = null;
     };
-  }, [planning]);
-
-  // Subscribe to planner stream events
-  useEffect(() => {
-    const unsub = onPlannerStream((payload: PlannerStreamPayload) => {
-      if (streamCancelledRef.current) return;
-
-      if (payload.kind === "reasoning_delta" || payload.kind === "text_delta") {
-        setStream((s) => ({
-          ...s,
-          text: s.text + payload.content,
-          tokenCount: s.tokenCount + 1,
-        }));
-      } else if (payload.kind === "done") {
-        setStream((s) => ({
-          ...s,
-          status: "done",
-          elapsedMs: Date.now() - streamStartRef.current,
-        }));
-      } else if (payload.kind === "error") {
-        setStream((s) => ({
-          ...s,
-          status: "error",
-          errorMessage: payload.content,
-          elapsedMs: Date.now() - streamStartRef.current,
-        }));
-      }
-    });
-
-    return () => {
-      unsub.then((fn) => fn());
-    };
-  }, []);
+  }, [planning, setStream]);
 
   const toggleStreamCollapse = useCallback(() => {
     setStream((s) => ({ ...s, collapsed: !s.collapsed }));
@@ -171,18 +150,40 @@ export function MissionsView() {
 
   const planCancelledRef = useRef(false);
 
-  const handlePlan = useCallback(
-    async (description: string) => {
+  const handlePlanReady = useCallback(
+    async (created: CreateMissionResponse) => {
+      // FM-15 v2.2 (S2-3): mission 已在对话框 Step 1 创建。这里只负责跑 PlannerEngine。
       setPlanDialogOpen(false);
       planCancelledRef.current = false;
+
+      // 立刻把 draft mission 插入列表 + 选中，让用户感知到 mission 已存在。
+      addMission(created);
+      selectMission(created.id);
       setDetail([], []);
-      selectMission(null);
+
+      // 显式重置 planner stream——这是"开始一次新 plan"的明确动作，
+      // 不能放在 effect 里（否则切 view 回来 effect 重跑会清空已有 text）。
+      const now = Date.now();
+      setStream({
+        visible: true,
+        text: "",
+        tokenCount: 0,
+        startTime: now,
+        elapsedMs: 0,
+        status: "streaming",
+        collapsed: false,
+      });
+      setLivePlannerSessionId(null);
       setPlanning(true);
       setError(null);
       try {
-        const result = await commands.planMission({ description });
+        const result = await commands.planMission({ mission_id: created.id });
         if (planCancelledRef.current) return;
+        if (result.planner_session_id) {
+          setLivePlannerSessionId(result.planner_session_id);
+        }
         const detail = await commands.getMissionDetail(result.mission_id);
+        // 用 plan 后的 detail 覆盖（title 会被 planner 改写）
         addMission(detail.mission);
         selectMission(result.mission_id);
         setDetail(detail.tasks, detail.dependencies);
@@ -194,33 +195,45 @@ export function MissionsView() {
         setPlanning(false);
       }
     },
-    [addMission, selectMission, setDetail, setPlanning, setError],
+    [
+      addMission,
+      selectMission,
+      setDetail,
+      setPlanning,
+      setError,
+      setStream,
+      setLivePlannerSessionId,
+    ],
   );
 
   const handlePlanCancel = useCallback(() => {
     planCancelledRef.current = true;
-    streamCancelledRef.current = true;
+    // status="cancelled" 让全局事件订阅在收到后续 done/error 时不再覆盖回 done/error。
     setStream((s) => ({
       ...s,
       status: "cancelled",
-      elapsedMs: Date.now() - streamStartRef.current,
+      elapsedMs: s.startTime ? Date.now() - s.startTime : s.elapsedMs,
     }));
     setPlanning(false);
-  }, [setPlanning]);
+  }, [setPlanning, setStream]);
 
-  const handlePreflight = useCallback(
-    async (description: string) => {
+  const handlePreflightReady = useCallback(
+    async (created: CreateMissionResponse) => {
+      // FM-15 v2.2 (S2-3): mission 已存在，这里只 startPreflight。
       setPlanDialogOpen(false);
       setError(null);
+
+      addMission(created);
+
       try {
-        const result = await commands.startPreflight({ description });
+        const result = await commands.startPreflight({ mission_id: created.id });
         setActivePreflight(result.mission_id, result.session_id);
         setActiveView("preflight");
       } catch (e) {
         setError(String(e));
       }
     },
-    [setActivePreflight, setActiveView, setError],
+    [addMission, setActivePreflight, setActiveView, setError],
   );
 
   const handleEditSave = useCallback(
@@ -496,6 +509,14 @@ export function MissionsView() {
                   onToggleCollapse={toggleStreamCollapse}
                   fullHeight
                 />
+                {/* FM-15 v2.2 (S3-6): 即便 plan_mission 还没返回 session_id，
+                    PlannerLoopPanel 也会从首个 planner-step 事件里自动发现并挂上
+                    后续步骤——避免几十秒"什么都看不见"的体感。 */}
+                <PlannerLoopPanel
+                  sessionId={livePlannerSessionId ?? undefined}
+                  isLive
+                />
+                
                 <div className={styles.cancelBar}>
                   <Button variant="ghost" size="sm" onClick={handlePlanCancel} style={{ color: "var(--color-error)" }}>
                     Cancel Planning
@@ -503,15 +524,40 @@ export function MissionsView() {
                 </div>
               </div>
             ) : (
-              <TaskDAG
-                tasks={tasks}
-                dependencies={dependencies}
-                onEditTask={setEditingTask}
-                onDeleteTask={handleDeleteTask}
-                onAddTask={() => setAddDialogOpen(true)}
-                focusNodeId={focusNodeId}
-                onFocusHandled={() => setFocusNodeId(null)}
-              />
+              <>
+                {selectedMission &&
+                selectedMission.status === "completed" &&
+                deliveredPayloads[selectedMission.id] ? (
+                  <div className={styles.deliverySection}>
+                    <MissionDeliveryPanel
+                      payload={deliveredPayloads[selectedMission.id]}
+                    />
+                  </div>
+                ) : null}
+                <TaskDAG
+                  tasks={tasks}
+                  dependencies={dependencies}
+                  onEditTask={setEditingTask}
+                  onDeleteTask={handleDeleteTask}
+                  onAddTask={() => setAddDialogOpen(true)}
+                  focusNodeId={focusNodeId}
+                  onFocusHandled={() => setFocusNodeId(null)}
+                />
+                {selectedMission &&
+                (selectedMission.status === "completed" ||
+                  selectedMission.status === "failed") ? (
+                  <div className={styles.chatSection}>
+                    <MissionChatPanel
+                      missionId={selectedMission.id}
+                      enabled
+                      onFollowupCreated={(childId) => {
+                        // 跳到子 mission 并自动启动 planner
+                        selectMission(childId);
+                      }}
+                    />
+                  </div>
+                ) : null}
+              </>
             )}
           </div>
 
@@ -543,8 +589,8 @@ export function MissionsView() {
       <PlanMissionDialog
         open={planDialogOpen}
         onClose={() => setPlanDialogOpen(false)}
-        onPlan={handlePlan}
-        onPreflight={handlePreflight}
+        onPlanReady={handlePlanReady}
+        onPreflightReady={handlePreflightReady}
       />
 
       <TaskEditDialog

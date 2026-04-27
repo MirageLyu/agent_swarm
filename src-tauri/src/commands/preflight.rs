@@ -5,7 +5,7 @@ use tauri::Manager;
 use uuid::Uuid;
 
 use crate::agent::belief_state::{self, PreflightBeliefState, SlotStatus};
-use crate::agent::planner::{self, ContractData, PreflightAction, PreflightChoice, DecisionEntry, Alternative};
+use crate::agent::planner::{self, PreflightAction, PreflightChoice, DecisionEntry, Alternative};
 use crate::commands::mission::{build_provider, PlanMissionResponse, TaskInfo};
 use crate::llm::{ContentBlock, Message, MessageRole, TokenUsage};
 
@@ -13,7 +13,9 @@ use crate::llm::{ContentBlock, Message, MessageRole, TokenUsage};
 
 #[derive(Debug, Deserialize)]
 pub struct StartPreflightRequest {
-    pub description: String,
+    /// FM-15 v2.2 (S2): mission-first。mission 必须已通过 `create_mission`
+    /// 创建（含 repo_origin / repo_path）。
+    pub mission_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -565,6 +567,45 @@ async fn preflight_with_continuation(
         crate::llm::registry::get_capabilities(provider_name, model)
     };
 
+    // FM-15 v2.2 (S2 / FR-PF-01): from_existing 模式下装载只读探索工具，
+    // 让 Pre-flight LLM 可以浏览仓库再发问。
+    let mission_repo: (Option<String>, Option<String>) = db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT repo_origin, repo_path FROM missions WHERE id = ?",
+                [mission_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .unwrap_or((None, None));
+
+    let explorer: Option<crate::agent::planner_tools::ReadOnlyExplorer> = match mission_repo {
+        (Some(ref origin), Some(ref path)) if origin == "from_existing" => {
+            let p = std::path::PathBuf::from(path);
+            if p.is_dir() {
+                Some(crate::agent::planner_tools::ReadOnlyExplorer::new(p))
+            } else {
+                tracing::warn!(
+                    "Pre-flight repo_path '{}' is not a directory; explorer disabled",
+                    path
+                );
+                None
+            }
+        }
+        _ => None,
+    };
+    let extra_tools = if explorer.is_some() {
+        crate::agent::planner_tools::ReadOnlyExplorer::tool_definitions()
+    } else {
+        Vec::new()
+    };
+
     for iteration in 0..MAX_TOOL_CONTINUATION_ROUNDS {
         // Load current state for dynamic prompt
         let (contract_items, belief_state_snapshot, rejected_alts) = db.with_conn(|conn| {
@@ -701,6 +742,7 @@ async fn preflight_with_continuation(
         let (response, usage) = match planner::preflight_chat(
             provider.clone(), model, mode, history.clone(), session_id, app,
             &contract_items, &belief_state_snapshot, &rejected_alts, &caps,
+            &extra_tools,
         ).await {
             Ok(r) => r,
             Err(e) => {
@@ -724,6 +766,28 @@ async fn preflight_with_continuation(
         let has_suggest_sign = actions.iter().any(|a| matches!(a, PreflightAction::SuggestSign { .. }));
         let has_tool_calls = !response.tool_calls.is_empty();
 
+        // FM-15 v2.2 (S2 / FR-PF-01): 先消化 ReadOnlyExplorer 的 list_directory / read_file
+        // 工具调用，把 tool_result 拼到主流程的 tool_result_msgs 里，否则 LLM 收不到回执。
+        let mut explorer_tool_results: Vec<serde_json::Value> = Vec::new();
+        if let Some(ref ex) = explorer {
+            for tc in &response.tool_calls {
+                if matches!(tc.name.as_str(), "list_directory" | "read_file") {
+                    let output = ex.execute(&tc.name, &tc.arguments).await
+                        .expect("ReadOnlyExplorer must handle list_directory / read_file");
+                    explorer_tool_results.push(json!({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": output.content,
+                    }));
+                    tracing::info!(
+                        tool = %tc.name,
+                        is_error = output.is_error,
+                        "preflight readonly explorer call"
+                    );
+                }
+            }
+        }
+
         // Process tool_call side effects + save token usage
         let process_result = db.with_conn(|conn| {
             let mut belief_state = load_belief_state(conn, session_id);
@@ -731,9 +795,10 @@ async fn preflight_with_continuation(
                 belief_state.increment_round();
             }
 
-            let tool_results = process_tool_actions(
+            let mut tool_results = process_tool_actions(
                 conn, mission_id, &actions, &mut belief_state, app, session_id,
             );
+            tool_results.extend(explorer_tool_results);
 
             belief_state.compute_convergence_score();
             belief_state.update_phase();
@@ -869,14 +934,34 @@ pub async fn start_preflight(
     let (provider, model) = build_provider(&app)?;
 
     let db = app.state::<crate::db::Database>();
+    let mission_id = request.mission_id.clone();
 
-    let mission_id = Uuid::new_v4().to_string();
+    // FM-15 v2.2 (S2): mission 必须已存在，从中读 description。
+    let (description, status): (String, String) = db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT description, status FROM missions WHERE id = ?",
+                [&mission_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(|e| anyhow::anyhow!("Mission {mission_id} not found: {e}"))
+        })
+        .map_err(|e| e.to_string())?;
+
+    if !matches!(status.as_str(), "draft" | "preflight") {
+        return Err(format!(
+            "Cannot start preflight on mission in status '{status}'"
+        ));
+    }
+
     let session_id = Uuid::new_v4().to_string();
 
     db.with_conn(|conn| {
+        // 把 mission 状态推进到 preflight
         conn.execute(
-            "INSERT INTO missions (id, title, description, status) VALUES (?, ?, ?, 'preflight')",
-            rusqlite::params![mission_id, "Pre-flight", request.description],
+            "UPDATE missions SET status = 'preflight', updated_at = datetime('now')
+             WHERE id = ? AND status = 'draft'",
+            [&mission_id],
         )?;
 
         get_or_create_contract(conn, &mission_id)?;
@@ -896,7 +981,7 @@ pub async fn start_preflight(
         content: vec![ContentBlock::Text {
             text: format!(
                 "The user wants to build the following:\n\n{}\n\nStart the requirements clarification process.",
-                request.description
+                description
             ),
         }],
         cache_control: None,
@@ -1279,110 +1364,79 @@ pub async fn sign_contract(
     let (provider, model) = build_provider(&app)?;
     let db = app.state::<crate::db::Database>();
 
-    let contract_data = db
+    // FM-15 v2.2 (S2 / FR-PF-02): 第 1 步 —— 把合同签字 + 校验 + 拿元数据
+    let (contract_id, description, repo_path): (String, String, String) = db
         .with_conn(|conn| {
-            let contract_id = get_or_create_contract(conn, &mission_id)?;
+            let cid = get_or_create_contract(conn, &mission_id)?;
 
             let scope_count: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM contract_items WHERE contract_id = ? AND section = 'scope'",
-                [&contract_id],
+                [&cid],
                 |row| row.get(0),
             )?;
-
             if scope_count == 0 {
                 anyhow::bail!("Cannot sign contract: at least one Scope item is required");
             }
 
             conn.execute(
-                "UPDATE mission_contracts SET status = 'signed', signed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
-                [&contract_id],
+                "UPDATE mission_contracts SET status = 'signed', signed_at = datetime('now'),
+                 updated_at = datetime('now') WHERE id = ?",
+                [&cid],
             )?;
 
-            let mut stmt = conn.prepare(
-                "SELECT section, text FROM contract_items WHERE contract_id = ? ORDER BY created_at ASC",
-            )?;
-
-            let mut scope = vec![];
-            let mut constraints = vec![];
-            let mut exclusions = vec![];
-            let mut assumptions = vec![];
-
-            let rows = stmt.query_map([&contract_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-
-            for row in rows {
-                let (section, text) = row?;
-                match section.as_str() {
-                    "scope" => scope.push(text),
-                    "constraints" => constraints.push(text),
-                    "exclusions" => exclusions.push(text),
-                    "assumptions" => assumptions.push(text),
-                    _ => {}
-                }
-            }
-
-            let (budget, qt, dur): (Option<f64>, Option<f64>, Option<f64>) = conn.query_row(
-                "SELECT budget_usd, quality_threshold, max_duration_hours FROM mission_contracts WHERE id = ?",
-                [&contract_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
-
-            let description: String = conn.query_row(
-                "SELECT description FROM missions WHERE id = ?",
+            let (description, repo_path): (String, Option<String>) = conn.query_row(
+                "SELECT description, repo_path FROM missions WHERE id = ?",
                 [&mission_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-
-            Ok((ContractData {
-                scope,
-                constraints,
-                exclusions,
-                assumptions,
-                budget_usd: budget,
-                quality_threshold: qt,
-                max_duration_hours: dur,
-            }, description))
+            let repo_path = repo_path.ok_or_else(|| anyhow::anyhow!(
+                "Mission has no repo_path; create it via FR-18 create_mission first"
+            ))?;
+            Ok((cid, description, repo_path))
         })
         .map_err(|e| e.to_string())?;
 
-    let (contract, description) = contract_data;
-    let system_prompt = planner::build_contract_aware_planner_prompt(&contract);
+    let repo_path_buf = std::path::PathBuf::from(&repo_path);
+    if !repo_path_buf.is_dir() {
+        return Err(format!("Mission repo_path '{repo_path}' is not a directory"));
+    }
 
-    let messages = vec![crate::llm::Message {
-        role: MessageRole::User,
-        content: vec![ContentBlock::Text {
-            text: description.clone(),
-        }],
-        cache_control: None,
-    }];
+    // FM-15 v2.2 (S2 / FR-PF-02): 第 2 步 —— 用 PlannerEngine（kind=preflight）跑 Agent Loop。
+    // contract 内容由 PlannerEngine 通过 `load_contract_dump` 注入到首条 user message。
+    let engine = crate::agent::planner_engine::PlannerEngine::new(
+        provider.clone(),
+        model.clone(),
+        repo_path_buf,
+        app.clone(),
+    );
+    let outcome = engine
+        .run_with(crate::agent::planner_engine::PlannerRunRequest {
+            kind: crate::agent::planner_engine::PlannerKind::Preflight,
+            description: &description,
+            mission_id: Some(&mission_id),
+            contract_id: Some(&contract_id),
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    let planner_output = outcome.output;
+    let planner_session_id = outcome.session_id.clone();
 
-    let request = crate::llm::LlmRequest {
-        model: model.clone(),
-        system: Some(system_prompt),
-        messages,
-        tools: vec![],
-        max_tokens: 4096,
-    };
-
-    tracing::info!("Contract-aware planner: calling LLM model={model}");
-
-    let text = tokio::time::timeout(
-        std::time::Duration::from_secs(90),
-        stream_planner_call_for_contract(provider.clone(), &request, &app),
-    )
-    .await
-    .map_err(|_| "Planning timed out".to_string())?
-    .map_err(|e| e.to_string())?;
-
-    let planner_output = planner::parse_and_validate(&text).map_err(|e| e.to_string())?;
-
+    // 第 3 步 —— 落库 tasks + 升 mission 到 planned + 根任务 ready
     let tasks = db
         .with_conn(|conn| {
             conn.execute(
-                "UPDATE missions SET title = ?, status = 'planned', updated_at = datetime('now') WHERE id = ?",
+                "UPDATE missions SET title = ?, status = 'planned', updated_at = datetime('now')
+                 WHERE id = ?",
                 rusqlite::params![planner_output.mission_title, mission_id],
             )?;
+
+            // 重 sign 时清掉旧 tasks（防止重复 sign 出现脏数据）
+            conn.execute(
+                "DELETE FROM task_dependencies WHERE task_id IN
+                    (SELECT id FROM tasks WHERE mission_id = ?)",
+                [&mission_id],
+            )?;
+            conn.execute("DELETE FROM tasks WHERE mission_id = ?", [&mission_id])?;
 
             let mut task_infos = Vec::new();
             let mut planner_id_to_db_id: std::collections::HashMap<String, String> =
@@ -1392,11 +1446,60 @@ pub async fn sign_contract(
                 let task_id = Uuid::new_v4().to_string();
                 planner_id_to_db_id.insert(pt.id.clone(), task_id.clone());
 
+                // FM-15 v2.2 (S3-5): 富语义字段统一落库（与 Quick Plan 路径同构）。
+                let consumes_translated: Vec<String> = pt
+                    .consumes_artifacts
+                    .iter()
+                    .map(|c| {
+                        if let Some((producer, local)) = c.split_once('.') {
+                            if let Some(db) = planner_id_to_db_id.get(producer) {
+                                return format!("{db}.{local}");
+                            }
+                        }
+                        c.clone()
+                    })
+                    .collect();
+                let additional_skills_json =
+                    serde_json::to_string(&pt.additional_skills).unwrap_or_else(|_| "[]".into());
+                let consumes_json =
+                    serde_json::to_string(&consumes_translated).unwrap_or_else(|_| "[]".into());
+                let produces_json =
+                    serde_json::to_string(&pt.produces_artifacts).unwrap_or_else(|_| "[]".into());
+                let file_scope_json = serde_json::to_string(&pt.file_scope_hints)
+                    .unwrap_or_else(|_| "{\"definite\":[],\"possible\":[]}".into());
+
                 conn.execute(
-                    "INSERT INTO tasks (id, mission_id, title, description, complexity, status)
-                     VALUES (?, ?, ?, ?, ?, 'pending')",
-                    rusqlite::params![task_id, mission_id, pt.title, pt.description, pt.complexity],
+                    "INSERT INTO tasks (id, mission_id, title, description, complexity, status, role, expected_output,
+                        additional_skills, consumes_artifacts, produces_artifacts, file_scope_hints)
+                     VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
+                    rusqlite::params![
+                        task_id,
+                        mission_id,
+                        pt.title,
+                        pt.description,
+                        pt.complexity,
+                        pt.effective_role(),
+                        pt.effective_expected_output(),
+                        additional_skills_json,
+                        consumes_json,
+                        produces_json,
+                        file_scope_json,
+                    ],
                 )?;
+
+                for decl in &pt.produces_artifacts {
+                    crate::agent::artifacts::record_declaration(
+                        conn,
+                        &mission_id,
+                        &task_id,
+                        decl,
+                    )
+                    .map_err(|e| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(
+                            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
+                        ))
+                    })?;
+                }
 
                 task_infos.push(TaskInfo {
                     id: task_id,
@@ -1408,6 +1511,15 @@ pub async fn sign_contract(
                     assigned_agent_id: None,
                     created_at: String::new(),
                     completed_at: None,
+                    role: pt.effective_role().to_string(),
+                    expected_output: {
+                        let eo = pt.effective_expected_output().to_string();
+                        if eo.is_empty() { None } else { Some(eo) }
+                    },
+                    additional_skills_json: Some(additional_skills_json.clone()),
+                    produces_artifacts_json: Some(produces_json.clone()),
+                    consumes_artifacts_json: Some(consumes_json.clone()),
+                    file_scope_hints_json: Some(file_scope_json.clone()),
                 });
             }
 
@@ -1415,15 +1527,28 @@ pub async fn sign_contract(
                 let task_db_id = &planner_id_to_db_id[&pt.id];
                 for dep_planner_id in &pt.depends_on {
                     if let Some(dep_db_id) = planner_id_to_db_id.get(dep_planner_id) {
+                        let plan_prefix = format!("{}.", dep_planner_id);
+                        let refs: Vec<String> = pt
+                            .consumes_artifacts
+                            .iter()
+                            .filter(|c| c.starts_with(&plan_prefix))
+                            .map(|c| {
+                                let local = c.trim_start_matches(&plan_prefix);
+                                format!("{dep_db_id}.{local}")
+                            })
+                            .collect();
+                        let refs_json =
+                            serde_json::to_string(&refs).unwrap_or_else(|_| "[]".into());
                         conn.execute(
-                            "INSERT INTO task_dependencies (task_id, depends_on) VALUES (?, ?)",
-                            rusqlite::params![task_db_id, dep_db_id],
+                            "INSERT INTO task_dependencies (task_id, depends_on, artifact_refs)
+                             VALUES (?, ?, ?)",
+                            rusqlite::params![task_db_id, dep_db_id, refs_json],
                         )?;
                     }
                 }
             }
 
-            // Promote root tasks (no dependencies) to 'ready'
+            // 根任务（无依赖）直接 promote 到 ready —— sign_contract 视为隐式 confirm
             conn.execute(
                 "UPDATE tasks SET status = 'ready'
                  WHERE mission_id = ?1 AND status = 'pending'
@@ -1448,69 +1573,18 @@ pub async fn sign_contract(
         })
         .map_err(|e| e.to_string())?;
 
-    planner::emit_planner_event_pub(&app, "done", "");
+    // 关联 planner_session 与 mission
+    let _ = db.with_conn(|conn| {
+        crate::db::queries::link_planner_session_to_mission(conn, &planner_session_id, &mission_id)
+    });
 
     Ok(PlanMissionResponse {
         mission_id,
         tasks,
+        planner_session_id: Some(planner_session_id),
     })
 }
 
-async fn stream_planner_call_for_contract(
-    provider: Arc<dyn crate::llm::LlmProvider>,
-    request: &crate::llm::LlmRequest,
-    app: &tauri::AppHandle,
-) -> Result<String, String> {
-    use crate::llm::{StreamChunk, StreamChunkKind};
-    use tokio::sync::mpsc;
-
-    let (tx, mut rx) = mpsc::channel::<StreamChunk>(256);
-
-    let provider_clone = provider.clone();
-    let request_clone = crate::llm::LlmRequest {
-        model: request.model.clone(),
-        system: request.system.clone(),
-        messages: request.messages.clone(),
-        tools: request.tools.clone(),
-        max_tokens: request.max_tokens,
-    };
-
-    let stream_handle = tokio::spawn(async move {
-        provider_clone.stream_chat(&request_clone, tx).await
-    });
-
-    let app_clone = app.clone();
-    let mut full_text = String::new();
-
-    while let Some(chunk) = rx.recv().await {
-        match chunk.kind {
-            StreamChunkKind::TextDelta => {
-                full_text.push_str(&chunk.content);
-                planner::emit_planner_event_pub(&app_clone, "text_delta", &chunk.content);
-            }
-            StreamChunkKind::ReasoningDelta => {
-                planner::emit_planner_event_pub(&app_clone, "reasoning_delta", &chunk.content);
-            }
-            _ => {}
-        }
-    }
-
-    let response = tokio::time::timeout(std::time::Duration::from_secs(5), stream_handle)
-        .await
-        .map_err(|_| "Stream handle timed out".to_string())?
-        .map_err(|e| format!("Stream task failed: {e}"))?
-        .map_err(|e| e.to_string())?;
-
-    if full_text.is_empty() {
-        full_text = response
-            .content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<String>();
-    }
-
-    Ok(full_text)
-}
+// FM-15 v2.2 (S2 / FR-PF-02): `stream_planner_call_for_contract` 已删除。
+// 旧 sign_contract 的单次 LLM 调用被 PlannerEngine 替代；text_delta 透传由 PlannerEngine
+// 内部走 `planner-stream` 事件实现，前端 `PlannerStreamPanel` 不变。

@@ -113,19 +113,22 @@
   border-radius: 3px;
 }
 
-.tooltip {
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 0;
-  z-index: 100;
-  background: var(--color-bg-elevated);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  padding: var(--space-3);
-  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.06), 0 4px 16px rgba(0, 0, 0, 0.1);
-  width: 240px;
-  pointer-events: none;
+.artifactPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 10px;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-secondary);
+  padding: 1px 6px;
+  border-radius: 999px;
+  cursor: help;
 }
+
+/* `.tooltip` 已迁移到 TaskNodeTooltip.module.css —— 通过 React Portal 渲染到
+ * `document.body`，避免被 SVG <foreignObject> 与 DAG 容器 overflow 裁剪，并支持
+ * 鼠标悬停在 tooltip 上滚动查看长内容。下面这些 `.tooltipTitle / Desc / ...` 子样式
+ * 由 portal 渲染的 children 引用，CSS Modules 哈希仍然来自本文件，无需迁移。 */
 
 .tooltipTitle {
   font-size: var(--text-sm);
@@ -145,6 +148,72 @@
   font-size: var(--text-xs);
   color: var(--color-text-tertiary);
   margin: 0;
+}
+
+.tooltipHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1);
+  flex-wrap: wrap;
+}
+
+.tooltipHeader .tooltipTitle {
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.tooltipExpected {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  margin: 0 0 var(--space-2) 0;
+  line-height: 1.4;
+  font-style: italic;
+}
+
+.tooltipChips {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: var(--space-2) 0;
+  padding: var(--space-2);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.tooltipChipRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.tooltipLabel {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-tertiary);
+  font-weight: 600;
+  margin-right: 2px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--color-text-secondary);
+  background: var(--color-bg-secondary);
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.chipMuted {
+  color: var(--color-text-tertiary);
+  margin-left: 2px;
 }
 
 .menu {
