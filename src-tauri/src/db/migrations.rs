@@ -306,6 +306,183 @@ const MIGRATIONS: &[(&str, &str)] = &[(
         CREATE INDEX IF NOT EXISTS idx_evaluator_annotations_file ON evaluator_annotations(agent_id, file_path);
         "#,
     ),
+    // FM-15 v2.2 Slice 1: tasks 新字段（S1 范围内只加 Planner Loop 必需字段；
+    // artifact/file_hints/guardrail/incremental-worktree 等列在 S3/S4 通过后续迁移补齐）
+    // 注：missions.repo_path 已由 008_mission_repo_path 添加，此处不重复
+    (
+        "014_fm15_s1_tasks_role",
+        r#"
+        ALTER TABLE tasks ADD COLUMN role TEXT NOT NULL DEFAULT 'implementer';
+        ALTER TABLE tasks ADD COLUMN expected_output TEXT NOT NULL DEFAULT '';
+        "#,
+    ),
+    // FM-15 v2.2 Slice 1: planner_sessions / planner_steps （Pre-flight 共用预留 kind/contract_id 列）
+    (
+        "015_fm15_s1_planner_loop",
+        r#"
+        CREATE TABLE IF NOT EXISTS planner_sessions (
+            id TEXT PRIMARY KEY,
+            mission_id TEXT REFERENCES missions(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL DEFAULT 'planner'
+                CHECK (kind IN ('planner', 'preflight')),
+            contract_id TEXT,
+            repo_path TEXT NOT NULL,
+            description TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'running'
+                CHECK (status IN ('running', 'completed', 'failed', 'cancelled')),
+            total_steps INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            completed_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_planner_sessions_mission ON planner_sessions(mission_id);
+        CREATE INDEX IF NOT EXISTS idx_planner_sessions_kind ON planner_sessions(kind);
+
+        CREATE TABLE IF NOT EXISTS planner_steps (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES planner_sessions(id) ON DELETE CASCADE,
+            step_no INTEGER NOT NULL,
+            kind TEXT NOT NULL
+                CHECK (kind IN ('tool_call', 'tool_result', 'thinking', 'text')),
+            tool_name TEXT,
+            tool_args TEXT,
+            tool_result TEXT,
+            text_content TEXT,
+            tokens_used INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_planner_steps_session ON planner_steps(session_id, step_no);
+        "#,
+    ),
+    // FM-15 v2.2 Slice 2 (FR-18): Mission 创建必须声明 repo_origin（from_scratch / from_existing）。
+    // 旧 mission 没有该字段 → 允许 NULL，作为「legacy」兜底；新建 mission 必填，
+    // create_mission 命令负责拒绝缺失值。
+    (
+        "016_fm15_s2_mission_repo_origin",
+        r#"
+        ALTER TABLE missions ADD COLUMN repo_origin TEXT
+            CHECK (repo_origin IS NULL OR repo_origin IN ('from_scratch', 'from_existing'));
+        "#,
+    ),
+    // FM-15 v2.2 Slice 3 (S3-1):
+    // - tasks 扩展 FR-04 字段（additional_skills / file_scope_hints / consumes_artifacts /
+    //   produces_artifacts / guardrails / *_branch / completion_summary 等），全部 NOT NULL DEFAULT
+    //   以保持向后兼容。
+    // - task_dependencies 增加 artifact_refs（FR-04 边语义）。
+    // - 新增 artifacts 表（FR-03）；S3 阶段只用「declare-only」即 `publish_artifact` 工具，
+    //   实际 file 校验留待 Phase 3 guardrail。
+    // - 新增 planner_session_fetch_grants 表（FR-05.6 single-session 临时白名单）。
+    (
+        "017_fm15_s3_artifacts_skills_fetch",
+        r#"
+        ALTER TABLE tasks ADD COLUMN additional_skills TEXT NOT NULL DEFAULT '[]';
+        ALTER TABLE tasks ADD COLUMN file_scope_hints TEXT NOT NULL DEFAULT '{"definite":[],"possible":[]}';
+        ALTER TABLE tasks ADD COLUMN consumes_artifacts TEXT NOT NULL DEFAULT '[]';
+        ALTER TABLE tasks ADD COLUMN produces_artifacts TEXT NOT NULL DEFAULT '[]';
+        ALTER TABLE tasks ADD COLUMN guardrails TEXT NOT NULL DEFAULT '[]';
+        ALTER TABLE tasks ADD COLUMN guardrail_retry_budget INTEGER NOT NULL DEFAULT 3;
+        ALTER TABLE tasks ADD COLUMN guardrail_retry_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE tasks ADD COLUMN actual_files_modified TEXT NOT NULL DEFAULT '[]';
+        ALTER TABLE tasks ADD COLUMN completion_summary TEXT;
+        ALTER TABLE tasks ADD COLUMN merge_strategy_hint TEXT;
+        ALTER TABLE tasks ADD COLUMN agent_branch TEXT;
+
+        ALTER TABLE task_dependencies ADD COLUMN artifact_refs TEXT NOT NULL DEFAULT '[]';
+
+        CREATE TABLE IF NOT EXISTS artifacts (
+            id TEXT PRIMARY KEY,
+            mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+            producer_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            type TEXT NOT NULL
+                CHECK (type IN ('design_doc','api_spec','schema','code_module','test_module','config','docs','report')),
+            local_name TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '',
+            file_paths TEXT NOT NULL DEFAULT '[]',
+            published INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_artifacts_mission ON artifacts(mission_id);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_producer ON artifacts(producer_task_id);
+
+        CREATE TABLE IF NOT EXISTS planner_session_fetch_grants (
+            session_id TEXT NOT NULL REFERENCES planner_sessions(id) ON DELETE CASCADE,
+            domain TEXT NOT NULL,
+            granted_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (session_id, domain)
+        );
+        "#,
+    ),
+    // FM-15 Phase 2 (FR-07 / FR-08 / FR-12 / FR-13): 增量 worktree + 三层合并 + 主分支检测。
+    //
+    // 一次性把 Phase 2 全部 schema 落地（避免 S1/S2/S3 各自 migration 颗粒度过细）：
+    // - missions.main_branch         : 主分支名（NULL = 启动时探测后回填）— FR-12
+    // - missions.use_incremental_worktree : 兼容性开关，默认 1（开启），可在创建时关闭走旧逻辑 — FR-07.6
+    // - missions.merge_strategy      : 合并策略默认值，'theirs' | 'ours' | 'llm_resolve'；
+    //                                  Phase 2 只实现 L1+L2，'llm_resolve' 在 Phase 3 接 LLM 解冲突
+    // - task_base_conflicts          : 增量 worktree 构建 base 时的冲突记录 — FR-07.1
+    // - merge_records                : 三层合并最终决策与降级原因 — FR-08.3
+    (
+        "018_fm15_p2_incremental_worktree",
+        r#"
+        ALTER TABLE missions ADD COLUMN main_branch TEXT;
+        ALTER TABLE missions ADD COLUMN use_incremental_worktree INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE missions ADD COLUMN merge_strategy TEXT NOT NULL DEFAULT 'theirs'
+            CHECK (merge_strategy IN ('theirs','ours','llm_resolve'));
+
+        CREATE TABLE IF NOT EXISTS task_base_conflicts (
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            parent_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            file_path TEXT NOT NULL,
+            resolution TEXT NOT NULL
+                CHECK (resolution IN ('auto','heuristic_theirs','llm_resolved','llm_failed_fallback')),
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (task_id, parent_task_id, file_path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_base_conflicts_task ON task_base_conflicts(task_id);
+
+        CREATE TABLE IF NOT EXISTS merge_records (
+            id TEXT PRIMARY KEY,
+            mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+            source_branch TEXT NOT NULL,
+            target_branch TEXT NOT NULL,
+            strategy_attempted TEXT NOT NULL,
+            final_strategy TEXT NOT NULL,
+            conflicted_files TEXT NOT NULL DEFAULT '[]',
+            llm_resolution_succeeded INTEGER,
+            build_passed_after_llm INTEGER,
+            fallback_reason TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_merge_records_mission ON merge_records(mission_id);
+        "#,
+    ),
+    // FM-15 v2.2 P4-S5 — Follow-up Chat & follow-up missions：
+    // - missions.parent_mission_id : 子 mission 关联（FR-15.4）
+    // - mission_chats              : Chat 会话持久化（FR-15.1, FR-15.6）
+    (
+        "019_fm15_p4_chat_followup",
+        r#"
+        ALTER TABLE missions ADD COLUMN parent_mission_id TEXT
+            REFERENCES missions(id) ON DELETE SET NULL;
+        CREATE INDEX IF NOT EXISTS idx_missions_parent ON missions(parent_mission_id);
+
+        CREATE TABLE IF NOT EXISTS mission_chats (
+            id TEXT PRIMARY KEY,
+            mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+            role TEXT NOT NULL CHECK (role IN ('user','assistant','system')),
+            content TEXT NOT NULL,
+            tool_calls TEXT,
+            artifact_refs TEXT,
+            proposed_followup_mission_id TEXT REFERENCES missions(id) ON DELETE SET NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_mission_chats_mission
+            ON mission_chats(mission_id, created_at);
+        "#,
+    ),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

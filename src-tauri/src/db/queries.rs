@@ -1,6 +1,6 @@
 /// Reusable query helpers for agent_events, agents, and scheduler tables.
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 pub fn insert_agent(conn: &Connection, id: &str, name: &str) -> Result<()> {
     conn.execute(
@@ -205,6 +205,7 @@ pub fn check_mission_terminal(conn: &Connection, mission_id: &str) -> Result<Opt
     Ok(None)
 }
 
+/// 全局口径：当前所有 mission 下处于 `running` 状态的 agent 总数（监控 / dashboard 用）。
 pub fn count_running_agents(conn: &Connection) -> Result<i64> {
     let count = conn.query_row(
         "SELECT COUNT(*) FROM agents WHERE status = 'running'",
@@ -212,6 +213,64 @@ pub fn count_running_agents(conn: &Connection) -> Result<i64> {
         |row| row.get(0),
     )?;
     Ok(count)
+}
+
+/// FM-15 Phase 2 (FR-13): 按 mission 隔离的 running agent 计数。
+/// Scheduler 用这个口径计算每个 mission 自己的并发槽位，
+/// 避免多个 mission 共享同一份 `max_concurrent_agents` 配额。
+pub fn count_running_agents_for_mission(
+    conn: &Connection,
+    mission_id: &str,
+) -> Result<i64> {
+    let count = conn.query_row(
+        "SELECT COUNT(*) FROM agents a
+         JOIN tasks t ON t.id = a.task_id
+         WHERE a.status = 'running' AND t.mission_id = ?1",
+        params![mission_id],
+        |row| row.get(0),
+    )?;
+    Ok(count)
+}
+
+/// FM-15 Phase 2 (FR-12): 读取 mission 已缓存的主分支名（NULL 表示未探测）。
+pub fn get_mission_main_branch(
+    conn: &Connection,
+    mission_id: &str,
+) -> Result<Option<String>> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT main_branch FROM missions WHERE id = ?1",
+            params![mission_id],
+            |row| row.get::<_, Option<String>>(0),
+        )?;
+    Ok(value)
+}
+
+/// FM-15 Phase 2 (FR-12): 把探测到的主分支名缓存回 mission 行。
+pub fn set_mission_main_branch(
+    conn: &Connection,
+    mission_id: &str,
+    main_branch: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE missions SET main_branch = ?1, updated_at = datetime('now') WHERE id = ?2",
+        params![main_branch, mission_id],
+    )?;
+    Ok(())
+}
+
+/// FM-15 Phase 2 (FR-07.6): 读取 mission 是否启用增量 worktree（默认 true）。
+pub fn get_mission_use_incremental_worktree(
+    conn: &Connection,
+    mission_id: &str,
+) -> Result<bool> {
+    let v: i64 = conn
+        .query_row(
+            "SELECT COALESCE(use_incremental_worktree, 1) FROM missions WHERE id = ?1",
+            params![mission_id],
+            |row| row.get(0),
+        )?;
+    Ok(v != 0)
 }
 
 pub fn insert_agent_for_task(
@@ -268,6 +327,225 @@ pub fn get_completed_agents_topo_order(
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
     Ok(agents)
+}
+
+/// FM-15 Phase 2 (FR-07): 单个 task 的已完成直接父任务 + 其 agent 信息，
+/// 按拓扑深度升序（即父辈 task 间也维持 DAG 顺序），同深度按 completed_at 升序。
+///
+/// 返回 `(parent_task_id, parent_agent_id)`。`parent_agent_id` 缺失（理论上不该发生）
+/// 的行会被过滤，因为 `prepare_task_base` 需要从 `agent/<id>` 分支取内容。
+pub fn get_completed_parent_tasks_for(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE ancestors AS (
+            SELECT t.id, t.assigned_agent_id, t.completed_at, 0 AS depth
+            FROM task_dependencies td
+            JOIN tasks t ON t.id = td.depends_on
+            WHERE td.task_id = ?1 AND t.status = 'completed'
+
+            UNION ALL
+
+            SELECT t.id, t.assigned_agent_id, t.completed_at, ancestors.depth + 1
+            FROM task_dependencies td
+            JOIN tasks t ON t.id = td.depends_on
+            JOIN ancestors ON ancestors.id = td.task_id
+            WHERE t.status = 'completed'
+        )
+        SELECT DISTINCT id, assigned_agent_id, depth, completed_at
+        FROM ancestors
+        WHERE id IN (
+            SELECT depends_on FROM task_dependencies WHERE task_id = ?1
+        )
+        ORDER BY depth ASC, completed_at ASC",
+    )?;
+
+    let rows: Vec<(String, Option<String>)> = stmt
+        .query_map(params![task_id], |row| {
+            let id: String = row.get(0)?;
+            let agent_id: Option<String> = row.get(1)?;
+            Ok((id, agent_id))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|(t, a)| a.map(|a| (t, a)))
+        .collect())
+}
+
+/// FM-15 Phase 2 (FR-08.1): mission 内"frontier"已完成任务列表 —— 即"自身已完成
+/// 且没有任何已完成 successor"的任务。配合增量 worktree（FR-07）的语义：
+/// frontier 任务的 commit 已经累计包含了它所有上游的产物，因此 mission 终态
+/// 合并时只需 merge frontier，不必再逐 agent 拓扑序合并。
+///
+/// 返回 `(task_id, agent_id, completed_at)`。`agent_id` 缺失的 task 会被过滤。
+pub fn get_frontier_completed_tasks(
+    conn: &Connection,
+    mission_id: &str,
+) -> Result<Vec<(String, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.assigned_agent_id, COALESCE(t.completed_at, datetime('now'))
+         FROM tasks t
+         WHERE t.mission_id = ?1
+           AND t.status = 'completed'
+           AND NOT EXISTS (
+             SELECT 1 FROM task_dependencies td
+             JOIN tasks ts ON ts.id = td.task_id
+             WHERE td.depends_on = t.id AND ts.status = 'completed'
+           )
+         ORDER BY t.completed_at ASC, t.id ASC",
+    )?;
+
+    let rows = stmt
+        .query_map(params![mission_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|(t, a, c)| a.map(|a| (t, a, c)))
+        .collect())
+}
+
+/// FM-15 Phase 2 (FR-08.3): 写入一条 merge 记录到 `merge_records`。
+/// `conflicted_files` 通常是 JSON-serialized `Vec<String>`，由调用方负责序列化。
+#[allow(clippy::too_many_arguments)]
+pub fn record_merge_attempt(
+    conn: &Connection,
+    id: &str,
+    mission_id: &str,
+    source_branch: &str,
+    target_branch: &str,
+    strategy_attempted: &str,
+    final_strategy: &str,
+    conflicted_files_json: &str,
+    llm_resolution_succeeded: Option<bool>,
+    build_passed_after_llm: Option<bool>,
+    fallback_reason: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO merge_records
+         (id, mission_id, source_branch, target_branch,
+          strategy_attempted, final_strategy, conflicted_files,
+          llm_resolution_succeeded, build_passed_after_llm, fallback_reason)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            id,
+            mission_id,
+            source_branch,
+            target_branch,
+            strategy_attempted,
+            final_strategy,
+            conflicted_files_json,
+            llm_resolution_succeeded.map(|b| if b { 1i64 } else { 0i64 }),
+            build_passed_after_llm.map(|b| if b { 1i64 } else { 0i64 }),
+            fallback_reason,
+        ],
+    )?;
+    Ok(())
+}
+
+/// FM-15 Phase 2 (FR-08.3): 读取某 mission 的全部 merge 记录，按时间升序。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeRecord {
+    pub id: String,
+    pub mission_id: String,
+    pub source_branch: String,
+    pub target_branch: String,
+    pub strategy_attempted: String,
+    pub final_strategy: String,
+    pub conflicted_files_json: String,
+    pub llm_resolution_succeeded: Option<bool>,
+    pub build_passed_after_llm: Option<bool>,
+    pub fallback_reason: Option<String>,
+    pub created_at: String,
+}
+
+pub fn get_merge_records_for_mission(
+    conn: &Connection,
+    mission_id: &str,
+) -> Result<Vec<MergeRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, mission_id, source_branch, target_branch,
+                strategy_attempted, final_strategy, conflicted_files,
+                llm_resolution_succeeded, build_passed_after_llm,
+                fallback_reason, created_at
+         FROM merge_records
+         WHERE mission_id = ?1
+         ORDER BY created_at ASC, id ASC",
+    )?;
+
+    let rows = stmt
+        .query_map(params![mission_id], |row| {
+            Ok(MergeRecord {
+                id: row.get(0)?,
+                mission_id: row.get(1)?,
+                source_branch: row.get(2)?,
+                target_branch: row.get(3)?,
+                strategy_attempted: row.get(4)?,
+                final_strategy: row.get(5)?,
+                conflicted_files_json: row.get(6)?,
+                llm_resolution_succeeded: row.get::<_, Option<i64>>(7)?.map(|v| v != 0),
+                build_passed_after_llm: row.get::<_, Option<i64>>(8)?.map(|v| v != 0),
+                fallback_reason: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    Ok(rows)
+}
+
+/// FM-15 Phase 2 (FR-07.1): 把 base 构建过程中识别到的冲突写入 `task_base_conflicts`。
+/// `resolution` 取自 `MergeLayer::as_resolution_str()`。
+/// 用 INSERT OR REPLACE，重试场景下覆盖旧记录。
+pub fn record_task_base_conflict(
+    conn: &Connection,
+    task_id: &str,
+    parent_task_id: &str,
+    file_path: &str,
+    resolution: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO task_base_conflicts
+         (task_id, parent_task_id, file_path, resolution)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![task_id, parent_task_id, file_path, resolution],
+    )?;
+    Ok(())
+}
+
+/// FM-15 Phase 2: 读取某 task 的所有 base 冲突记录（按 parent_task_id, file_path 排序）。
+pub fn get_task_base_conflicts(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Vec<(String, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT parent_task_id, file_path, resolution
+         FROM task_base_conflicts
+         WHERE task_id = ?1
+         ORDER BY parent_task_id, file_path",
+    )?;
+
+    let rows = stmt
+        .query_map(params![task_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    Ok(rows)
 }
 
 // ---- FM-04: Activity stream & cost tracking ----
@@ -904,6 +1182,396 @@ pub fn mark_task_needs_revision(conn: &Connection, task_id: &str) -> Result<()> 
     Ok(())
 }
 
+// =====================================================================
+// FM-15 v2.2 Slice 1: planner_sessions / planner_steps helpers
+// =====================================================================
+
+pub fn create_planner_session(
+    conn: &Connection,
+    id: &str,
+    mission_id: Option<&str>,
+    kind: &str,
+    repo_path: &str,
+    description: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO planner_sessions (id, mission_id, kind, repo_path, description)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, mission_id, kind, repo_path, description],
+    )?;
+    Ok(())
+}
+
+pub fn complete_planner_session(
+    conn: &Connection,
+    id: &str,
+    total_steps: i64,
+    total_tokens: i64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE planner_sessions
+         SET status = 'completed',
+             total_steps = ?2,
+             total_tokens = ?3,
+             completed_at = datetime('now')
+         WHERE id = ?1",
+        params![id, total_steps, total_tokens],
+    )?;
+    Ok(())
+}
+
+pub fn fail_planner_session(
+    conn: &Connection,
+    id: &str,
+    total_steps: i64,
+    total_tokens: i64,
+    error_message: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE planner_sessions
+         SET status = 'failed',
+             total_steps = ?2,
+             total_tokens = ?3,
+             error_message = ?4,
+             completed_at = datetime('now')
+         WHERE id = ?1",
+        params![id, total_steps, total_tokens, error_message],
+    )?;
+    Ok(())
+}
+
+pub fn link_planner_session_to_mission(
+    conn: &Connection,
+    session_id: &str,
+    mission_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE planner_sessions SET mission_id = ?2 WHERE id = ?1",
+        params![session_id, mission_id],
+    )?;
+    Ok(())
+}
+
+pub fn insert_planner_step(
+    conn: &Connection,
+    id: &str,
+    session_id: &str,
+    step_no: i64,
+    kind: &str,
+    tool_name: Option<&str>,
+    tool_args: Option<&str>,
+    tool_result: Option<&str>,
+    text_content: Option<&str>,
+    tokens_used: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO planner_steps
+            (id, session_id, step_no, kind, tool_name, tool_args, tool_result, text_content, tokens_used)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            id,
+            session_id,
+            step_no,
+            kind,
+            tool_name,
+            tool_args,
+            tool_result,
+            text_content,
+            tokens_used,
+        ],
+    )?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PlannerStepRow {
+    pub id: String,
+    pub session_id: String,
+    pub step_no: i64,
+    pub kind: String,
+    pub tool_name: Option<String>,
+    pub tool_args: Option<String>,
+    pub tool_result: Option<String>,
+    pub text_content: Option<String>,
+    pub tokens_used: i64,
+    pub created_at: String,
+}
+
+pub fn list_planner_steps(conn: &Connection, session_id: &str) -> Result<Vec<PlannerStepRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, session_id, step_no, kind, tool_name, tool_args, tool_result, text_content, tokens_used, created_at
+         FROM planner_steps
+         WHERE session_id = ?1
+         ORDER BY step_no ASC",
+    )?;
+    let rows = stmt
+        .query_map([session_id], |row| {
+            Ok(PlannerStepRow {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                step_no: row.get(2)?,
+                kind: row.get(3)?,
+                tool_name: row.get(4)?,
+                tool_args: row.get(5)?,
+                tool_result: row.get(6)?,
+                text_content: row.get(7)?,
+                tokens_used: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PlannerSessionRow {
+    pub id: String,
+    pub mission_id: Option<String>,
+    pub kind: String,
+    pub contract_id: Option<String>,
+    pub repo_path: String,
+    pub description: String,
+    pub status: String,
+    pub total_steps: i64,
+    pub total_tokens: i64,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
+pub fn get_planner_session(conn: &Connection, id: &str) -> Result<Option<PlannerSessionRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, mission_id, kind, contract_id, repo_path, description, status,
+                total_steps, total_tokens, error_message, created_at, completed_at
+         FROM planner_sessions WHERE id = ?1",
+    )?;
+    let row = stmt
+        .query_row([id], |row| {
+            Ok(PlannerSessionRow {
+                id: row.get(0)?,
+                mission_id: row.get(1)?,
+                kind: row.get(2)?,
+                contract_id: row.get(3)?,
+                repo_path: row.get(4)?,
+                description: row.get(5)?,
+                status: row.get(6)?,
+                total_steps: row.get(7)?,
+                total_tokens: row.get(8)?,
+                error_message: row.get(9)?,
+                created_at: row.get(10)?,
+                completed_at: row.get(11)?,
+            })
+        })
+        .ok();
+    Ok(row)
+}
+
+// ---- FM-15 FR-03: Artifact 查询 ----
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ArtifactRow {
+    pub id: String,
+    pub mission_id: String,
+    pub producer_task_id: String,
+    #[serde(rename = "type")]
+    pub artifact_type: String,
+    pub local_name: String,
+    pub summary: String,
+    /// JSON 数组的字符串形式，调用方按需 parse
+    pub file_paths: String,
+    pub published: bool,
+    pub created_at: String,
+}
+
+fn map_artifact_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactRow> {
+    Ok(ArtifactRow {
+        id: row.get(0)?,
+        mission_id: row.get(1)?,
+        producer_task_id: row.get(2)?,
+        artifact_type: row.get(3)?,
+        local_name: row.get(4)?,
+        summary: row.get(5)?,
+        file_paths: row.get(6)?,
+        published: row.get::<_, i64>(7)? != 0,
+        created_at: row.get(8)?,
+    })
+}
+
+pub fn list_artifacts_for_mission(
+    conn: &Connection,
+    mission_id: &str,
+) -> Result<Vec<ArtifactRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, mission_id, producer_task_id, type, local_name, summary, file_paths, published, created_at
+         FROM artifacts WHERE mission_id = ?1 ORDER BY created_at ASC",
+    )?;
+    let rows = stmt
+        .query_map([mission_id], map_artifact_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+// ---- FM-15 FR-05.x: Planner fetch_url 持久化 (grant + 计数) ----
+
+/// 写入"该 session 下同 host 一直允许"的授权（FetchDecision::AllowSession 触发）。
+/// 主键是 (session_id, host)，重复写入是 no-op。
+pub fn record_planner_fetch_grant(
+    conn: &Connection,
+    session_id: &str,
+    host: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO planner_session_fetch_grants (session_id, domain) VALUES (?1, ?2)",
+        params![session_id, host],
+    )?;
+    Ok(())
+}
+
+pub fn is_planner_fetch_granted(
+    conn: &Connection,
+    session_id: &str,
+    host: &str,
+) -> Result<bool> {
+    let cnt: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM planner_session_fetch_grants
+         WHERE session_id = ?1 AND domain = ?2",
+        params![session_id, host],
+        |row| row.get(0),
+    )?;
+    Ok(cnt > 0)
+}
+
+/// session 内已发起的 fetch_url 调用数（含失败/拒绝），用于配额计数。
+pub fn count_planner_fetch_calls(conn: &Connection, session_id: &str) -> Result<i64> {
+    let cnt: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM planner_steps
+         WHERE session_id = ?1 AND kind = 'tool_call' AND tool_name = 'fetch_url'",
+        params![session_id],
+        |row| row.get(0),
+    )?;
+    Ok(cnt)
+}
+
+pub fn list_artifacts_for_task(conn: &Connection, task_id: &str) -> Result<Vec<ArtifactRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, mission_id, producer_task_id, type, local_name, summary, file_paths, published, created_at
+         FROM artifacts WHERE producer_task_id = ?1 ORDER BY created_at ASC",
+    )?;
+    let rows = stmt
+        .query_map([task_id], map_artifact_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+// ---- FM-15 v2.2 P4-S5: mission_chats / parent_mission_id ----
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MissionChatRow {
+    pub id: String,
+    pub mission_id: String,
+    pub role: String,
+    pub content: String,
+    pub tool_calls: Option<String>,
+    pub artifact_refs: Option<String>,
+    pub proposed_followup_mission_id: Option<String>,
+    pub created_at: String,
+}
+
+fn map_chat_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MissionChatRow> {
+    Ok(MissionChatRow {
+        id: row.get(0)?,
+        mission_id: row.get(1)?,
+        role: row.get(2)?,
+        content: row.get(3)?,
+        tool_calls: row.get(4)?,
+        artifact_refs: row.get(5)?,
+        proposed_followup_mission_id: row.get(6)?,
+        created_at: row.get(7)?,
+    })
+}
+
+pub fn insert_mission_chat(
+    conn: &Connection,
+    id: &str,
+    mission_id: &str,
+    role: &str,
+    content: &str,
+    tool_calls: Option<&str>,
+    artifact_refs: Option<&str>,
+    proposed_followup_mission_id: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO mission_chats
+            (id, mission_id, role, content, tool_calls, artifact_refs, proposed_followup_mission_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            id,
+            mission_id,
+            role,
+            content,
+            tool_calls,
+            artifact_refs,
+            proposed_followup_mission_id,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_mission_chats(
+    conn: &Connection,
+    mission_id: &str,
+) -> Result<Vec<MissionChatRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, mission_id, role, content, tool_calls, artifact_refs,
+                proposed_followup_mission_id, created_at
+         FROM mission_chats
+         WHERE mission_id = ?1
+         ORDER BY created_at ASC, id ASC",
+    )?;
+    let rows = stmt
+        .query_map([mission_id], map_chat_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// FR-15.4: 子 mission 通过 parent_mission_id 与父 mission 关联。
+pub fn set_mission_parent(
+    conn: &Connection,
+    child_mission_id: &str,
+    parent_mission_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE missions SET parent_mission_id = ?2 WHERE id = ?1",
+        params![child_mission_id, parent_mission_id],
+    )?;
+    Ok(())
+}
+
+pub fn get_mission_parent(conn: &Connection, mission_id: &str) -> Result<Option<String>> {
+    let row = conn
+        .query_row(
+            "SELECT parent_mission_id FROM missions WHERE id = ?1",
+            [mission_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?;
+    Ok(row.flatten())
+}
+
+pub fn list_followup_mission_ids(
+    conn: &Connection,
+    parent_mission_id: &str,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM missions WHERE parent_mission_id = ?1 ORDER BY created_at ASC",
+    )?;
+    let rows = stmt
+        .query_map([parent_mission_id], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1498,5 +2166,289 @@ mod tests {
         let running = get_running_agent_ids_for_mission(&conn, "m1").unwrap();
         assert_eq!(running.len(), 1);
         assert_eq!(running[0], "a1");
+    }
+
+    // ---- FM-15 FR-05.x: planner fetch grants + counting ----
+
+    #[test]
+    fn ut15_fetch_grant_idempotent_and_scoped() {
+        let conn = setup_db();
+        create_planner_session(&conn, "ps1", None, "planner", "/tmp/r", "test").unwrap();
+        create_planner_session(&conn, "ps2", None, "planner", "/tmp/r", "test").unwrap();
+
+        record_planner_fetch_grant(&conn, "ps1", "example.com").unwrap();
+        // 重复授权应当 idempotent
+        record_planner_fetch_grant(&conn, "ps1", "example.com").unwrap();
+
+        assert!(is_planner_fetch_granted(&conn, "ps1", "example.com").unwrap());
+        // session 隔离
+        assert!(!is_planner_fetch_granted(&conn, "ps2", "example.com").unwrap());
+        // host 区分
+        assert!(!is_planner_fetch_granted(&conn, "ps1", "evil.com").unwrap());
+    }
+
+    #[test]
+    fn ut15_count_planner_fetch_calls_only_counts_fetch_url_calls() {
+        let conn = setup_db();
+        create_planner_session(&conn, "ps1", None, "planner", "/tmp/r", "test").unwrap();
+
+        insert_planner_step(
+            &conn, "s1", "ps1", 1, "tool_call", Some("read_file"), Some("{}"), None, None, 0,
+        )
+        .unwrap();
+        insert_planner_step(
+            &conn, "s2", "ps1", 2, "tool_call", Some("fetch_url"), Some("{}"), None, None, 0,
+        )
+        .unwrap();
+        insert_planner_step(
+            &conn, "s3", "ps1", 3, "tool_result", Some("fetch_url"), None, Some("{}"), None, 0,
+        )
+        .unwrap();
+        insert_planner_step(
+            &conn, "s4", "ps1", 4, "tool_call", Some("fetch_url"), Some("{}"), None, None, 0,
+        )
+        .unwrap();
+
+        let n = count_planner_fetch_calls(&conn, "ps1").unwrap();
+        assert_eq!(n, 2, "should count only tool_call rows for fetch_url");
+    }
+
+    // ---- FM-15 Phase 2 (FR-12 / FR-13) ----
+
+    /// 主分支名读写应 idempotent；缺省值为 NULL。
+    #[test]
+    fn fm15_p2_main_branch_round_trip() {
+        let conn = setup_db();
+        create_mission(&conn, "m-mb");
+
+        assert_eq!(get_mission_main_branch(&conn, "m-mb").unwrap(), None);
+
+        set_mission_main_branch(&conn, "m-mb", "master").unwrap();
+        assert_eq!(
+            get_mission_main_branch(&conn, "m-mb").unwrap(),
+            Some("master".to_string())
+        );
+
+        // 覆盖写入
+        set_mission_main_branch(&conn, "m-mb", "main").unwrap();
+        assert_eq!(
+            get_mission_main_branch(&conn, "m-mb").unwrap(),
+            Some("main".to_string())
+        );
+    }
+
+    /// `count_running_agents_for_mission` 只统计本 mission 内的 running agent，
+    /// 多 mission 共存时互不污染。
+    #[test]
+    fn fm15_p2_count_running_agents_isolated_per_mission() {
+        let conn = setup_db();
+        create_mission(&conn, "m-a");
+        create_mission(&conn, "m-b");
+        create_task(&conn, "t-a1", "m-a", "running");
+        create_task(&conn, "t-a2", "m-a", "running");
+        create_task(&conn, "t-b1", "m-b", "running");
+
+        insert_agent_for_task(&conn, "ag-a1", "A1", "t-a1", "/tmp/wa1").unwrap();
+        insert_agent_for_task(&conn, "ag-a2", "A2", "t-a2", "/tmp/wa2").unwrap();
+        insert_agent_for_task(&conn, "ag-b1", "B1", "t-b1", "/tmp/wb1").unwrap();
+        conn.execute(
+            "UPDATE agents SET status = 'running' WHERE id IN ('ag-a1', 'ag-a2', 'ag-b1')",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(count_running_agents_for_mission(&conn, "m-a").unwrap(), 2);
+        assert_eq!(count_running_agents_for_mission(&conn, "m-b").unwrap(), 1);
+        // 全局口径仍然统计全部
+        assert_eq!(count_running_agents(&conn).unwrap(), 3);
+    }
+
+    /// 非 running agent 不计入：idle / failed / cancelled 不应被算作占用槽位。
+    #[test]
+    fn fm15_p2_count_running_agents_ignores_non_running() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+        create_task(&conn, "t1", "m1", "running");
+        create_task(&conn, "t2", "m1", "running");
+        create_task(&conn, "t3", "m1", "running");
+
+        insert_agent_for_task(&conn, "a1", "A1", "t1", "/tmp/w1").unwrap();
+        insert_agent_for_task(&conn, "a2", "A2", "t2", "/tmp/w2").unwrap();
+        insert_agent_for_task(&conn, "a3", "A3", "t3", "/tmp/w3").unwrap();
+
+        conn.execute("UPDATE agents SET status = 'running' WHERE id = 'a1'", [])
+            .unwrap();
+        conn.execute("UPDATE agents SET status = 'failed' WHERE id = 'a2'", [])
+            .unwrap();
+        // a3 保持 'idle'
+
+        assert_eq!(count_running_agents_for_mission(&conn, "m1").unwrap(), 1);
+    }
+
+    /// `use_incremental_worktree` 默认开启（schema DEFAULT 1），可被显式关闭。
+    #[test]
+    fn fm15_p2_use_incremental_worktree_defaults_on() {
+        let conn = setup_db();
+        create_mission(&conn, "m-on");
+        assert!(get_mission_use_incremental_worktree(&conn, "m-on").unwrap());
+
+        conn.execute(
+            "UPDATE missions SET use_incremental_worktree = 0 WHERE id = 'm-on'",
+            [],
+        )
+        .unwrap();
+        assert!(!get_mission_use_incremental_worktree(&conn, "m-on").unwrap());
+    }
+
+    /// 辅助：把 task 标 completed + 关联 agent。
+    fn complete_task(conn: &Connection, task_id: &str, agent_id: &str, ts: &str) {
+        conn.execute(
+            "INSERT INTO agents (id, name, task_id, status) VALUES (?1, ?1, ?2, 'completed')",
+            rusqlite::params![agent_id, task_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE tasks SET status = 'completed', assigned_agent_id = ?1, completed_at = ?2 WHERE id = ?3",
+            rusqlite::params![agent_id, ts, task_id],
+        )
+        .unwrap();
+    }
+
+    /// FR-07: 拓扑后序父任务查询。菱形 A→{B,C}→D：D 的父应为 [B,C]，A 不算（不是直接父）。
+    #[test]
+    fn fm15_p2_completed_parents_excludes_indirect_ancestors() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+        create_task(&conn, "A", "m1", "pending");
+        create_task(&conn, "B", "m1", "pending");
+        create_task(&conn, "C", "m1", "pending");
+        create_task(&conn, "D", "m1", "pending");
+        add_dep(&conn, "B", "A");
+        add_dep(&conn, "C", "A");
+        add_dep(&conn, "D", "B");
+        add_dep(&conn, "D", "C");
+
+        complete_task(&conn, "A", "ag-A", "2026-04-01 00:00:00");
+        complete_task(&conn, "B", "ag-B", "2026-04-01 00:00:01");
+        complete_task(&conn, "C", "ag-C", "2026-04-01 00:00:02");
+
+        let parents = get_completed_parent_tasks_for(&conn, "D").unwrap();
+        let parent_ids: Vec<&str> = parents.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(parent_ids.contains(&"B"));
+        assert!(parent_ids.contains(&"C"));
+        assert!(!parent_ids.contains(&"A"), "A is indirect — must not appear");
+        assert_eq!(parents.len(), 2);
+    }
+
+    /// FR-08.1: frontier merge —— 菱形 A→{B,C}→D 全部完成时，frontier 应只是 {D}。
+    #[test]
+    fn fm15_p2_frontier_picks_only_leaves() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+        for t in ["A", "B", "C", "D"] {
+            create_task(&conn, t, "m1", "pending");
+        }
+        add_dep(&conn, "B", "A");
+        add_dep(&conn, "C", "A");
+        add_dep(&conn, "D", "B");
+        add_dep(&conn, "D", "C");
+
+        complete_task(&conn, "A", "ag-A", "2026-04-01 00:00:00");
+        complete_task(&conn, "B", "ag-B", "2026-04-01 00:00:01");
+        complete_task(&conn, "C", "ag-C", "2026-04-01 00:00:02");
+        complete_task(&conn, "D", "ag-D", "2026-04-01 00:00:03");
+
+        let frontier = get_frontier_completed_tasks(&conn, "m1").unwrap();
+        let ids: Vec<&str> = frontier.iter().map(|(t, _, _)| t.as_str()).collect();
+        assert_eq!(ids, vec!["D"], "only D has no completed successors");
+    }
+
+    /// FR-08.1: 多 frontier —— 线性 A→B + 独立 C 全完成时，frontier 应为 {B, C}。
+    #[test]
+    fn fm15_p2_frontier_handles_multiple_leaves() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+        for t in ["A", "B", "C"] {
+            create_task(&conn, t, "m1", "pending");
+        }
+        add_dep(&conn, "B", "A");
+
+        complete_task(&conn, "A", "ag-A", "2026-04-01 00:00:00");
+        complete_task(&conn, "B", "ag-B", "2026-04-01 00:00:01");
+        complete_task(&conn, "C", "ag-C", "2026-04-01 00:00:02");
+
+        let frontier = get_frontier_completed_tasks(&conn, "m1").unwrap();
+        let mut ids: Vec<&str> = frontier.iter().map(|(t, _, _)| t.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["B", "C"]);
+    }
+
+    /// FR-08.3: merge_records 写入与读取。
+    #[test]
+    fn fm15_p2_merge_records_round_trip() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+
+        record_merge_attempt(
+            &conn,
+            "rec-1",
+            "m1",
+            "agent/A",
+            "main",
+            "theirs",
+            "auto",
+            "[]",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        record_merge_attempt(
+            &conn,
+            "rec-2",
+            "m1",
+            "agent/B",
+            "main",
+            "llm_resolve",
+            "heuristic_theirs",
+            "[\"shared.txt\"]",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let recs = get_merge_records_for_mission(&conn, "m1").unwrap();
+        assert_eq!(recs.len(), 2);
+        assert_eq!(recs[0].id, "rec-1");
+        assert_eq!(recs[0].final_strategy, "auto");
+        assert_eq!(recs[1].id, "rec-2");
+        assert_eq!(recs[1].final_strategy, "heuristic_theirs");
+        assert_eq!(recs[1].conflicted_files_json, "[\"shared.txt\"]");
+    }
+
+    /// FR-07.1: task_base_conflicts 写入与读取（INSERT OR REPLACE 幂等）。
+    #[test]
+    fn fm15_p2_task_base_conflicts_round_trip_and_idempotent() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+        create_task(&conn, "T-D", "m1", "pending");
+        create_task(&conn, "T-B", "m1", "pending");
+        create_task(&conn, "T-C", "m1", "pending");
+
+        record_task_base_conflict(&conn, "T-D", "T-B", "shared.txt", "heuristic_theirs").unwrap();
+        record_task_base_conflict(&conn, "T-D", "T-C", "shared.txt", "llm_failed_fallback")
+            .unwrap();
+        // 重复写入：覆盖上一条 resolution
+        record_task_base_conflict(&conn, "T-D", "T-B", "shared.txt", "auto").unwrap();
+
+        let conflicts = get_task_base_conflicts(&conn, "T-D").unwrap();
+        assert_eq!(conflicts.len(), 2);
+
+        // 排序：parent_task_id 升序
+        assert_eq!(conflicts[0].0, "T-B");
+        assert_eq!(conflicts[0].2, "auto", "later write should override");
+        assert_eq!(conflicts[1].0, "T-C");
+        assert_eq!(conflicts[1].2, "llm_failed_fallback");
     }
 }
