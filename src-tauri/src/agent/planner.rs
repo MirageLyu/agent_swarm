@@ -541,32 +541,9 @@ pub struct Alternative {
     pub reason_rejected: String,
 }
 
-const PLANNER_TIMEOUT: Duration = Duration::from_secs(90);
-
-const PLANNER_SYSTEM_PROMPT: &str = r#"You are a task planner for a software development project. Given a high-level requirement description, decompose it into concrete, independently executable sub-tasks.
-
-Output ONLY a valid JSON object with this structure:
-{
-  "mission_title": "concise title for the overall mission",
-  "tasks": [
-    {
-      "id": "T1",
-      "title": "short task title",
-      "description": "detailed description of what this task should accomplish",
-      "complexity": "low|medium|high",
-      "depends_on": []
-    }
-  ]
-}
-
-Rules:
-- Each task should be completable by a single AI agent
-- IDs must be sequential: T1, T2, T3...
-- depends_on references must be valid task IDs defined earlier
-- No circular dependencies
-- Aim for 3-10 tasks depending on complexity
-- Distinguish frontend/backend/test tasks where applicable
-- Order dependencies logically (data model before API, API before UI)"#;
+// FM-15 v2.2 (S2 / FR-PF-02): 旧的 PLANNER_TIMEOUT / PLANNER_SYSTEM_PROMPT 已删除。
+// 新版 system prompt 与超时控制集中在 `agent/planner_engine.rs`
+// (`PLANNER_SYSTEM_PROMPT_V2`, PlannerEngine 自带 step/timeout 上限)。
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlannerOutput {
@@ -581,6 +558,62 @@ pub struct PlannerTask {
     pub description: String,
     pub complexity: String,
     pub depends_on: Vec<String>,
+    /// FM-15 FR-04 (S1 部分): 任务验收契约。
+    /// `Option` 而非必填，是为了兼容旧 mission_template YAML / 未升级的入口；
+    /// 由 Planner Loop 产出的 task **必须**填写（finalize_plan 会强制要求）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_output: Option<String>,
+    /// FM-15 FR-01 / FR-04 (S1 部分): 角色 id。
+    /// 若提供，必须是 RoleRegistry 中已加载的 role；缺省时入库时默认 "implementer"。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+
+    // ---- FM-15 v2.2 (S3-5): 富语义字段 ----
+
+    /// FM-15 FR-02: 在角色默认 skill 之外额外加载的 skill id 列表（可空）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_skills: Vec<String>,
+
+    /// FM-15 FR-03: 此 task 计划产出的 artifact 声明列表（可空）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub produces_artifacts: Vec<crate::agent::artifacts::ArtifactDecl>,
+
+    /// FM-15 FR-03: 此 task 计划消费的 artifact id 列表（格式 `<task_id>.<local_name>`）。
+    /// 每条必须能解析到此 plan 中某个 task 的 produces_artifacts 条目。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consumes_artifacts: Vec<String>,
+
+    /// FM-15 FR-04: file scope hints（用于冲突预测 + worktree 加速）。
+    #[serde(default, skip_serializing_if = "FileScopeHints::is_empty")]
+    pub file_scope_hints: FileScopeHints,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct FileScopeHints {
+    /// 一定会修改的相对路径（repo-relative，不以 `/` 开头，不含 `..`）
+    #[serde(default)]
+    pub definite: Vec<String>,
+    /// 可能涉及的相对路径
+    #[serde(default)]
+    pub possible: Vec<String>,
+}
+
+impl FileScopeHints {
+    pub fn is_empty(&self) -> bool {
+        self.definite.is_empty() && self.possible.is_empty()
+    }
+}
+
+impl PlannerTask {
+    /// 入库时使用的 role，缺省 implementer。
+    pub fn effective_role(&self) -> &str {
+        self.role.as_deref().unwrap_or("implementer")
+    }
+
+    /// 入库时使用的 expected_output，缺省空串。
+    pub fn effective_expected_output(&self) -> &str {
+        self.expected_output.as_deref().unwrap_or("")
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -595,6 +628,12 @@ pub enum PlannerError {
     MissingField(String),
     #[error("Invalid complexity value: {0}")]
     InvalidComplexity(String),
+    #[error("Invalid role '{role}' on task {task_id} (allowed: {allowed})")]
+    InvalidRole {
+        task_id: String,
+        role: String,
+        allowed: String,
+    },
     #[error("Invalid dependency reference: {task_id} depends on non-existent {ref_id}")]
     InvalidDependencyRef { task_id: String, ref_id: String },
     #[error("Self dependency: {0}")]
@@ -622,6 +661,7 @@ pub fn parse_and_validate(json_str: &str) -> Result<PlannerOutput, PlannerError>
 
 /// Validate a list of tasks as a valid DAG.
 /// Checks: non-empty, valid complexity, valid dependency refs, no self-deps, no cycles.
+/// FM-15 S1 新增：若 task 显式声明了 `role`，强校验其在 RoleRegistry 中存在。
 /// Shared by planner JSON parsing and mission template import.
 pub fn validate_task_graph(tasks: &[PlannerTask]) -> Result<(), PlannerError> {
     if tasks.is_empty() {
@@ -630,6 +670,7 @@ pub fn validate_task_graph(tasks: &[PlannerTask]) -> Result<(), PlannerError> {
 
     let valid_complexities = ["low", "medium", "high"];
     let task_ids: HashSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+    let role_registry = crate::agent::roles::registry();
 
     for task in tasks {
         if task.title.trim().is_empty() {
@@ -641,6 +682,16 @@ pub fn validate_task_graph(tasks: &[PlannerTask]) -> Result<(), PlannerError> {
 
         if !valid_complexities.contains(&task.complexity.as_str()) {
             return Err(PlannerError::InvalidComplexity(task.complexity.clone()));
+        }
+
+        if let Some(role) = task.role.as_deref() {
+            if !role_registry.contains(role) {
+                return Err(PlannerError::InvalidRole {
+                    task_id: task.id.clone(),
+                    role: role.to_string(),
+                    allowed: role_registry.ids_csv(),
+                });
+            }
         }
 
         for dep in &task.depends_on {
@@ -761,157 +812,11 @@ pub fn emit_planner_event_pub(app: &tauri::AppHandle, kind: &str, content: &str)
     emit_planner_event(app, kind, content);
 }
 
-async fn stream_planner_call(
-    provider: Arc<dyn LlmProvider>,
-    request: &LlmRequest,
-    app: &tauri::AppHandle,
-) -> Result<String, PlannerError> {
-    let (tx, mut rx) = mpsc::channel::<StreamChunk>(256);
-
-    let provider_clone = provider.clone();
-    let request_clone = LlmRequest {
-        model: request.model.clone(),
-        system: request.system.clone(),
-        messages: request.messages.clone(),
-        tools: request.tools.clone(),
-        max_tokens: request.max_tokens,
-    };
-
-    let stream_handle = tokio::spawn(async move {
-        provider_clone.stream_chat(&request_clone, tx).await
-    });
-
-    let app_clone = app.clone();
-    let mut full_text = String::new();
-
-    // Forward stream chunks as Tauri events
-    while let Some(chunk) = rx.recv().await {
-        match chunk.kind {
-            StreamChunkKind::ReasoningDelta => {
-                emit_planner_event(&app_clone, "reasoning_delta", &chunk.content);
-            }
-            StreamChunkKind::TextDelta => {
-                full_text.push_str(&chunk.content);
-                emit_planner_event(&app_clone, "text_delta", &chunk.content);
-            }
-            StreamChunkKind::MessageStop => {
-                // Will emit "done" after parsing
-            }
-            _ => {}
-        }
-    }
-
-    let response = tokio::time::timeout(Duration::from_secs(5), stream_handle)
-        .await
-        .map_err(|_| PlannerError::LlmError("Stream handle timed out".into()))?
-        .map_err(|e| PlannerError::LlmError(format!("Stream task failed: {e}")))?
-        .map_err(|e| PlannerError::LlmError(e.to_string()))?;
-
-    // If full_text is empty, extract from response content blocks
-    if full_text.is_empty() {
-        full_text = response
-            .content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<String>();
-    }
-
-    Ok(full_text)
-}
-
-pub async fn call_planner(
-    provider: Arc<dyn LlmProvider>,
-    model: &str,
-    description: &str,
-    app: &tauri::AppHandle,
-) -> Result<PlannerOutput, PlannerError> {
-    let messages = vec![Message {
-        role: MessageRole::User,
-        content: vec![ContentBlock::Text {
-            text: description.to_string(),
-        }],
-        cache_control: None,
-    }];
-
-    let request = LlmRequest {
-        model: model.to_string(),
-        system: Some(PLANNER_SYSTEM_PROMPT.to_string()),
-        messages: messages.clone(),
-        tools: vec![],
-        max_tokens: 4096,
-    };
-
-    tracing::info!("Planner: calling LLM (streaming) model={model}");
-    let text = tokio::time::timeout(
-        PLANNER_TIMEOUT,
-        stream_planner_call(provider.clone(), &request, app),
-    )
-    .await
-    .map_err(|_| PlannerError::LlmError("Planning timed out, please retry".into()))?
-    .map_err(|e| PlannerError::LlmError(e.to_string()))?;
-    tracing::info!("Planner: stream complete, parsing output");
-
-    match parse_and_validate(&text) {
-        Ok(output) => {
-            emit_planner_event(app, "done", "");
-            Ok(output)
-        }
-        Err(first_err) => {
-            tracing::warn!("Planner first attempt failed: {first_err}, retrying with error feedback");
-            emit_planner_event(app, "error", &format!("Parse error, retrying: {first_err}"));
-
-            let retry_messages = vec![
-                Message {
-                    role: MessageRole::User,
-                    content: vec![ContentBlock::Text {
-                        text: description.to_string(),
-                    }],
-                    cache_control: None,
-                },
-                Message {
-                    role: MessageRole::Assistant,
-                    content: vec![ContentBlock::Text {
-                        text: text.clone(),
-                    }],
-                    cache_control: None,
-                },
-                Message {
-                    role: MessageRole::User,
-                    content: vec![ContentBlock::Text {
-                        text: format!(
-                            "Your previous output had an error: {first_err}\n\
-                             Please fix it and output ONLY a valid JSON object."
-                        ),
-                    }],
-                    cache_control: None,
-                },
-            ];
-
-            let retry_request = LlmRequest {
-                model: model.to_string(),
-                system: Some(PLANNER_SYSTEM_PROMPT.to_string()),
-                messages: retry_messages,
-                tools: vec![],
-                max_tokens: 4096,
-            };
-
-            let retry_text = tokio::time::timeout(
-                PLANNER_TIMEOUT,
-                stream_planner_call(provider, &retry_request, app),
-            )
-            .await
-            .map_err(|_| PlannerError::LlmError("Planning retry timed out".into()))?
-            .map_err(|e| PlannerError::LlmError(e.to_string()))?;
-
-            let result = parse_and_validate(&retry_text)?;
-            emit_planner_event(app, "done", "");
-            Ok(result)
-        }
-    }
-}
+// FM-15 v2.2 (S2 / FR-PF-02): 旧的单次 LLM Planner (`call_planner` /
+// `stream_planner_call`) 已删除。Quick Plan 与 Pre-flight 两条路径都统一走
+// PlannerEngine（agent/planner_engine.rs），后者内部走 `agent/llm_stream` 工具
+// 透传 `planner-stream`。`parse_and_validate` 仍保留，被兜底校验、单元测试、
+// 以及历史 mission_template 使用。
 
 // ---------------------------------------------------------------------------
 // Pre-flight streaming
@@ -1385,6 +1290,7 @@ pub async fn preflight_chat(
     belief_state: &PreflightBeliefState,
     rejected_alternatives: &[(String, u32, String)],
     caps: &ModelCapabilities,
+    extra_tools: &[ToolDefinition],
 ) -> Result<(PreflightResponse, TokenUsage), PlannerError> {
     let system_prompt = build_preflight_system_prompt(
         mode, contract_items, belief_state, rejected_alternatives, caps,
@@ -1398,6 +1304,8 @@ pub async fn preflight_chat(
     }
 
     let mut tools = preflight_tools();
+    // FM-15 v2.2 (S2 / FR-PF-01): from_existing 模式下 Pre-flight 也装载 ReadOnlyExplorer
+    tools.extend(extra_tools.iter().cloned());
 
     // Apply cache markers (FM-10.4)
     apply_cache_markers(&mut history, &mut tools, caps);
@@ -1569,70 +1477,9 @@ pub async fn preflight_chat(
     Ok((result, response.usage))
 }
 
-// ---------------------------------------------------------------------------
-// Contract-aware planner prompt
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContractData {
-    pub scope: Vec<String>,
-    pub constraints: Vec<String>,
-    pub exclusions: Vec<String>,
-    pub assumptions: Vec<String>,
-    pub budget_usd: Option<f64>,
-    pub quality_threshold: Option<f64>,
-    pub max_duration_hours: Option<f64>,
-}
-
-pub fn build_contract_aware_planner_prompt(contract: &ContractData) -> String {
-    let mut prompt = String::from(PLANNER_SYSTEM_PROMPT);
-    prompt.push_str("\n\n--- MISSION CONTRACT ---\n\n");
-
-    if !contract.scope.is_empty() {
-        prompt.push_str("## Scope (MUST implement):\n");
-        for item in &contract.scope {
-            prompt.push_str(&format!("- {item}\n"));
-        }
-        prompt.push('\n');
-    }
-
-    if !contract.constraints.is_empty() {
-        prompt.push_str("## Constraints (Agent decisions, follow these):\n");
-        for item in &contract.constraints {
-            prompt.push_str(&format!("- {item}\n"));
-        }
-        prompt.push('\n');
-    }
-
-    if !contract.exclusions.is_empty() {
-        prompt.push_str("## Exclusions (DO NOT implement any of these):\n");
-        for item in &contract.exclusions {
-            prompt.push_str(&format!("- {item}\n"));
-        }
-        prompt.push('\n');
-    }
-
-    if !contract.assumptions.is_empty() {
-        prompt.push_str("## Assumptions (Confirmed environment facts):\n");
-        for item in &contract.assumptions {
-            prompt.push_str(&format!("- {item}\n"));
-        }
-        prompt.push('\n');
-    }
-
-    if let Some(budget) = contract.budget_usd {
-        prompt.push_str(&format!("Budget limit: ${budget:.2}\n"));
-    }
-    if let Some(qt) = contract.quality_threshold {
-        prompt.push_str(&format!("Quality threshold: {qt}/10 — ensure tasks include thorough testing.\n"));
-    }
-    if let Some(dur) = contract.max_duration_hours {
-        prompt.push_str(&format!("Max duration: {dur} hours — keep task count proportional.\n"));
-    }
-
-    prompt.push_str("\nGenerate a Task DAG that covers ALL scope items, respects ALL constraints, and excludes ALL exclusion items.\n");
-    prompt
-}
+// FM-15 v2.2 (S2 / FR-PF-02): `ContractData` / `build_contract_aware_planner_prompt`
+// 已删除。Pre-flight → 签约后由 PlannerEngine 通过 `load_contract_dump`
+// （见 agent/planner_engine.rs）注入合同上下文。
 
 #[cfg(test)]
 mod tests {
@@ -1735,6 +1582,62 @@ mod tests {
         }"#;
         let err = parse_and_validate(json).unwrap_err();
         assert!(matches!(err, PlannerError::InvalidComplexity(_)));
+    }
+
+    /// FM-15 S1 / FR-04: 显式声明 role 时必须是已注册角色。
+    #[test]
+    fn ut01_9b_invalid_role_rejected() {
+        let json = r#"{
+            "mission_title": "Test",
+            "tasks": [{
+                "id": "T1",
+                "title": "A",
+                "description": "d",
+                "complexity": "low",
+                "depends_on": [],
+                "role": "ceo"
+            }]
+        }"#;
+        let err = parse_and_validate(json).unwrap_err();
+        assert!(matches!(err, PlannerError::InvalidRole { .. }));
+    }
+
+    /// FM-15 S1 / FR-04: role 缺省允许（向后兼容旧 mission_template）。
+    #[test]
+    fn ut01_9c_missing_role_accepted_with_default() {
+        let json = r#"{
+            "mission_title": "Test",
+            "tasks": [{
+                "id": "T1",
+                "title": "A",
+                "description": "d",
+                "complexity": "low",
+                "depends_on": []
+            }]
+        }"#;
+        let out = parse_and_validate(json).expect("parse should succeed");
+        assert_eq!(out.tasks[0].effective_role(), "implementer");
+        assert_eq!(out.tasks[0].effective_expected_output(), "");
+    }
+
+    /// FM-15 S1 / FR-04: 已知合法 role 通过校验。
+    #[test]
+    fn ut01_9d_valid_role_accepted() {
+        let json = r#"{
+            "mission_title": "Test",
+            "tasks": [{
+                "id": "T1",
+                "title": "A",
+                "description": "d",
+                "complexity": "low",
+                "depends_on": [],
+                "role": "architect",
+                "expected_output": "Module split design doc at docs/design/auth.md"
+            }]
+        }"#;
+        let out = parse_and_validate(json).expect("parse should succeed");
+        assert_eq!(out.tasks[0].effective_role(), "architect");
+        assert!(out.tasks[0].effective_expected_output().starts_with("Module"));
     }
 
     #[test]
