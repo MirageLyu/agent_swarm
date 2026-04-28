@@ -64,7 +64,7 @@ export const AgentTerminalPane = memo(function AgentTerminalPane({
     if (isAtBottomRef.current && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [agent.events.length, agent.streamBuffer]);
+  }, [agent.events.length, agent.streamBuffer, agent.shellBuffer]);
 
   const trimmedEvents =
     agent.events.length > MAX_LINES
@@ -100,7 +100,7 @@ export const AgentTerminalPane = memo(function AgentTerminalPane({
         ref={scrollRef}
         onScroll={handleScroll}
       >
-        {trimmedEvents.length === 0 && !agent.streamBuffer ? (
+        {trimmedEvents.length === 0 && !agent.streamBuffer && !agent.shellBuffer ? (
           <div className={styles.empty}>
             {isRunning ? "Waiting for output…" : "No events yet"}
           </div>
@@ -110,13 +110,27 @@ export const AgentTerminalPane = memo(function AgentTerminalPane({
               <TerminalLine
                 key={evt.id}
                 event={evt}
-                isLast={i === trimmedEvents.length - 1 && !agent.streamBuffer}
+                isLast={
+                  i === trimmedEvents.length - 1 &&
+                  !agent.streamBuffer &&
+                  !agent.shellBuffer
+                }
                 isRunning={isRunning}
               />
             ))}
             {agent.streamBuffer && (
-              <div className={`${styles.streamBlock} ${isRunning ? styles.cursor : ""}`}>
+              <div
+                className={`${styles.streamBlock} ${
+                  isRunning && !agent.shellBuffer ? styles.cursor : ""
+                }`}
+              >
                 {agent.streamBuffer}
+              </div>
+            )}
+            {agent.shellBuffer && (
+              <div className={`${styles.shellBlock} ${isRunning ? styles.cursor : ""}`}>
+                <div className={styles.shellBlockHeader}>shell</div>
+                <pre className={styles.shellBlockBody}>{agent.shellBuffer}</pre>
               </div>
             )}
           </>

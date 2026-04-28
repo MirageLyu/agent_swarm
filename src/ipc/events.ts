@@ -308,6 +308,43 @@ export function onMissionDelivered(
   });
 }
 
+// FM-15 follow-up: shell_exec 流式输出。后端在每次 stdout/stderr 有增量字节时
+// emit 一条 chunk；前端 Workspace 按 agent_id 拼接显示，让用户能实时看到子进程输出，
+// 而不必等命令结束才在 tool_result 里看到一坨。
+//
+// stream:
+//   - "stdout" / "stderr"：进程标准输出 / 错误流的字节增量
+//   - "meta"            ：watchdog 元信息（命令开始 `$ ...`、watchdog kill、spawn 失败等）
+// eof: 该 stream 已读到末尾（进程退出 / 被 kill）。
+
+export interface AgentToolStreamPayload {
+  agentId: string;
+  tool: string;
+  stream: "stdout" | "stderr" | "meta";
+  chunk: string;
+  eof: boolean;
+}
+
+export function onAgentToolStream(
+  callback: (payload: AgentToolStreamPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<{
+    agent_id: string;
+    tool: string;
+    stream: "stdout" | "stderr" | "meta";
+    chunk: string;
+    eof: boolean;
+  }>("agent-tool-stream", (event) => {
+    callback({
+      agentId: event.payload.agent_id,
+      tool: event.payload.tool,
+      stream: event.payload.stream,
+      chunk: event.payload.chunk,
+      eof: event.payload.eof,
+    });
+  });
+}
+
 // FM-15 v2.2 P4-S5: Chat 流式输出 + Follow-up 提议事件。
 
 export interface ChatStreamPayload {

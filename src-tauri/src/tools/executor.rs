@@ -4,8 +4,29 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tauri::Emitter;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+
+/// `agent-tool-stream` 事件载荷：让前端 Workspace 视图实时拼接 shell 输出。
+/// 同一 agent_id 的连续 chunk 按 stream 分流（stdout / stderr 各自一条流）。
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolStreamPayload {
+    pub agent_id: String,
+    pub tool: String,
+    /// "stdout" / "stderr" / "meta"（meta 用于 watchdog 终止/启动元信息）
+    pub stream: String,
+    pub chunk: String,
+    /// true 表示该 stream 已 EOF（进程退出 / 被 kill）
+    pub eof: bool,
+}
+
+/// 流式 emit 的目标上下文。仅在 `execute_with_stream` 入口注入。
+#[derive(Clone)]
+struct StreamCtx {
+    app: tauri::AppHandle,
+    agent_id: String,
+}
 
 /// 单次 `shell_exec` 输出的最大字节数（stdout / stderr 各自）。超过则保留末尾、丢弃头部，
 /// 因为构建/测试类长命令的关键信息（错误堆栈、最终结论）几乎总在尾部。
@@ -64,9 +85,30 @@ impl ToolExecutor {
             "read_file" => self.read_file(input).await,
             "write_file" => self.write_file(input).await,
             "search_files" => self.search_files(input).await,
-            "shell_exec" => self.shell_exec(input).await,
+            "shell_exec" => self.shell_exec(input, None).await,
             "list_files" => self.list_files(input).await,
             _ => ToolOutput::error("unknown_tool", &format!("Unknown tool: {tool_name}")),
+        }
+    }
+
+    /// 与 [`Self::execute`] 等价，但对 `shell_exec` 额外把 stdout/stderr 增量
+    /// emit 为 `agent-tool-stream` 事件，供前端 Workspace 视图实时展示。
+    /// 其它工具透传到 `execute`，行为不变。
+    pub async fn execute_with_stream(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        app: &tauri::AppHandle,
+        agent_id: &str,
+    ) -> ToolOutput {
+        if tool_name == "shell_exec" {
+            self.shell_exec(input, Some(StreamCtx {
+                app: app.clone(),
+                agent_id: agent_id.to_string(),
+            }))
+            .await
+        } else {
+            self.execute(tool_name, input).await
         }
     }
 
@@ -158,7 +200,11 @@ impl ToolExecutor {
     /// - 触发 idle 或 wall 超限：先 SIGTERM，2s grace 后 SIGKILL
     /// - 输出 buffer 各保留尾部 16KB（构建/测试关键信息总在尾部）
     /// - 被 watchdog 终止时返回结构化错误（含分类 + 末尾输出），让 LLM 可据此决定换种方式重试
-    async fn shell_exec(&self, input: &serde_json::Value) -> ToolOutput {
+    async fn shell_exec(
+        &self,
+        input: &serde_json::Value,
+        stream_ctx: Option<StreamCtx>,
+    ) -> ToolOutput {
         let command = match input["command"].as_str() {
             Some(c) => c,
             None => return ToolOutput::error(
@@ -176,6 +222,11 @@ impl ToolExecutor {
             (SHELL_DEFAULT_IDLE_SECS, SHELL_DEFAULT_WALL_SECS)
         };
 
+        // 启动元信息：让前端 Workspace 流上立即出现一条命令开始的 marker
+        if let Some(ctx) = &stream_ctx {
+            emit_stream_meta(ctx, &format!("$ {command}\n"));
+        }
+
         let mut child = match Command::new("sh")
             .args(["-c", command])
             .current_dir(&self.workspace_root)
@@ -185,7 +236,12 @@ impl ToolExecutor {
             .spawn()
         {
             Ok(c) => c,
-            Err(e) => return ToolOutput::error("shell_error", &e.to_string()),
+            Err(e) => {
+                if let Some(ctx) = &stream_ctx {
+                    emit_stream_meta(ctx, &format!("[spawn error] {e}\n"));
+                }
+                return ToolOutput::error("shell_error", &e.to_string());
+            }
         };
 
         let stdout_pipe = child.stdout.take();
@@ -196,10 +252,20 @@ impl ToolExecutor {
         let stderr_buf = Arc::new(Mutex::new(TruncatedBuffer::new(SHELL_OUTPUT_MAX_BYTES)));
 
         let stdout_handle = stdout_pipe.map(|p| {
-            spawn_pipe_reader(p, stdout_buf.clone(), last_byte_at.clone())
+            spawn_pipe_reader(
+                p,
+                stdout_buf.clone(),
+                last_byte_at.clone(),
+                stream_ctx.clone().map(|c| (c, "stdout".to_string())),
+            )
         });
         let stderr_handle = stderr_pipe.map(|p| {
-            spawn_pipe_reader(p, stderr_buf.clone(), last_byte_at.clone())
+            spawn_pipe_reader(
+                p,
+                stderr_buf.clone(),
+                last_byte_at.clone(),
+                stream_ctx.clone().map(|c| (c, "stderr".to_string())),
+            )
         });
 
         let started = Instant::now();
@@ -268,6 +334,9 @@ impl ToolExecutor {
 
                     if let Some(reason) = &termination_reason {
                         tracing::warn!("shell_exec watchdog terminating: {reason}");
+                        if let Some(ctx) = &stream_ctx {
+                            emit_stream_meta(ctx, &format!("[watchdog kill] {reason}\n"));
+                        }
                         terminate_child(&mut child).await;
                     }
                 }
@@ -412,11 +481,13 @@ impl TruncatedBuffer {
     }
 }
 
-/// 启动 reader task：每读到一批字节就追加到 buffer + 更新 last_byte_at（驱动 idle 检测）。
+/// 启动 reader task：每读到一批字节就追加到 buffer + 更新 last_byte_at（驱动 idle 检测），
+/// 同时（如果调用方传了 emit ctx）把这批字节作为 `agent-tool-stream` 事件发到前端。
 fn spawn_pipe_reader<R>(
     mut pipe: R,
     buf: Arc<Mutex<TruncatedBuffer>>,
     last_byte_at: Arc<Mutex<Instant>>,
+    emit: Option<(StreamCtx, String)>,
 ) -> tokio::task::JoinHandle<()>
 where
     R: AsyncReadExt + Unpin + Send + 'static,
@@ -425,15 +496,57 @@ where
         let mut chunk = [0u8; SHELL_READ_CHUNK];
         loop {
             match pipe.read(&mut chunk).await {
-                Ok(0) => break,
+                Ok(0) => {
+                    if let Some((ctx, stream)) = &emit {
+                        emit_stream_chunk(ctx, stream, "", true);
+                    }
+                    break;
+                }
                 Ok(n) => {
                     *last_byte_at.lock().unwrap() = Instant::now();
                     buf.lock().unwrap().push(&chunk[..n]);
+                    if let Some((ctx, stream)) = &emit {
+                        let text = String::from_utf8_lossy(&chunk[..n]).into_owned();
+                        emit_stream_chunk(ctx, stream, &text, false);
+                    }
                 }
-                Err(_) => break,
+                Err(_) => {
+                    if let Some((ctx, stream)) = &emit {
+                        emit_stream_chunk(ctx, stream, "", true);
+                    }
+                    break;
+                }
             }
         }
     })
+}
+
+/// 发送一段流式 chunk。失败默默忽略——发不出来不应阻塞 agent 工作。
+fn emit_stream_chunk(ctx: &StreamCtx, stream: &str, chunk: &str, eof: bool) {
+    let _ = ctx.app.emit(
+        "agent-tool-stream",
+        ToolStreamPayload {
+            agent_id: ctx.agent_id.clone(),
+            tool: "shell_exec".to_string(),
+            stream: stream.to_string(),
+            chunk: chunk.to_string(),
+            eof,
+        },
+    );
+}
+
+/// 发一条 meta 元信息（命令开始 / spawn 失败 / watchdog kill 等），归入虚拟 stream "meta"。
+fn emit_stream_meta(ctx: &StreamCtx, text: &str) {
+    let _ = ctx.app.emit(
+        "agent-tool-stream",
+        ToolStreamPayload {
+            agent_id: ctx.agent_id.clone(),
+            tool: "shell_exec".to_string(),
+            stream: "meta".to_string(),
+            chunk: text.to_string(),
+            eof: false,
+        },
+    );
 }
 
 /// 终止子进程：watchdog 触发的对象基本是死循环 / hang，直接 SIGKILL（tokio

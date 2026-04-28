@@ -5,6 +5,7 @@ import {
   onAgentEvent,
   onAgentStream,
   onAgentStarted,
+  onAgentToolStream,
   onTaskStatusChanged,
   onMissionStatusChanged,
 } from "../ipc";
@@ -53,6 +54,7 @@ export function WorkspaceView() {
     updateAgent,
     appendEvent,
     appendStream,
+    appendShell,
     hydrateAgents,
     hydrateEvents,
   } = useAgentStore();
@@ -106,6 +108,7 @@ export function WorkspaceView() {
           costUsd: a.cost_usd,
           events: [],
           streamBuffer: "",
+          shellBuffer: "",
         }));
         hydrateAgents(hydrated);
       } catch {}
@@ -185,6 +188,7 @@ export function WorkspaceView() {
           costUsd: 0,
           events: [],
           streamBuffer: "",
+          shellBuffer: "",
         });
       }
 
@@ -233,6 +237,24 @@ export function WorkspaceView() {
       appendStream(payload.agent_id, payload.content);
     });
 
+    // FM-15 follow-up：把 shell_exec 的 stdout/stderr/meta 拼到 shellBuffer，
+    // 让 AgentTerminalPane 实时渲染当前命令的输出，而不必等 tool_result 回来。
+    const unlistenToolStream = onAgentToolStream((payload) => {
+      // meta（命令开始 / watchdog kill 等）加 [meta] 前缀更醒目；
+      // stderr 加 [stderr] 前缀以便阅读时能区分；stdout 直接拼。
+      let chunk = payload.chunk;
+      if (payload.stream === "meta" && chunk) {
+        chunk = chunk.startsWith("[") ? chunk : `[meta] ${chunk}`;
+      } else if (payload.stream === "stderr" && chunk) {
+        if (!chunk.startsWith("[stderr]")) {
+          chunk = `[stderr] ${chunk}`;
+        }
+      }
+      if (chunk) {
+        appendShell(payload.agentId, chunk);
+      }
+    });
+
     const unlistenStarted = onAgentStarted((payload) => {
       const store = useAgentStore.getState();
       if (!store.agents[payload.agent_id]) {
@@ -249,6 +271,7 @@ export function WorkspaceView() {
           costUsd: 0,
           events: [],
           streamBuffer: "",
+          shellBuffer: "",
         });
       }
       if (!store.activeAgentId) {
@@ -267,11 +290,12 @@ export function WorkspaceView() {
     return () => {
       unlistenEvent.then((fn) => fn());
       unlistenStream.then((fn) => fn());
+      unlistenToolStream.then((fn) => fn());
       unlistenStarted.then((fn) => fn());
       unlistenTask.then((fn) => fn());
       unlistenMission.then((fn) => fn());
     };
-  }, [addAgent, updateAgent, appendEvent, appendStream, setActiveAgent, updateTaskLocal, updateMissionStatus]);
+  }, [addAgent, updateAgent, appendEvent, appendStream, appendShell, setActiveAgent, updateTaskLocal, updateMissionStatus]);
 
   useEffect(() => {
     if (!filterMissionId) return;

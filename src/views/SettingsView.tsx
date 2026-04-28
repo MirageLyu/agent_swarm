@@ -62,7 +62,7 @@ export function SettingsView() {
         agent_step_idle_seconds: Math.max(0, parseInt(stepIdle, 10) || 0),
       });
       setConfigDirty(false);
-      setMessage("Configuration saved (restart app for stream-idle changes)");
+      setMessage("Configuration saved. New values take effect on the next agent run.");
       setTimeout(() => setMessage(""), 3000);
     } catch (e) {
       setMessage(`Error: ${e}`);
@@ -187,7 +187,7 @@ export function SettingsView() {
           />
           <p className={styles.hint}>
             LLM 流式响应"相邻 chunk 静默"上限。0 = 关闭 idle 检测仅靠 wall-clock 兜底。
-            修改后需要重启 App 才生效（Provider 启动时一次性读取）。
+            修改在下一次 Agent / Chat / Planner 任务启动时即生效；正在运行中的 Agent 仍沿用旧值。
           </p>
         </div>
       </div>

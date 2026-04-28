@@ -397,7 +397,10 @@ impl AgentEngine {
                             if name == TASK_COMPLETE_TOOL {
                                 continue;
                             }
-                            let output = self.tool_executor.execute(name, input).await;
+                            let output = self
+                                .tool_executor
+                                .execute_with_stream(name, input, &self.app_handle, agent_id)
+                                .await;
                             tool_results.push(ContentBlock::ToolResult {
                                 tool_use_id: id.clone(),
                                 content: output.content,
@@ -530,7 +533,11 @@ impl AgentEngine {
         if name == "publish_artifact" {
             return self.execute_publish_artifact(agent_id, input).await;
         }
-        self.tool_executor.execute(name, input).await
+        // shell_exec 走带 stream 的入口，把 stdout/stderr emit 给前端 Workspace。
+        // 其它工具透传到普通 execute，行为不变。
+        self.tool_executor
+            .execute_with_stream(name, input, &self.app_handle, agent_id)
+            .await
     }
 
     /// 执行 publish_artifact 工具：基于 agent_id 反查 task_id / mission_id，

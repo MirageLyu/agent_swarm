@@ -30,6 +30,9 @@ export interface Agent {
   costUsd: number;
   events: AgentEvent[];
   streamBuffer: string;
+  /// FM-15 follow-up: shell_exec 实时输出，独立于 LLM streamBuffer。
+  /// 由 `agent-tool-stream` 事件驱动，进入终态时清空，避免下次重启混淆。
+  shellBuffer: string;
 }
 
 export type WorkspaceViewMode = "list" | "focus" | "grid";
@@ -54,6 +57,8 @@ interface AgentState {
   appendEvent: (agentId: string, event: AgentEvent) => void;
   appendStream: (agentId: string, content: string) => void;
   clearStream: (agentId: string) => void;
+  appendShell: (agentId: string, content: string) => void;
+  clearShell: (agentId: string) => void;
   setActiveAgent: (id: string | null) => void;
   setViewMode: (mode: WorkspaceViewMode) => void;
   setFilterMissionId: (missionId: string | null) => void;
@@ -122,6 +127,35 @@ export const useAgentStore = create<AgentState>((set) => ({
       };
     }),
 
+  appendShell: (agentId, content) =>
+    set((s) => {
+      const agent = s.agents[agentId];
+      if (!agent) return s;
+      // 控制 shellBuffer 上限：保留尾部 ~24KB 字符，避免长跑命令把内存吃爆。
+      const next = agent.shellBuffer + content;
+      const SHELL_BUF_MAX = 24 * 1024;
+      const trimmed =
+        next.length > SHELL_BUF_MAX ? next.slice(next.length - SHELL_BUF_MAX) : next;
+      return {
+        agents: {
+          ...s.agents,
+          [agentId]: { ...agent, shellBuffer: trimmed },
+        },
+      };
+    }),
+
+  clearShell: (agentId) =>
+    set((s) => {
+      const agent = s.agents[agentId];
+      if (!agent) return s;
+      return {
+        agents: {
+          ...s.agents,
+          [agentId]: { ...agent, shellBuffer: "" },
+        },
+      };
+    }),
+
   setActiveAgent: (id) =>
     set({ activeAgentId: id }),
 
@@ -166,6 +200,7 @@ export const useAgentStore = create<AgentState>((set) => ({
             tokensUsed: Math.max(a.tokensUsed, existing.tokensUsed),
             costUsd: Math.max(a.costUsd, existing.costUsd),
             streamBuffer: isTerminal ? "" : existing.streamBuffer,
+            shellBuffer: isTerminal ? "" : existing.shellBuffer,
           };
         } else {
           merged[a.id] = a;
