@@ -48,6 +48,13 @@ pub struct TaskInfo {
     pub consumes_artifacts_json: Option<String>,
     #[serde(default)]
     pub file_scope_hints_json: Option<String>,
+    /// 最近一次失败原因（带分类前缀，如 "timeout: …" / "max_steps: …"）。
+    /// 前端 DAG 节点 / TaskDetailPanel hover 时展示。
+    #[serde(default)]
+    pub last_error: Option<String>,
+    /// 最近一次失败时间（UTC ISO8601）。
+    #[serde(default)]
+    pub last_failed_at: Option<String>,
 }
 
 fn default_task_role() -> String {
@@ -149,9 +156,14 @@ pub(crate) fn build_provider(app: &tauri::AppHandle) -> Result<(Arc<dyn LlmProvi
             "Please configure your API key in Settings first.".to_string()
         })?;
 
+    let stream_idle = config.agent_step_idle_seconds;
     let provider: Arc<dyn LlmProvider> = match config.provider.as_str() {
-        "anthropic" => Arc::new(AnthropicProvider::new(api_key)),
-        _ => Arc::new(OpenAICompatProvider::new(api_key, config.base_url.clone())),
+        "anthropic" => Arc::new(AnthropicProvider::with_stream_idle(api_key, stream_idle)),
+        _ => Arc::new(OpenAICompatProvider::with_stream_idle(
+            api_key,
+            config.base_url.clone(),
+            stream_idle,
+        )),
     };
 
     Ok((provider, config.default_model))
@@ -440,6 +452,8 @@ pub async fn plan_mission(
                     produces_artifacts_json: Some(produces_json.clone()),
                     consumes_artifacts_json: Some(consumes_json.clone()),
                     file_scope_hints_json: Some(file_scope_json.clone()),
+                    last_error: None,
+                    last_failed_at: None,
                 });
             }
 
@@ -510,7 +524,8 @@ pub fn get_mission_detail(
             "SELECT id, mission_id, title, description, status, complexity,
                     assigned_agent_id, created_at, completed_at,
                     role, expected_output, additional_skills, produces_artifacts,
-                    consumes_artifacts, file_scope_hints
+                    consumes_artifacts, file_scope_hints,
+                    last_error, last_failed_at
              FROM tasks WHERE mission_id = ? ORDER BY created_at ASC",
         )?;
         let tasks: Vec<TaskInfo> = task_stmt
@@ -531,6 +546,8 @@ pub fn get_mission_detail(
                     produces_artifacts_json: row.get(12).ok(),
                     consumes_artifacts_json: row.get(13).ok(),
                     file_scope_hints_json: row.get(14).ok(),
+                    last_error: row.get(15).ok(),
+                    last_failed_at: row.get(16).ok(),
                 })
             })?
             .filter_map(|r| r.ok())
@@ -703,6 +720,8 @@ pub fn add_task(app: tauri::AppHandle, request: AddTaskRequest) -> Result<TaskIn
             produces_artifacts_json: None,
             consumes_artifacts_json: None,
             file_scope_hints_json: None,
+            last_error: None,
+            last_failed_at: None,
         })
     })
     .map_err(|e| e.to_string())
@@ -850,11 +869,20 @@ pub async fn stop_mission_execution(
 pub struct RestartMissionRequest {
     pub mission_id: String,
     pub mode: String, // "full" | "failed_only"
+    /// 复用上次的 repo_path 直接拉起 scheduler，前端可一键重跑跳过工作区选择。
+    /// 仅在 mission 已经记录 repo_path 时生效；缺失则降级为只重置不启动。
+    #[serde(default)]
+    pub auto_start: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
 pub struct RestartResult {
     pub reset_count: u32,
+    /// 实际是否已经被 auto-start 拉起；前端据此决定要不要再弹工作区对话框。
+    #[serde(default)]
+    pub auto_started: bool,
+    /// 复用的 repo_path（若有）回传给前端，前端可直接用于后续 open_in_editor 等操作。
+    pub repo_path: Option<String>,
 }
 
 #[tauri::command]
@@ -925,8 +953,8 @@ pub async fn restart_mission(
         })
         .map_err(|e| e.to_string())?;
 
-    // Async worktree cleanup
-    if let Some(rp) = repo_path {
+    // Async worktree cleanup —— full 模式才需要清空 worktree
+    if let Some(rp) = repo_path.clone() {
         let mode = request.mode.clone();
         tokio::spawn(async move {
             if mode == "full" {
@@ -941,13 +969,85 @@ pub async fn restart_mission(
     let _ = app.emit(
         "mission-status-changed",
         MissionStatusChangedPayload {
-            mission_id: request.mission_id,
+            mission_id: request.mission_id.clone(),
             from: status,
             to: "planned".to_string(),
         },
     );
 
-    Ok(RestartResult { reset_count })
+    // FM-15 follow-up: 一键重跑——复用上次 repo_path 直接拉起 scheduler。
+    // 失败不阻塞 restart 本身：返回 auto_started=false 让前端补 fallback（弹对话框）。
+    let mut auto_started = false;
+    if request.auto_start {
+        if let Some(ref rp) = repo_path {
+            match auto_start_mission(&app, &request.mission_id, rp).await {
+                Ok(()) => auto_started = true,
+                Err(e) => {
+                    tracing::warn!(
+                        "restart_mission auto_start failed for {}: {e}",
+                        request.mission_id
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(RestartResult {
+        reset_count,
+        auto_started,
+        repo_path,
+    })
+}
+
+/// 复用 start_mission_execution 的核心逻辑：promote ready tasks → 启动 scheduler。
+/// 抽到 helper 是为了让 restart_mission 的 auto_start 可以直接复用而不绕一圈 IPC。
+async fn auto_start_mission(
+    app: &tauri::AppHandle,
+    mission_id: &str,
+    repo_path: &str,
+) -> Result<(), String> {
+    let repo_pb = std::path::PathBuf::from(repo_path);
+
+    crate::git::ensure_git_repo(&repo_pb)
+        .map_err(|e| format!("ensure_git_repo failed: {e}"))?;
+
+    let db = app.state::<crate::db::Database>();
+    db.with_conn(|conn| -> anyhow::Result<()> {
+        conn.execute(
+            "UPDATE missions SET status = 'running', repo_path = ?1, updated_at = datetime('now') \
+             WHERE id = ?2",
+            rusqlite::params![repo_path, mission_id],
+        )?;
+        conn.execute(
+            "UPDATE tasks SET status = 'ready' \
+             WHERE mission_id = ?1 AND status = 'pending' \
+               AND id NOT IN (SELECT task_id FROM task_dependencies)",
+            rusqlite::params![mission_id],
+        )?;
+        Ok(())
+    })
+    .map_err(|e: anyhow::Error| e.to_string())?;
+
+    let worktrees_dir = repo_pb.join(".worktrees");
+    if let Err(e) = std::fs::create_dir_all(&worktrees_dir) {
+        return Err(format!("create .worktrees failed: {e}"));
+    }
+
+    let scheduler = app.state::<crate::agent::Scheduler>();
+    scheduler
+        .start_mission(mission_id, repo_pb, app.clone())
+        .map_err(|e| e.to_string())?;
+
+    let _ = app.emit(
+        "mission-status-changed",
+        MissionStatusChangedPayload {
+            mission_id: mission_id.to_string(),
+            from: "planned".to_string(),
+            to: "running".to_string(),
+        },
+    );
+
+    Ok(())
 }
 
 // ---------- template export / import ----------
@@ -994,6 +1094,9 @@ pub fn export_mission_template(
                         produces_artifacts_json: row.get(12).ok(),
                         consumes_artifacts_json: row.get(13).ok(),
                         file_scope_hints_json: row.get(14).ok(),
+                        // export 路径不关心失败信息，模板里也不应保留运行时状态
+                        last_error: None,
+                        last_failed_at: None,
                     })
                 })?
                 .filter_map(|r| r.ok())

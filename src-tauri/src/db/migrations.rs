@@ -483,6 +483,17 @@ const MIGRATIONS: &[(&str, &str)] = &[(
             ON mission_chats(mission_id, created_at);
         "#,
     ),
+    // FM-15 follow-up — 失败诊断可视化：让 task 自带最近一次失败原因 + 时间，
+    // 前端 DAG / TaskDetailPanel 可直接 hover 看失败信息，避免再去翻 agent_events。
+    // - tasks.last_error    : 最近一次失败原因（含分类前缀，如 "timeout: …" / "guardrail: …"）
+    // - tasks.last_failed_at: 最近一次失败时间（UTC ISO8601）
+    (
+        "020_fm15_followup_task_last_error",
+        r#"
+        ALTER TABLE tasks ADD COLUMN last_error TEXT;
+        ALTER TABLE tasks ADD COLUMN last_failed_at TEXT;
+        "#,
+    ),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

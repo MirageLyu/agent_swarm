@@ -61,6 +61,10 @@ export interface TaskInfo {
   produces_artifacts_json?: string | null;
   consumes_artifacts_json?: string | null;
   file_scope_hints_json?: string | null;
+  /** 最近一次失败原因（带分类前缀：timeout: / max_steps: / guardrail: / cancelled: / agent_error: 等） */
+  last_error?: string | null;
+  /** 最近一次失败时间（UTC ISO8601） */
+  last_failed_at?: string | null;
 }
 
 export interface DependencyInfo {
@@ -162,6 +166,12 @@ export interface ConfigResponse {
   provider: string;
   max_concurrent_agents: number;
   has_api_key: boolean;
+  /** Coding Agent 单任务最大步数（FR-11 硬上限） */
+  max_agent_steps: number;
+  /** Coding Agent wall-clock 超时（秒），整个任务从开始到结束 */
+  agent_timeout_seconds: number;
+  /** LLM 流式相邻 chunk 的静默上限（秒），0 表示关闭 idle 检测 */
+  agent_step_idle_seconds: number;
 }
 
 export interface SetApiKeyRequest {
@@ -174,6 +184,9 @@ export interface UpdateConfigRequest {
   base_url?: string;
   provider?: string;
   max_concurrent_agents?: number;
+  max_agent_steps?: number;
+  agent_timeout_seconds?: number;
+  agent_step_idle_seconds?: number;
 }
 
 // ---------- Agent ----------
@@ -618,10 +631,16 @@ export interface DeleteMissionRequest {
 export interface RestartMissionRequest {
   mission_id: string;
   mode: "full" | "failed_only";
+  /** 复用上次 repo_path 直接拉起 scheduler，跳过工作区选择对话框 */
+  auto_start?: boolean;
 }
 
 export interface RestartResult {
   reset_count: number;
+  /** 实际是否已经被一键重跑拉起；为 false 时前端需 fallback 到工作区选择 */
+  auto_started: boolean;
+  /** 复用的 repo_path（若有） */
+  repo_path: string | null;
 }
 
 // ---------- commands ----------

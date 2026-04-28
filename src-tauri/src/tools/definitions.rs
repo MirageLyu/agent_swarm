@@ -48,11 +48,19 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "shell_exec".to_string(),
-            description: "Execute a shell command".to_string(),
+            description: "Execute a shell command (sh -c). Killed by a watchdog when it goes \
+                          silent for too long or runs past the wall-clock cap. Default thresholds \
+                          are 60s idle / 5min wall — set `expect_long_running: true` for known \
+                          long commands like `npm install`, `pnpm install`, `cargo build`, \
+                          `cargo test` (raises to 120s idle / 30min wall).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "Shell command to execute" }
+                    "command": { "type": "string", "description": "Shell command to execute" },
+                    "expect_long_running": {
+                        "type": "boolean",
+                        "description": "Set to true for installs / heavy builds / long test suites. Defaults to false."
+                    }
                 },
                 "required": ["command"]
             }),

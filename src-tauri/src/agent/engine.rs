@@ -29,12 +29,23 @@ use super::guardrail::{self, Guardrail, GuardrailContext};
 use super::types::*;
 
 /// FR-11 默认值；Scheduler 可从配置覆盖。
-pub const DEFAULT_AGENT_TIMEOUT_SECS: u64 = 600;
-pub const DEFAULT_MAX_AGENT_STEPS: u32 = 50;
+///
+/// 1800s（30 min）是为了配合 Phase 4 的"卡住才算超时"策略：LLM 流式响应有 stream-idle
+/// 兜底（默认 60s 静默就杀），shell_exec 有进程级 watchdog（默认 60s idle / 5min wall），
+/// 这层 wall-clock 仅作为兜底防御无限循环；正常任务远到不了。
+pub const DEFAULT_AGENT_TIMEOUT_SECS: u64 = 1800;
+pub const DEFAULT_MAX_AGENT_STEPS: u32 = 80;
 /// 当 LLM 连续 N 次不调用任何工具但又没调用 task_complete，就注入提示。
 const MAX_CONSECUTIVE_NO_TOOL: u32 = 3;
+/// L3 循环检测：连续 N 步只调用只读工具（read/search/list）就注入"开始动手"提示。
+const READ_ONLY_LOOP_THRESHOLD: u32 = 5;
 /// 步数距上限只剩 N 时注入"剩余 N 步"提示。
 const STEPS_REMAINING_HINT: u32 = 5;
+
+/// 只读工具集合（不会改变工作区状态）。L3 循环检测据此判断是否在原地探索。
+fn is_read_only_tool(name: &str) -> bool {
+    matches!(name, "read_file" | "search_files" | "list_files")
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 struct AgentEventPayload {
@@ -127,18 +138,15 @@ impl AgentEngine {
             Ok(res) => res,
             Err(_) => {
                 tracing::warn!(
-                    "Agent {agent_id} hit timeout ({:?}); marking failed",
+                    "Agent {agent_id} hit wall-clock timeout ({:?}); marking failed",
                     outer_dur
                 );
-                self.emit_event(
-                    agent_id,
-                    0,
-                    "error",
-                    &format!("Agent timed out after {}s", opts.timeout_secs),
-                );
+                let reason = format!("timeout: wall_clock {}s exceeded", opts.timeout_secs);
+                self.emit_event(agent_id, 0, "error", &reason);
                 self.emit_event(agent_id, 0, "status_change", "failed");
                 self.update_agent_status(agent_id, "failed");
                 self.expire_agent_notes(agent_id);
+                self.mark_task_failed_with_reason(agent_id, "failed", &reason);
                 Ok(AgentStatus::Failed)
             }
         }
@@ -193,6 +201,8 @@ impl AgentEngine {
         let mut messages: Vec<Message> = Vec::new();
         let mut step: u32 = 0;
         let mut consecutive_no_tool: u32 = 0;
+        let mut consecutive_read_only: u32 = 0;
+        let mut hinted_read_only_loop = false;
         let mut retries_left: u32 = opts.guardrail_retry_budget;
         let mut hinted_remaining_steps = false;
 
@@ -205,15 +215,15 @@ impl AgentEngine {
             }
 
             if step >= opts.max_steps {
-                self.emit_event(
-                    agent_id,
-                    step,
-                    "error",
-                    "max_steps_exceeded: agent did not call task_complete in time",
+                let reason = format!(
+                    "max_steps: {} steps exhausted without task_complete",
+                    opts.max_steps
                 );
+                self.emit_event(agent_id, step, "error", &reason);
                 self.emit_event(agent_id, step, "status_change", "failed");
                 self.update_agent_status(agent_id, "failed");
                 self.expire_agent_notes(agent_id);
+                self.mark_task_failed_with_reason(agent_id, "failed", &reason);
                 return Ok(AgentStatus::Failed);
             }
 
@@ -358,15 +368,16 @@ impl AgentEngine {
                     }
                     CompletionOutcome::Retry { feedback } => {
                         if retries_left == 0 {
-                            self.emit_event(
-                                agent_id,
-                                step,
-                                "error",
-                                "Guardrail retry budget exhausted",
+                            let reason = format!(
+                                "guardrail: retry budget exhausted ({}); last_feedback={}",
+                                opts.guardrail_retry_budget,
+                                feedback.chars().take(160).collect::<String>()
                             );
+                            self.emit_event(agent_id, step, "error", &reason);
                             self.emit_event(agent_id, step, "status_change", "failed");
                             self.update_agent_status(agent_id, "failed");
                             self.expire_agent_notes(agent_id);
+                            self.mark_task_failed_with_reason(agent_id, "failed", &reason);
                             return Ok(AgentStatus::Failed);
                         }
                         retries_left -= 1;
@@ -426,6 +437,34 @@ impl AgentEngine {
                 continue;
             }
             consecutive_no_tool = 0;
+
+            // L3 循环检测：连续 N 步只调用只读工具（read/search/list）→ 注入"开始动手"提示，
+            // 帮 LLM 跳出"光读不写"的死循环。一次性，避免重复打扰。
+            let all_read_only = tool_use_blocks
+                .iter()
+                .all(|(_, name, _)| is_read_only_tool(name));
+            if all_read_only {
+                consecutive_read_only += 1;
+            } else {
+                consecutive_read_only = 0;
+                hinted_read_only_loop = false;
+            }
+            if !hinted_read_only_loop && consecutive_read_only >= READ_ONLY_LOOP_THRESHOLD {
+                hinted_read_only_loop = true;
+                let hint = format!(
+                    "[System] You have spent {} consecutive steps only reading / searching files \
+                     without making any change. Either start writing (`write_file`), running a \
+                     command (`shell_exec`), or — if exploration is finished — call \
+                     `task_complete`. Endless exploration is treated as a failure.",
+                    consecutive_read_only
+                );
+                self.emit_event(agent_id, step, "system_hint", &hint);
+                messages.push(Message {
+                    role: MessageRole::User,
+                    content: vec![ContentBlock::Text { text: hint }],
+                    cache_control: None,
+                });
+            }
 
             let mut tool_results: Vec<ContentBlock> = Vec::new();
             for (id, name, input) in &tool_use_blocks {
@@ -691,7 +730,27 @@ impl AgentEngine {
         self.expire_agent_notes(agent_id);
         self.emit_event(agent_id, step, "status_change", "cancelled");
         self.update_agent_status(agent_id, "cancelled");
+        self.mark_task_failed_with_reason(agent_id, "cancelled", "cancelled: user stop");
         Ok(AgentStatus::Cancelled)
+    }
+
+    /// 在 engine 层把失败原因写入 `tasks.last_error` + `agents.error_message`，让前端 DAG /
+    /// TaskDetailPanel 能直接 hover 看为什么红了。`reason` 推荐带分类前缀
+    /// （`timeout:` / `max_steps:` / `guardrail:` / `cancelled:` / `llm_error:`）。
+    fn mark_task_failed_with_reason(&self, agent_id: &str, status: &str, reason: &str) {
+        let db = self.app_handle.state::<Database>();
+        let aid = agent_id.to_string();
+        let st = status.to_string();
+        let r = reason.to_string();
+        let _ = db.with_conn(move |conn| {
+            queries::fail_task_for_agent(conn, &aid, &st, &r)?;
+            conn.execute(
+                "UPDATE agents SET error_message = COALESCE(error_message, ?2), \
+                 updated_at = datetime('now') WHERE id = ?1",
+                rusqlite::params![&aid, &r],
+            )?;
+            Ok(())
+        });
     }
 
     fn emit_event(&self, agent_id: &str, step: u32, kind: &str, content: &str) {

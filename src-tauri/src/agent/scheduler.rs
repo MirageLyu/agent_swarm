@@ -769,7 +769,10 @@ impl Scheduler {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!("Worktree creation failed for agent {agent_id}: {e}");
-                let _ = db.with_conn(|conn| queries::fail_task(conn, task_id, "failed"));
+                let reason = format!("worktree_error: {e}");
+                let _ = db.with_conn(|conn| {
+                    queries::fail_task(conn, task_id, "failed", Some(&reason))
+                });
                 let _ = app.emit(
                     "task-status-changed",
                     TaskStatusChangedPayload {
@@ -848,21 +851,37 @@ impl Scheduler {
                 .run_with_options(&aid, &task_desc, &agent_options)
                 .await;
 
+            // engine 内部已在 last_error 写好分类原因；scheduler 只在 Err（panic / 提前 bail）
+            // 时补一条兜底原因，正常 AgentStatus::Failed 不覆盖。
+            let mut scheduler_failure_reason: Option<String> = None;
             let task_status = match &result {
                 Ok(AgentStatus::Completed) => "completed",
                 Ok(AgentStatus::Cancelled) => "cancelled",
                 Ok(_) | Err(_) => {
                     if let Err(e) = &result {
                         tracing::error!("Agent {aid} error: {e}");
+                        let msg = format!("agent_error: {e}");
+                        let db = app_clone.state::<Database>();
+                        let _ = db.with_conn(|conn| {
+                            conn.execute(
+                                "UPDATE agents SET status = 'failed', \
+                                 error_message = COALESCE(error_message, ?2), \
+                                 updated_at = datetime('now') WHERE id = ?1",
+                                rusqlite::params![aid, &msg],
+                            )?;
+                            Ok(())
+                        });
+                        scheduler_failure_reason = Some(msg);
+                    } else {
+                        let db = app_clone.state::<Database>();
+                        let _ = db.with_conn(|conn| {
+                            conn.execute(
+                                "UPDATE agents SET status = 'failed', updated_at = datetime('now') WHERE id = ?1",
+                                rusqlite::params![aid],
+                            )?;
+                            Ok(())
+                        });
                     }
-                    let db = app_clone.state::<Database>();
-                    let _ = db.with_conn(|conn| {
-                        conn.execute(
-                            "UPDATE agents SET status = 'failed', updated_at = datetime('now') WHERE id = ?1",
-                            rusqlite::params![aid],
-                        )?;
-                        Ok(())
-                    });
                     "failed"
                 }
             };
@@ -873,7 +892,7 @@ impl Scheduler {
                 if task_status == "completed" {
                     queries::complete_task(conn, &tid)
                 } else {
-                    queries::fail_task(conn, &tid, task_status)
+                    queries::fail_task(conn, &tid, task_status, scheduler_failure_reason.as_deref())
                 }
             });
 

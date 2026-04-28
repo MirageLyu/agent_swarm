@@ -15,6 +15,9 @@ export function SettingsView() {
   const [baseUrl, setBaseUrl] = useState("");
   const [defaultModel, setDefaultModel] = useState("");
   const [maxAgents, setMaxAgents] = useState("");
+  const [maxSteps, setMaxSteps] = useState("");
+  const [agentTimeout, setAgentTimeout] = useState("");
+  const [stepIdle, setStepIdle] = useState("");
   const [configDirty, setConfigDirty] = useState(false);
 
   useEffect(() => {
@@ -24,6 +27,9 @@ export function SettingsView() {
       setBaseUrl(c.base_url);
       setDefaultModel(c.default_model);
       setMaxAgents(String(c.max_concurrent_agents));
+      setMaxSteps(String(c.max_agent_steps));
+      setAgentTimeout(String(c.agent_timeout_seconds));
+      setStepIdle(String(c.agent_step_idle_seconds));
     }).catch(console.error);
   }, []);
 
@@ -51,10 +57,13 @@ export function SettingsView() {
         base_url: baseUrl,
         default_model: defaultModel,
         max_concurrent_agents: parseInt(maxAgents, 10) || 4,
+        max_agent_steps: parseInt(maxSteps, 10) || 80,
+        agent_timeout_seconds: parseInt(agentTimeout, 10) || 1800,
+        agent_step_idle_seconds: Math.max(0, parseInt(stepIdle, 10) || 0),
       });
       setConfigDirty(false);
-      setMessage("Configuration saved");
-      setTimeout(() => setMessage(""), 2000);
+      setMessage("Configuration saved (restart app for stream-idle changes)");
+      setTimeout(() => setMessage(""), 3000);
     } catch (e) {
       setMessage(`Error: ${e}`);
     } finally {
@@ -137,6 +146,49 @@ export function SettingsView() {
             onChange={(e) => { setMaxAgents(e.target.value); markDirty(); }}
             placeholder="4"
           />
+        </div>
+        <div className={styles.field}>
+          <div className={styles.fieldHeader}>
+            <span>Max Steps per Agent</span>
+          </div>
+          <Input
+            type="number"
+            value={maxSteps}
+            onChange={(e) => { setMaxSteps(e.target.value); markDirty(); }}
+            placeholder="80"
+          />
+          <p className={styles.hint}>
+            硬上限：一次任务里 LLM step 数。超出即按 max_steps 失败，且会在 DAG 节点上写明原因。
+          </p>
+        </div>
+        <div className={styles.field}>
+          <div className={styles.fieldHeader}>
+            <span>Agent Wall-clock Timeout (seconds)</span>
+          </div>
+          <Input
+            type="number"
+            value={agentTimeout}
+            onChange={(e) => { setAgentTimeout(e.target.value); markDirty(); }}
+            placeholder="1800"
+          />
+          <p className={styles.hint}>
+            一次 Agent 任务从拉起到结束的总墙钟超时（兜底防御无限循环）。建议 ≥ 600s。
+          </p>
+        </div>
+        <div className={styles.field}>
+          <div className={styles.fieldHeader}>
+            <span>LLM Stream Idle Timeout (seconds)</span>
+          </div>
+          <Input
+            type="number"
+            value={stepIdle}
+            onChange={(e) => { setStepIdle(e.target.value); markDirty(); }}
+            placeholder="60"
+          />
+          <p className={styles.hint}>
+            LLM 流式响应"相邻 chunk 静默"上限。0 = 关闭 idle 检测仅靠 wall-clock 兜底。
+            修改后需要重启 App 才生效（Provider 启动时一次性读取）。
+          </p>
         </div>
       </div>
 

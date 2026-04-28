@@ -1520,6 +1520,8 @@ pub async fn sign_contract(
                     produces_artifacts_json: Some(produces_json.clone()),
                     consumes_artifacts_json: Some(consumes_json.clone()),
                     file_scope_hints_json: Some(file_scope_json.clone()),
+                    last_error: None,
+                    last_failed_at: None,
                 });
             }
 

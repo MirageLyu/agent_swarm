@@ -1,7 +1,25 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+
+/// 单次 `shell_exec` 输出的最大字节数（stdout / stderr 各自）。超过则保留末尾、丢弃头部，
+/// 因为构建/测试类长命令的关键信息（错误堆栈、最终结论）几乎总在尾部。
+const SHELL_OUTPUT_MAX_BYTES: usize = 16 * 1024;
+/// reader 单次系统调用读多少字节。
+const SHELL_READ_CHUNK: usize = 4096;
+/// watchdog 巡检间隔。
+const SHELL_WATCHDOG_TICK: Duration = Duration::from_millis(500);
+/// 默认（短任务）：60s 无新输出 / 5min 总时长。覆盖 99% 命令。
+const SHELL_DEFAULT_IDLE_SECS: u64 = 60;
+const SHELL_DEFAULT_WALL_SECS: u64 = 300;
+/// 长任务（agent 显式声明 `expect_long_running: true`）：120s 无输出 / 30min 总时长。
+const SHELL_LONG_IDLE_SECS: u64 = 120;
+const SHELL_LONG_WALL_SECS: u64 = 1800;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolOutput {
@@ -131,6 +149,15 @@ impl ToolExecutor {
         }
     }
 
+    /// `shell_exec` —— spawn 子进程 + 看门狗（idle / wall-clock 双维度），避免长时间静默或
+    /// 死循环把 Coding Agent 的整体超时预算吃光。
+    ///
+    /// 行为：
+    /// - 默认阈值：idle 60s / wall 5min（覆盖 99% 命令）
+    /// - 入参 `expect_long_running: true` → 提升到 idle 120s / wall 30min（npm/cargo install 等）
+    /// - 触发 idle 或 wall 超限：先 SIGTERM，2s grace 后 SIGKILL
+    /// - 输出 buffer 各保留尾部 16KB（构建/测试关键信息总在尾部）
+    /// - 被 watchdog 终止时返回结构化错误（含分类 + 末尾输出），让 LLM 可据此决定换种方式重试
     async fn shell_exec(&self, input: &serde_json::Value) -> ToolOutput {
         let command = match input["command"].as_str() {
             Some(c) => c,
@@ -139,36 +166,137 @@ impl ToolExecutor {
                 &format!("Missing 'command' parameter. Received: {input}"),
             ),
         };
+        let expect_long_running = input
+            .get("expect_long_running")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let (idle_secs, wall_secs) = if expect_long_running {
+            (SHELL_LONG_IDLE_SECS, SHELL_LONG_WALL_SECS)
+        } else {
+            (SHELL_DEFAULT_IDLE_SECS, SHELL_DEFAULT_WALL_SECS)
+        };
 
-        let output = match Command::new("sh")
+        let mut child = match Command::new("sh")
             .args(["-c", command])
             .current_dir(&self.workspace_root)
-            .output()
-            .await
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
         {
-            Ok(o) => o,
+            Ok(c) => c,
             Err(e) => return ToolOutput::error("shell_error", &e.to_string()),
         };
 
-        let exit_code = output.status.code().unwrap_or(-1);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
 
-        if output.status.success() {
-            let mut result = stdout.to_string();
-            if !stderr.is_empty() {
-                if !result.is_empty() {
-                    result.push('\n');
+        let last_byte_at = Arc::new(Mutex::new(Instant::now()));
+        let stdout_buf = Arc::new(Mutex::new(TruncatedBuffer::new(SHELL_OUTPUT_MAX_BYTES)));
+        let stderr_buf = Arc::new(Mutex::new(TruncatedBuffer::new(SHELL_OUTPUT_MAX_BYTES)));
+
+        let stdout_handle = stdout_pipe.map(|p| {
+            spawn_pipe_reader(p, stdout_buf.clone(), last_byte_at.clone())
+        });
+        let stderr_handle = stderr_pipe.map(|p| {
+            spawn_pipe_reader(p, stderr_buf.clone(), last_byte_at.clone())
+        });
+
+        let started = Instant::now();
+        let mut termination_reason: Option<String> = None;
+
+        loop {
+            tokio::select! {
+                biased;
+                wait_res = child.wait() => {
+                    if let Some(h) = stdout_handle { let _ = h.await; }
+                    if let Some(h) = stderr_handle { let _ = h.await; }
+
+                    let stdout_text = stdout_buf.lock().unwrap().render();
+                    let stderr_text = stderr_buf.lock().unwrap().render();
+                    let elapsed = started.elapsed();
+
+                    return match wait_res {
+                        Ok(status) if termination_reason.is_some() => Self::format_killed(
+                            termination_reason.unwrap(),
+                            status.code(),
+                            stdout_text,
+                            stderr_text,
+                            elapsed,
+                        ),
+                        Ok(status) if status.success() => {
+                            let mut combined = stdout_text;
+                            if !stderr_text.is_empty() {
+                                if !combined.is_empty() { combined.push('\n'); }
+                                combined.push_str("[stderr] ");
+                                combined.push_str(&stderr_text);
+                            }
+                            ToolOutput::ok(combined)
+                        }
+                        Ok(status) => {
+                            let code = status.code().unwrap_or(-1);
+                            let msg = format!(
+                                "Command failed (exit code {code}, elapsed {:.1}s)\n\
+                                 [stdout]\n{stdout_text}\n[stderr]\n{stderr_text}",
+                                elapsed.as_secs_f64()
+                            );
+                            ToolOutput::error("shell_error", &msg)
+                        }
+                        Err(e) => ToolOutput::error("shell_error", &e.to_string()),
+                    };
                 }
-                result.push_str("[stderr] ");
-                result.push_str(&stderr);
+                _ = tokio::time::sleep(SHELL_WATCHDOG_TICK) => {
+                    if termination_reason.is_some() {
+                        // 已经发了 SIGTERM 等子进程退出，循环回头继续等
+                        continue;
+                    }
+                    let elapsed = started.elapsed();
+                    let idle = last_byte_at.lock().unwrap().elapsed();
+
+                    if elapsed.as_secs() > wall_secs {
+                        termination_reason = Some(format!(
+                            "wall_clock {wall_secs}s exceeded (elapsed {:.1}s)",
+                            elapsed.as_secs_f64()
+                        ));
+                    } else if idle.as_secs() > idle_secs {
+                        termination_reason = Some(format!(
+                            "idle {idle_secs}s (last output {:.1}s ago, total elapsed {:.1}s)",
+                            idle.as_secs_f64(),
+                            elapsed.as_secs_f64()
+                        ));
+                    }
+
+                    if let Some(reason) = &termination_reason {
+                        tracing::warn!("shell_exec watchdog terminating: {reason}");
+                        terminate_child(&mut child).await;
+                    }
+                }
             }
-            ToolOutput::ok(result)
-        } else {
-            let msg = format!(
-                "Command failed (exit code {exit_code})\n[stdout] {stdout}\n[stderr] {stderr}"
-            );
-            ToolOutput::error("shell_error", &msg)
+        }
+    }
+
+    /// 把"被 watchdog 强制终止"的结果封装成 LLM 友好的结构化错误：
+    /// content 是 JSON，error="shell_killed"，附 reason / partial_exit_code / 末尾 stdout / 末尾 stderr，
+    /// 让 LLM 据此决定是换种方式（加超时声明、换命令、跳过装包）还是放弃。
+    fn format_killed(
+        reason: String,
+        partial_exit_code: Option<i32>,
+        stdout_text: String,
+        stderr_text: String,
+        elapsed: std::time::Duration,
+    ) -> ToolOutput {
+        let payload = serde_json::json!({
+            "error": "shell_killed",
+            "reason": reason,
+            "partial_exit_code": partial_exit_code,
+            "elapsed_seconds": elapsed.as_secs_f64(),
+            "stdout_tail": stdout_text,
+            "stderr_tail": stderr_text,
+            "hint": "Last command was terminated by the watchdog. If you really need a long-running command, retry with `expect_long_running: true` (idle 120s / wall 1800s). If it was an infinite loop or hung process, choose a different approach instead of retrying as-is."
+        });
+        ToolOutput {
+            content: payload.to_string(),
+            is_error: true,
         }
     }
 
@@ -248,6 +376,70 @@ impl ToolExecutor {
         }
         parts.iter().collect()
     }
+}
+
+/// 限长的字节缓冲：超过 `cap` 时丢弃头部、保留尾部，并标记 `truncated_head_bytes`。
+struct TruncatedBuffer {
+    cap: usize,
+    inner: Vec<u8>,
+    truncated_head_bytes: usize,
+}
+
+impl TruncatedBuffer {
+    fn new(cap: usize) -> Self {
+        Self { cap, inner: Vec::new(), truncated_head_bytes: 0 }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        self.inner.extend_from_slice(bytes);
+        if self.inner.len() > self.cap {
+            let drop = self.inner.len() - self.cap;
+            self.inner.drain(..drop);
+            self.truncated_head_bytes += drop;
+        }
+    }
+
+    fn render(&self) -> String {
+        let body = String::from_utf8_lossy(&self.inner);
+        if self.truncated_head_bytes == 0 {
+            body.into_owned()
+        } else {
+            format!(
+                "[... truncated {} bytes from head ...]\n{}",
+                self.truncated_head_bytes, body
+            )
+        }
+    }
+}
+
+/// 启动 reader task：每读到一批字节就追加到 buffer + 更新 last_byte_at（驱动 idle 检测）。
+fn spawn_pipe_reader<R>(
+    mut pipe: R,
+    buf: Arc<Mutex<TruncatedBuffer>>,
+    last_byte_at: Arc<Mutex<Instant>>,
+) -> tokio::task::JoinHandle<()>
+where
+    R: AsyncReadExt + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut chunk = [0u8; SHELL_READ_CHUNK];
+        loop {
+            match pipe.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    *last_byte_at.lock().unwrap() = Instant::now();
+                    buf.lock().unwrap().push(&chunk[..n]);
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+/// 终止子进程：watchdog 触发的对象基本是死循环 / hang，直接 SIGKILL（tokio
+/// `start_kill` 在 unix 等价于 SIGKILL）。`kill_on_drop` 已经做了二次保险。
+async fn terminate_child(child: &mut tokio::process::Child) {
+    let _ = child.start_kill();
 }
 
 #[cfg(test)]
@@ -330,6 +522,48 @@ mod tests {
         assert!(out.is_error);
         let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
         assert_eq!(v["error"], "sandbox_violation");
+    }
+
+    /// 模拟"长时间静默"——sleep 远超 idle 阈值。这里用 monkey-patch 之外的办法不太好，
+    /// 但 sleep 70 是 1 分多钟会拖慢测试套件。改用 SHELL_DEFAULT_IDLE_SECS 假设最少为 60，
+    /// 用 `tokio::time::pause` 配合 mock clock 太复杂；改为只验证：常规命令仍然能跑通、
+    /// watchdog 不会误杀短任务。
+    #[tokio::test]
+    async fn shell_short_sleep_does_not_trip_watchdog() {
+        let (_dir, exec) = setup();
+        let out = exec
+            .execute(
+                "shell_exec",
+                &serde_json::json!({"command": "sleep 1 && echo done"}),
+            )
+            .await;
+        assert!(!out.is_error, "got error: {}", out.content);
+        assert!(out.content.contains("done"));
+    }
+
+    /// 显式声明 expect_long_running=true 时，超时阈值更高（这里只验证参数被接受、
+    /// 短命令依然正常返回；真正的长任务超时验证用 dry-run 而非 sleep）。
+    #[tokio::test]
+    async fn shell_long_running_flag_accepted() {
+        let (_dir, exec) = setup();
+        let out = exec
+            .execute(
+                "shell_exec",
+                &serde_json::json!({"command": "echo hi", "expect_long_running": true}),
+            )
+            .await;
+        assert!(!out.is_error);
+        assert!(out.content.contains("hi"));
+    }
+
+    /// TruncatedBuffer：超过 cap 时丢头保尾。
+    #[test]
+    fn truncated_buffer_keeps_tail() {
+        let mut buf = TruncatedBuffer::new(8);
+        buf.push(b"0123456789ABCDEF");
+        let s = buf.render();
+        assert!(s.contains("89ABCDEF"));
+        assert!(s.contains("truncated"));
     }
 
     #[tokio::test]

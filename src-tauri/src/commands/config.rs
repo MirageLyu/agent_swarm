@@ -29,13 +29,20 @@ pub struct AppConfig {
     pub max_agent_steps: u32,
     #[serde(default = "default_agent_timeout_seconds")]
     pub agent_timeout_seconds: u64,
+
+    // FM-15 follow-up: 多层超时看门狗。
+    /// LLM 流式响应"相邻 chunk 静默"上限，秒。0 = 不启用 idle 检测，仅靠全局 timeout。
+    /// Provider 启动时一次性读取，改完需要重启 app（或下一次任务）才生效。
+    #[serde(default = "default_agent_step_idle_seconds")]
+    pub agent_step_idle_seconds: u64,
 }
 
 fn default_planner_max_steps() -> u32 { 80 }
 fn default_planner_timeout_seconds() -> u64 { 600 }
 fn default_planner_max_fetches() -> u32 { 10 }
-fn default_max_agent_steps() -> u32 { 50 }
-fn default_agent_timeout_seconds() -> u64 { 600 }
+fn default_max_agent_steps() -> u32 { 80 }
+fn default_agent_timeout_seconds() -> u64 { 1800 }
+fn default_agent_step_idle_seconds() -> u64 { 60 }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -51,6 +58,7 @@ impl Default for AppConfig {
             planner_max_fetches_per_session: default_planner_max_fetches(),
             max_agent_steps: default_max_agent_steps(),
             agent_timeout_seconds: default_agent_timeout_seconds(),
+            agent_step_idle_seconds: default_agent_step_idle_seconds(),
         }
     }
 }
@@ -100,6 +108,9 @@ pub struct ConfigResponse {
     pub provider: String,
     pub max_concurrent_agents: u32,
     pub has_api_key: bool,
+    pub max_agent_steps: u32,
+    pub agent_timeout_seconds: u64,
+    pub agent_step_idle_seconds: u64,
 }
 
 #[tauri::command]
@@ -114,6 +125,9 @@ pub fn get_config(app: tauri::AppHandle) -> Result<ConfigResponse, String> {
         provider: config.provider.clone(),
         max_concurrent_agents: config.max_concurrent_agents,
         has_api_key: has_key,
+        max_agent_steps: config.max_agent_steps,
+        agent_timeout_seconds: config.agent_timeout_seconds,
+        agent_step_idle_seconds: config.agent_step_idle_seconds,
     })
 }
 
@@ -139,6 +153,9 @@ pub struct UpdateConfigRequest {
     pub base_url: Option<String>,
     pub provider: Option<String>,
     pub max_concurrent_agents: Option<u32>,
+    pub max_agent_steps: Option<u32>,
+    pub agent_timeout_seconds: Option<u64>,
+    pub agent_step_idle_seconds: Option<u64>,
 }
 
 #[tauri::command]
@@ -160,6 +177,16 @@ pub fn update_config(
         }
         if let Some(max) = request.max_concurrent_agents {
             config.max_concurrent_agents = max;
+        }
+        if let Some(v) = request.max_agent_steps {
+            config.max_agent_steps = v.max(1);
+        }
+        if let Some(v) = request.agent_timeout_seconds {
+            config.agent_timeout_seconds = v.max(60);
+        }
+        if let Some(v) = request.agent_step_idle_seconds {
+            // 0 = 关闭 idle 检测；否则至少 5s 防误杀。
+            config.agent_step_idle_seconds = if v == 0 { 0 } else { v.max(5) };
         }
     }
     mgr.save().map_err(|e| e.to_string())

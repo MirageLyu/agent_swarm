@@ -432,16 +432,24 @@ export function MissionsView() {
   const handleRestartConfirm = useCallback(async () => {
     if (!restartTargetId) return;
     try {
-      await commands.restartMission({
+      // 优先尝试 auto_start 复用上次 repo_path 一键重跑；后端没记 repo_path 时
+      // 会返回 auto_started=false，前端再 fallback 到工作区选择对话框。
+      const result = await commands.restartMission({
         mission_id: restartTargetId,
         mode: restartMode,
+        auto_start: true,
       });
-      updateMissionStatus(restartTargetId, "planned");
+      updateMissionStatus(
+        restartTargetId,
+        result.auto_started ? "running" : "planned",
+      );
       if (restartTargetId === selectedMissionId) {
         const detail = await commands.getMissionDetail(restartTargetId);
         setDetail(detail.tasks, detail.dependencies);
       }
-      setStartDialogOpen(true);
+      if (!result.auto_started) {
+        setStartDialogOpen(true);
+      }
     } catch (e) {
       setError(String(e));
     } finally {

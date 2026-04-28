@@ -10,13 +10,27 @@ use super::types::*;
 pub struct AnthropicProvider {
     client: Client,
     api_key: String,
+    /// 见 `OpenAICompatProvider::stream_idle_secs`。
+    stream_idle_secs: u64,
 }
+
+const DEFAULT_STREAM_IDLE_SECS: u64 = 60;
 
 impl AnthropicProvider {
     pub fn new(api_key: String) -> Self {
+        Self::with_stream_idle(api_key, DEFAULT_STREAM_IDLE_SECS)
+    }
+
+    pub fn with_stream_idle(api_key: String, stream_idle_secs: u64) -> Self {
+        let client = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(1800))
+            .build()
+            .unwrap_or_else(|_| Client::new());
         Self {
-            client: Client::new(),
+            client,
             api_key,
+            stream_idle_secs,
         }
     }
 
@@ -115,7 +129,24 @@ impl LlmProvider for AnthropicProvider {
         let mut buffer = String::new();
         use futures::StreamExt;
 
-        while let Some(chunk) = stream.next().await {
+        let idle_dur = if self.stream_idle_secs == 0 {
+            None
+        } else {
+            Some(std::time::Duration::from_secs(self.stream_idle_secs))
+        };
+
+        loop {
+            let next_res = match idle_dur {
+                Some(d) => match tokio::time::timeout(d, stream.next()).await {
+                    Ok(v) => v,
+                    Err(_) => bail!(
+                        "stream_idle_timeout: no chunk for {}s",
+                        self.stream_idle_secs
+                    ),
+                },
+                None => stream.next().await,
+            };
+            let Some(chunk) = next_res else { break };
             let chunk = chunk?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 

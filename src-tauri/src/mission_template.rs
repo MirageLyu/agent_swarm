@@ -238,6 +238,8 @@ mod tests {
                     produces_artifacts_json: None,
                     consumes_artifacts_json: None,
                     file_scope_hints_json: None,
+                    last_error: None,
+                    last_failed_at: None,
                 })
                 .collect(),
             dependencies: deps

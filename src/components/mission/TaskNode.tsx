@@ -317,6 +317,17 @@ export function TaskNode({ task, layout, onEdit, onDelete, onSelect, selected, o
             </div>
           )}
           <p className={styles.tooltipMeta}>Status: {task.status}</p>
+          {task.last_error && (
+            <div className={styles.tooltipError}>
+              <span className={styles.tooltipLabel}>Last error:</span>
+              <span className={styles.tooltipErrorText}>{task.last_error}</span>
+              {task.last_failed_at && (
+                <span className={styles.tooltipErrorTime}>
+                  · {new Date(task.last_failed_at + "Z").toLocaleString()}
+                </span>
+              )}
+            </div>
+          )}
         </TaskNodeTooltip>
       )}
     </foreignObject>

@@ -86,6 +86,18 @@ export function TaskDetailPanel({
           </div>
         )}
 
+        {task.last_error && (
+          <div className={styles.section}>
+            <div className={styles.sectionTitle}>失败原因</div>
+            <pre className={styles.errorBlock}>{task.last_error}</pre>
+            {task.last_failed_at && (
+              <div className={styles.errorTime}>
+                {new Date(task.last_failed_at + "Z").toLocaleString()}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className={styles.section}>
           <div className={styles.detailRow}>
             <span className={styles.detailLabel}>Complexity</span>

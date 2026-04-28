@@ -101,11 +101,59 @@ pub fn complete_task(conn: &Connection, task_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn fail_task(conn: &Connection, task_id: &str, status: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE tasks SET status = ?1 WHERE id = ?2",
-        params![status, task_id],
-    )?;
+/// 通过 agent_id 反查 task_id 后落库失败原因。
+/// 找不到 task（agent 已 detach 等极端情况）时静默返回 Ok(false)。
+pub fn fail_task_for_agent(
+    conn: &Connection,
+    agent_id: &str,
+    status: &str,
+    reason: &str,
+) -> Result<bool> {
+    let task_id: Option<String> = conn
+        .query_row(
+            "SELECT task_id FROM agents WHERE id = ?1",
+            params![agent_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    if let Some(tid) = task_id {
+        fail_task(conn, &tid, status, Some(reason))?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// 标记任务失败/取消，并落库失败原因。
+///
+/// `reason` 推荐带分类前缀，便于 UI 着色：
+/// - `"timeout: stream idle 65s"`
+/// - `"timeout: wall_clock 1800s"`
+/// - `"max_steps: agent did not call task_complete in time"`
+/// - `"guardrail: retry budget exhausted"`
+/// - `"cancelled: user stop"`
+/// - `"llm_error: ..."` / `"agent_error: ..."`
+///
+/// 传入 `None` 表示不更新错误信息（兼容老调用点；新代码请显式传 reason）。
+pub fn fail_task(
+    conn: &Connection,
+    task_id: &str,
+    status: &str,
+    reason: Option<&str>,
+) -> Result<()> {
+    if let Some(r) = reason {
+        conn.execute(
+            "UPDATE tasks SET status = ?1, last_error = ?2, last_failed_at = datetime('now') \
+             WHERE id = ?3",
+            params![status, r, task_id],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE tasks SET status = ?1 WHERE id = ?2",
+            params![status, task_id],
+        )?;
+    }
     Ok(())
 }
 
@@ -900,7 +948,8 @@ pub fn delete_agents_for_tasks(conn: &Connection, task_ids: &[String]) -> Result
 pub fn reset_all_tasks(conn: &Connection, mission_id: &str) -> Result<u32> {
     // Reset all tasks to pending first
     let rows = conn.execute(
-        "UPDATE tasks SET status = 'pending', assigned_agent_id = NULL, completed_at = NULL
+        "UPDATE tasks SET status = 'pending', assigned_agent_id = NULL, completed_at = NULL,
+                          last_error = NULL, last_failed_at = NULL
          WHERE mission_id = ?1",
         params![mission_id],
     )? as u32;
@@ -936,7 +985,8 @@ pub fn reset_failed_tasks(conn: &Connection, mission_id: &str) -> Result<u32> {
     // Reset these tasks
     let placeholders = failed_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
-        "UPDATE tasks SET status = 'pending', assigned_agent_id = NULL, completed_at = NULL
+        "UPDATE tasks SET status = 'pending', assigned_agent_id = NULL, completed_at = NULL,
+                          last_error = NULL, last_failed_at = NULL
          WHERE id IN ({placeholders})"
     );
     let param_refs: Vec<&dyn rusqlite::types::ToSql> =

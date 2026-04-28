@@ -96,9 +96,14 @@ pub async fn run_agent(
         )
     })?;
 
+    let stream_idle = config.agent_step_idle_seconds;
     let provider: Arc<dyn LlmProvider> = match config.provider.as_str() {
-        "anthropic" => Arc::new(AnthropicProvider::new(api_key)),
-        _ => Arc::new(OpenAICompatProvider::new(api_key, config.base_url.clone())),
+        "anthropic" => Arc::new(AnthropicProvider::with_stream_idle(api_key, stream_idle)),
+        _ => Arc::new(OpenAICompatProvider::with_stream_idle(
+            api_key,
+            config.base_url.clone(),
+            stream_idle,
+        )),
     };
 
     let agent_id = Uuid::new_v4().to_string();

@@ -11,20 +11,33 @@ pub struct OpenAICompatProvider {
     client: Client,
     api_key: String,
     base_url: String,
+    /// Stream-idle 秒数：相邻两次 chunk 之间静默超过该值即视为卡死、提前终止本次调用。
+    /// 0 表示不启用 idle 检测（仅依赖 reqwest 的全局 timeout）。
+    stream_idle_secs: u64,
 }
+
+const DEFAULT_STREAM_IDLE_SECS: u64 = 60;
 
 impl OpenAICompatProvider {
     pub fn new(api_key: String, base_url: String) -> Self {
+        Self::with_stream_idle(api_key, base_url, DEFAULT_STREAM_IDLE_SECS)
+    }
+
+    pub fn with_stream_idle(api_key: String, base_url: String, stream_idle_secs: u64) -> Self {
         let base_url = base_url.trim_end_matches('/').to_string();
+        // reqwest 的 .timeout 是"整个响应完成"的硬限。流式响应里我们靠 stream_idle_secs
+        // 做"按 chunk 间隔"的更细粒度检测，所以把全局 timeout 放宽到 30 分钟，避免长 stream
+        // 被强制截断；真正卡住时由 idle 检测精准杀掉。
         let client = Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(1800))
             .build()
             .unwrap_or_else(|_| Client::new());
         Self {
             client,
             api_key,
             base_url,
+            stream_idle_secs,
         }
     }
 
@@ -300,7 +313,36 @@ impl LlmProvider for OpenAICompatProvider {
         let mut buffer = String::new();
         use futures::StreamExt;
 
-        while let Some(chunk) = stream.next().await {
+        let idle_dur = if self.stream_idle_secs == 0 {
+            None
+        } else {
+            Some(std::time::Duration::from_secs(self.stream_idle_secs))
+        };
+
+        loop {
+            // L1 stream-idle：如果配置了 idle 超时，每次 next 包一层 timeout；否则原始 next。
+            let next_res = match idle_dur {
+                Some(d) => match tokio::time::timeout(d, stream.next()).await {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let secs = self.stream_idle_secs;
+                        if !full_text.is_empty() {
+                            tracing::warn!(
+                                "LLM stream idle for {secs}s after receiving {} chars; \
+                                 returning partial response",
+                                full_text.len()
+                            );
+                            break;
+                        }
+                        bail!(
+                            "stream_idle_timeout: no chunk for {secs}s (consider increasing \
+                             agent_step_idle_seconds in Settings, or the upstream LLM is hanging)"
+                        );
+                    }
+                },
+                None => stream.next().await,
+            };
+            let Some(chunk) = next_res else { break };
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => {
