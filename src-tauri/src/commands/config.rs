@@ -39,6 +39,12 @@ pub struct AppConfig {
     // FM-14: 审批策略 —— 见 ApprovalPolicy::default 注释了解每项语义。
     #[serde(default)]
     pub approval_policy: ApprovalPolicy,
+
+    // i18n：UI 语言。BCP 47 tag，如 "en-US" / "zh-CN"。
+    // 持久化到 config.json，启动时前端拉取后调用 i18n.changeLanguage 同步。
+    // 后端不直接消费这个值（所有日志/error code 始终英文），仅作为前端偏好的真源（source of truth）。
+    #[serde(default = "default_language")]
+    pub language: String,
 }
 
 /// FM-14: 审批策略；持久化到 config.json，前端在 Settings 里编辑。
@@ -110,6 +116,8 @@ fn default_destructive_commands() -> Vec<String> {
 fn default_budget_warn_ratio() -> f32 { 0.8 }
 fn default_chat_commit_soft_lines() -> u32 { 10 }
 
+fn default_language() -> String { "en-US".to_string() }
+
 impl Default for ApprovalPolicy {
     fn default() -> Self {
         Self {
@@ -138,6 +146,7 @@ impl Default for AppConfig {
             agent_timeout_seconds: default_agent_timeout_seconds(),
             agent_step_idle_seconds: default_agent_step_idle_seconds(),
             approval_policy: ApprovalPolicy::default(),
+            language: default_language(),
         }
     }
 }
@@ -190,6 +199,8 @@ pub struct ConfigResponse {
     pub max_agent_steps: u32,
     pub agent_timeout_seconds: u64,
     pub agent_step_idle_seconds: u64,
+    /// i18n: BCP 47 tag, e.g. "en-US" / "zh-CN"
+    pub language: String,
 }
 
 #[tauri::command]
@@ -207,6 +218,7 @@ pub fn get_config(app: tauri::AppHandle) -> Result<ConfigResponse, String> {
         max_agent_steps: config.max_agent_steps,
         agent_timeout_seconds: config.agent_timeout_seconds,
         agent_step_idle_seconds: config.agent_step_idle_seconds,
+        language: config.language.clone(),
     })
 }
 
@@ -235,6 +247,8 @@ pub struct UpdateConfigRequest {
     pub max_agent_steps: Option<u32>,
     pub agent_timeout_seconds: Option<u64>,
     pub agent_step_idle_seconds: Option<u64>,
+    /// i18n: BCP 47 tag。前端传入后立即调用 i18n.changeLanguage 同步。
+    pub language: Option<String>,
 }
 
 #[tauri::command]
@@ -266,6 +280,20 @@ pub fn update_config(
         if let Some(v) = request.agent_step_idle_seconds {
             // 0 = 关闭 idle 检测；否则至少 5s 防误杀。
             config.agent_step_idle_seconds = if v == 0 { 0 } else { v.max(5) };
+        }
+        if let Some(lang) = request.language {
+            // 仅接受白名单内的 BCP 47 tag，避免脏数据。
+            // 后续支持新语言时在这里追加，且需提供对应 locale json。
+            const SUPPORTED: &[&str] = &["en-US", "zh-CN"];
+            let trimmed = lang.trim();
+            if SUPPORTED.iter().any(|s| s.eq_ignore_ascii_case(trimmed)) {
+                // 规范化大小写（en-US 而非 en-us）
+                let canonical = SUPPORTED
+                    .iter()
+                    .find(|s| s.eq_ignore_ascii_case(trimmed))
+                    .unwrap();
+                config.language = (*canonical).to_string();
+            }
         }
     }
     mgr.save().map_err(|e| e.to_string())

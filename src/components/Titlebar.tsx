@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { useUiStore, type Theme } from "../stores/ui-store";
 import { TopBarMetrics } from "./TopBarMetrics";
 import { ApprovalCenter } from "./approval";
@@ -43,19 +44,15 @@ const themeIcons: Record<Theme, React.ReactNode> = {
 };
 
 export function Titlebar() {
+  const { t } = useTranslation("nav");
   const activeView = useUiStore((s) => s.activeView);
   const theme = useUiStore((s) => s.theme);
   const setTheme = useUiStore((s) => s.setTheme);
   const setCommandPaletteOpen = useUiStore((s) => s.setCommandPaletteOpen);
 
-  const viewTitles: Record<string, string> = {
-    missions: "Mission Board",
-    workspace: "Workspace",
-    agents: "Agents",
-    review: "Review",
-    insights: "Insights",
-    settings: "Settings",
-  };
+  // 把 activeView 直接当 i18n key（与 nav namespace 的 key 对齐）。
+  // 未来加 view 时只需在 nav namespace 添加同名 key，无需改 Titlebar。
+  const title = t(activeView, { defaultValue: "" });
 
   const cycleTheme = () => {
     const order: Theme[] = ["system", "light", "dark"];
@@ -66,7 +63,7 @@ export function Titlebar() {
   return (
     <div className={styles.titlebar} data-tauri-drag-region>
       <div className={styles.trafficLightSpacer} data-tauri-drag-region />
-      <div className={styles.title} data-tauri-drag-region>{viewTitles[activeView] ?? ""}</div>
+      <div className={styles.title} data-tauri-drag-region>{title}</div>
       <div className={styles.spacer} data-tauri-drag-region />
       <TopBarMetrics />
       <div className={styles.actions}>
@@ -76,7 +73,7 @@ export function Titlebar() {
         </button>
         <button
           className={styles.actionBtn}
-          title="Command Palette (⌘K)"
+          title={`${t("commandPalette")} (⌘K)`}
           onClick={() => setCommandPaletteOpen(true)}
         >
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none">

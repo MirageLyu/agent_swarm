@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import { useUiStore } from "../stores/ui-store";
 import type { Theme } from "../stores/ui-store";
 import styles from "./CommandPalette.module.css";
@@ -12,6 +13,7 @@ interface PaletteCommand {
 }
 
 export function CommandPalette() {
+  const { t } = useTranslation("nav");
   const open = useUiStore((s) => s.commandPaletteOpen);
   const setOpen = useUiStore((s) => s.setCommandPaletteOpen);
   const setActiveView = useUiStore((s) => s.setActiveView);
@@ -26,7 +28,7 @@ export function CommandPalette() {
     () => [
       {
         id: "new-mission",
-        label: "New Mission",
+        label: t("paletteCmd.newMission"),
         icon: "🚀",
         shortcut: "⌘N",
         action: () => {
@@ -36,7 +38,7 @@ export function CommandPalette() {
       },
       {
         id: "workspace",
-        label: "Switch to Workspace",
+        label: t("paletteCmd.switchTo", { view: t("workspace") }),
         icon: "⊡",
         action: () => {
           setActiveView("workspace");
@@ -45,7 +47,7 @@ export function CommandPalette() {
       },
       {
         id: "review",
-        label: "Switch to Review",
+        label: t("paletteCmd.switchTo", { view: t("review") }),
         icon: "⧉",
         action: () => {
           setActiveView("review");
@@ -54,7 +56,7 @@ export function CommandPalette() {
       },
       {
         id: "missions",
-        label: "Switch to Missions",
+        label: t("paletteCmd.switchTo", { view: t("missions") }),
         icon: "◎",
         action: () => {
           setActiveView("missions");
@@ -63,7 +65,7 @@ export function CommandPalette() {
       },
       {
         id: "settings",
-        label: "Switch to Settings",
+        label: t("paletteCmd.switchTo", { view: t("settings") }),
         icon: "⚙",
         action: () => {
           setActiveView("settings");
@@ -72,7 +74,7 @@ export function CommandPalette() {
       },
       {
         id: "toggle-theme",
-        label: "Toggle Theme",
+        label: t("paletteCmd.toggleTheme"),
         icon: "◐",
         shortcut: "⌘⇧T",
         action: () => {
@@ -83,7 +85,7 @@ export function CommandPalette() {
         },
       },
     ],
-    [setActiveView, setOpen, theme, setTheme],
+    [t, setActiveView, setOpen, theme, setTheme],
   );
 
   const filtered = useMemo(() => {
@@ -135,14 +137,14 @@ export function CommandPalette() {
         <input
           ref={inputRef}
           className={styles.input}
-          placeholder="Search commands…"
+          placeholder={t("commandPalettePlaceholder")}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={handleKeyDown}
         />
         <div className={styles.list}>
           {filtered.length === 0 ? (
-            <div className={styles.empty}>No results</div>
+            <div className={styles.empty}>{t("commandPaletteEmpty")}</div>
           ) : (
             filtered.map((cmd, i) => (
               <div

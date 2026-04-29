@@ -172,6 +172,8 @@ export interface ConfigResponse {
   agent_timeout_seconds: number;
   /** LLM 流式相邻 chunk 的静默上限（秒），0 表示关闭 idle 检测 */
   agent_step_idle_seconds: number;
+  /** i18n: BCP 47 tag, e.g. "en-US" / "zh-CN" */
+  language: string;
 }
 
 export interface SetApiKeyRequest {
@@ -187,6 +189,8 @@ export interface UpdateConfigRequest {
   max_agent_steps?: number;
   agent_timeout_seconds?: number;
   agent_step_idle_seconds?: number;
+  /** i18n: BCP 47 tag, must be in backend SUPPORTED list */
+  language?: string;
 }
 
 // ---------- Agent ----------

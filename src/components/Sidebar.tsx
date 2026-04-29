@@ -1,18 +1,20 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import { useUiStore, type ViewId } from "../stores/ui-store";
 import { SidebarAgentList } from "./SidebarAgentList";
 import styles from "./Sidebar.module.css";
 
 interface NavItem {
   id: ViewId;
-  label: string;
+  /** i18n key under nav namespace */
+  labelKey: string;
   icon: React.ReactNode;
 }
 
 const navItems: NavItem[] = [
   {
     id: "missions",
-    label: "Missions",
+    labelKey: "missions",
     icon: (
       <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
         <rect x="2" y="2" width="6" height="6" rx="1.5" stroke="currentColor" strokeWidth="1.5" />
@@ -32,7 +34,7 @@ const navItems: NavItem[] = [
   },
   {
     id: "workspace",
-    label: "Workspace",
+    labelKey: "workspace",
     icon: (
       <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
         <path
@@ -46,7 +48,7 @@ const navItems: NavItem[] = [
   },
   {
     id: "agents",
-    label: "Agents",
+    labelKey: "agents",
     icon: (
       <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
         <circle cx="9" cy="6" r="3" stroke="currentColor" strokeWidth="1.5" />
@@ -61,7 +63,7 @@ const navItems: NavItem[] = [
   },
   {
     id: "review",
-    label: "Review",
+    labelKey: "review",
     icon: (
       <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
         <path
@@ -76,7 +78,7 @@ const navItems: NavItem[] = [
   },
   {
     id: "insights",
-    label: "Insights",
+    labelKey: "insights",
     icon: (
       <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
         <path
@@ -91,7 +93,7 @@ const navItems: NavItem[] = [
   },
   {
     id: "settings",
-    label: "Settings",
+    labelKey: "settings",
     icon: (
       <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
         <circle cx="9" cy="9" r="2.5" stroke="currentColor" strokeWidth="1.5" />
@@ -110,9 +112,15 @@ const EXPAND_DELAY = 0;
 const COLLAPSE_DELAY = 0;
 
 export function Sidebar() {
+  const { t } = useTranslation("nav");
   const { activeView, setActiveView } = useUiStore();
   const [expanded, setExpanded] = useState(false);
   const [tooltip, setTooltip] = useState<{ label: string; top: number } | null>(null);
+  // navItems 是常量，但 t() 依赖 i18n 当前 language；用 useMemo + t.lang 让切换语言时重渲
+  const localizedItems = useMemo(
+    () => navItems.map((it) => ({ ...it, label: t(it.labelKey) })),
+    [t],
+  );
   const expandTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const collapseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -152,7 +160,7 @@ export function Sidebar() {
       >
         <div className={styles.trafficLightSpacer} data-tauri-drag-region />
         <nav className={styles.nav}>
-          {navItems.map((item) => (
+          {localizedItems.map((item) => (
             <button
               key={item.id}
               className={`${styles.navItem} ${activeView === item.id ? styles.active : ""}`}

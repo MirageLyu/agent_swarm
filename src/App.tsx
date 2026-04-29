@@ -59,12 +59,21 @@ export default function App() {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  // MVP onboarding：启动时探测 API key 是否已配置。
+  // MVP onboarding：启动时探测 API key 是否已配置 + 同步 i18n 语言。
+  // 一次 fetch 同时处理两件事，避免双重 IPC。
   // 失败（如 IPC 未就绪）静默忽略——下次进 Settings 时 useEffect 也会再 fetch。
   useEffect(() => {
     commands
       .getConfig()
-      .then((c) => useUiStore.getState().setApiKeyConfigured(c.has_api_key))
+      .then(async (c) => {
+        useUiStore.getState().setApiKeyConfigured(c.has_api_key);
+        // 后端是 language 的真源；前端 i18n 启动初值是 en-US，这里同步到用户偏好。
+        // 仅当与当前不同才 changeLanguage 以避免无效 re-render。
+        const i18n = (await import("./i18n")).default;
+        if (c.language && c.language !== i18n.language) {
+          await i18n.changeLanguage(c.language);
+        }
+      })
       .catch(() => {
         // 不重试：banner 默认不显示（apiKeyConfigured=null），用户进 Settings 自然能配
       });
