@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Button } from "../ui";
 import { commands } from "../../ipc/commands";
 import { useUiStore } from "../../stores/ui-store";
@@ -21,6 +22,7 @@ interface MissionDeliveryPanelProps {
  * - auto-resolved 文件提醒
  */
 export function MissionDeliveryPanel({ payload }: MissionDeliveryPanelProps) {
+  const { t } = useTranslation("mission");
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const openMissionReport = useUiStore((s) => s.openMissionReport);
 
@@ -49,21 +51,23 @@ export function MissionDeliveryPanel({ payload }: MissionDeliveryPanelProps) {
       <header className={styles.header}>
         <div className={styles.title}>
           <span className={styles.checkmark} aria-hidden>✓</span>
-          Mission Delivered
+          {t("deliveryPanelTitle")}
         </div>
       </header>
 
       <div className={styles.summary}>
         <div className={styles.summaryItem}>
-          <span className={styles.summaryLabel}>Tasks</span>
+          <span className={styles.summaryLabel}>{t("deliveryTasksLabel")}</span>
           <span className={styles.summaryValue}>{payload.totalTasks}</span>
         </div>
         <div className={styles.summaryItem}>
-          <span className={styles.summaryLabel}>Commits on {payload.mainBranch}</span>
+          <span className={styles.summaryLabel}>
+            {t("deliveryCommitsOn", { branch: payload.mainBranch })}
+          </span>
           <span className={styles.summaryValue}>{payload.totalCommits}</span>
         </div>
         <div className={styles.summaryItem}>
-          <span className={styles.summaryLabel}>Artifacts</span>
+          <span className={styles.summaryLabel}>{t("deliveryArtifactsLabel")}</span>
           <span className={styles.summaryValue}>{payload.artifacts.length}</span>
         </div>
       </div>
@@ -81,7 +85,7 @@ export function MissionDeliveryPanel({ payload }: MissionDeliveryPanelProps) {
           onClick={() => handleOpen("editor")}
           disabled={busyKey !== null}
         >
-          {busyKey === "editor" ? "Opening\u2026" : "Open in Editor"}
+          {busyKey === "editor" ? t("opening") : t("openInEditor")}
         </Button>
         <Button
           variant="secondary"
@@ -89,7 +93,7 @@ export function MissionDeliveryPanel({ payload }: MissionDeliveryPanelProps) {
           onClick={() => handleOpen("terminal")}
           disabled={busyKey !== null}
         >
-          {busyKey === "terminal" ? "Opening\u2026" : "Open Terminal"}
+          {busyKey === "terminal" ? t("opening") : t("openInTerminal")}
         </Button>
         <Button
           variant="secondary"
@@ -97,22 +101,22 @@ export function MissionDeliveryPanel({ payload }: MissionDeliveryPanelProps) {
           onClick={() => handleOpen("finder")}
           disabled={busyKey !== null}
         >
-          {busyKey === "finder" ? "Opening\u2026" : "Reveal in Finder"}
+          {busyKey === "finder" ? t("opening") : t("openInFinder")}
         </Button>
         <Button
           variant="primary"
           size="sm"
           onClick={() => openMissionReport(payload.missionId)}
-          title="Open the full mission report"
+          title={t("openFullReportTitle")}
         >
-          View Full Report
+          {t("viewFullReport")}
         </Button>
       </div>
 
       {payload.llmResolvedFiles.length > 0 ? (
         <div className={styles.warningBlock}>
           <span className={styles.warningTitle}>
-            ⚠ {payload.llmResolvedFiles.length} file{payload.llmResolvedFiles.length === 1 ? "" : "s"} resolved by AI — please review
+            {t("llmResolvedWarning", { count: payload.llmResolvedFiles.length })}
           </span>
           <ul className={styles.warningList}>
             {payload.llmResolvedFiles.map((p) => (
@@ -125,14 +129,14 @@ export function MissionDeliveryPanel({ payload }: MissionDeliveryPanelProps) {
       {payload.autoResolvedFiles.length > 0 ? (
         <div className={styles.warningBlock}>
           <span className={styles.warningTitle}>
-            ⚠ {payload.autoResolvedFiles.length} file{payload.autoResolvedFiles.length === 1 ? "" : "s"} auto-merged (theirs / heuristic) — verify if needed
+            {t("autoResolvedWarning", { count: payload.autoResolvedFiles.length })}
           </span>
           <ul className={styles.warningList}>
             {payload.autoResolvedFiles.slice(0, 8).map((p) => (
               <li key={p}>{p}</li>
             ))}
             {payload.autoResolvedFiles.length > 8 ? (
-              <li>… and {payload.autoResolvedFiles.length - 8} more</li>
+              <li>{t("andMore", { count: payload.autoResolvedFiles.length - 8 })}</li>
             ) : null}
           </ul>
         </div>
@@ -140,11 +144,11 @@ export function MissionDeliveryPanel({ payload }: MissionDeliveryPanelProps) {
 
       <div className={styles.section}>
         <div className={styles.sectionTitle}>
-          Published Artifacts
+          {t("publishedArtifacts")}
           <span className={styles.sectionCount}>({payload.artifacts.length})</span>
         </div>
         {payload.artifacts.length === 0 ? (
-          <div className={styles.empty}>No artifacts were published.</div>
+          <div className={styles.empty}>{t("noArtifactsPublished")}</div>
         ) : (
           <div className={styles.artifactList}>
             {payload.artifacts.map((a) => (
@@ -152,7 +156,7 @@ export function MissionDeliveryPanel({ payload }: MissionDeliveryPanelProps) {
                 <div className={styles.artifactHeader}>
                   <span className={styles.artifactName}>{a.localName}</span>
                   <span className={styles.artifactType}>{a.artifactType}</span>
-                  <span className={styles.artifactTask}>from "{a.taskTitle}"</span>
+                  <span className={styles.artifactTask}>{t("artifactFromTask", { title: a.taskTitle })}</span>
                 </div>
                 {a.summary ? (
                   <div className={styles.artifactSummary}>{a.summary}</div>

@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import type { MissionInfo, MissionStatus } from "../../ipc/commands";
@@ -44,13 +45,13 @@ function getAvailableActions(status: MissionStatus): MissionAction[] {
   }
 }
 
-const ACTION_LABELS: Record<MissionAction, string> = {
-  delete: "Delete",
-  stop: "Stop",
-  restart_full: "Re-run (Full)",
-  restart_failed: "Re-run (Failed Only)",
-  export: "Export Template",
-  view_report: "View Report",
+const ACTION_LABEL_KEYS: Record<MissionAction, string> = {
+  delete: "deleteMission",
+  stop: "stopMission",
+  restart_full: "restartFull",
+  restart_failed: "restartFailed",
+  export: "exportTemplate",
+  view_report: "viewReport",
 };
 
 export function MissionListItem({
@@ -59,6 +60,8 @@ export function MissionListItem({
   onSelect,
   onAction,
 }: MissionListItemProps) {
+  const { t } = useTranslation("mission");
+  const { t: tc } = useTranslation("common");
   const actions = getAvailableActions(mission.status);
   const [promptOpen, setPromptOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -70,7 +73,10 @@ export function MissionListItem({
     }).catch(() => {});
   }, [mission.description]);
 
-  const progressText = `${mission.completed_count}/${mission.task_count} tasks completed`;
+  const progressText = t("tasksProgress", {
+    done: mission.completed_count,
+    total: mission.task_count,
+  });
 
   return (
     <>
@@ -95,7 +101,7 @@ export function MissionListItem({
               <button
                 className={styles.menuTrigger}
                 onClick={(e) => e.stopPropagation()}
-                title="Actions"
+                title={t("actionsMenu")}
               >
                 ···
               </button>
@@ -109,7 +115,7 @@ export function MissionListItem({
                     setPromptOpen(true);
                   }}
                 >
-                  Show Prompt
+                  {t("showPrompt")}
                 </DropdownMenu.Item>
 
                 {actions.length > 0 && (
@@ -125,7 +131,7 @@ export function MissionListItem({
                       onAction(action);
                     }}
                   >
-                    {ACTION_LABELS[action]}
+                    {t(ACTION_LABEL_KEYS[action])}
                   </DropdownMenu.Item>
                 ))}
               </DropdownMenu.Content>
@@ -138,16 +144,16 @@ export function MissionListItem({
         <Dialog.Portal>
           <Dialog.Overlay className={styles.promptOverlay} />
           <Dialog.Content className={styles.promptContent} onClick={(e) => e.stopPropagation()}>
-            <Dialog.Title className={styles.promptTitle}>Mission Prompt</Dialog.Title>
+            <Dialog.Title className={styles.promptTitle}>{t("missionPrompt")}</Dialog.Title>
             <pre className={styles.promptText}>
-              {mission.description || "无描述"}
+              {mission.description || t("noDescription")}
             </pre>
             <div className={styles.promptActions}>
               <Button variant="ghost" size="sm" onClick={() => setPromptOpen(false)}>
-                Close
+                {tc("close")}
               </Button>
               <Button variant="primary" size="sm" onClick={handleCopy}>
-                {copied ? "Copied!" : "Copy"}
+                {copied ? tc("copied") : tc("copy")}
               </Button>
             </div>
           </Dialog.Content>

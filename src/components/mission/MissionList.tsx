@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import type { MissionInfo } from "../../ipc/commands";
 import { MissionListItem, type MissionAction } from "./MissionListItem";
 import styles from "./MissionList.module.css";
@@ -19,17 +20,18 @@ export function MissionList({
   onNewMission,
   onImport,
 }: MissionListProps) {
+  const { t } = useTranslation("mission");
   return (
     <div className={styles.container}>
       <div className={styles.header}>
-        <h3 className={styles.title}>Missions</h3>
+        <h3 className={styles.title}>{t("title")}</h3>
         <div className={styles.headerActions}>
           {onImport && (
             <button
               className={styles.newBtn}
               onClick={onImport}
               type="button"
-              title="Import Template"
+              title={t("importMission")}
             >
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M14 10v3a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-3" />
@@ -42,7 +44,7 @@ export function MissionList({
             className={styles.newBtn}
             onClick={onNewMission}
             type="button"
-            title="New Mission"
+            title={t("newMission")}
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
               <line x1="8" y1="3" x2="8" y2="13" />
@@ -54,9 +56,9 @@ export function MissionList({
       <div className={styles.list}>
         {missions.length === 0 ? (
           <div className={styles.empty}>
-            <p className={styles.emptyText}>No missions yet</p>
+            <p className={styles.emptyText}>{t("noMissionsTitle")}</p>
             <button className={styles.emptyBtn} onClick={onNewMission} type="button">
-              + New Mission
+              + {t("newMission")}
             </button>
           </div>
         ) : (

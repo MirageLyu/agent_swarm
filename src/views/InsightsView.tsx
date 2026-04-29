@@ -12,12 +12,15 @@
  *  - 异常点击直接跳到对应 mission 的 ReportView（如果 mission 已完成）或 MissionsView
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Button } from "../components/ui/Button";
 import { commands, type Anomaly, type MissionCostPoint } from "../ipc/commands";
 import { useUiStore } from "../stores/ui-store";
 import styles from "./InsightsView.module.css";
 
 export function InsightsView() {
+  const { t } = useTranslation("insights");
+  const { t: tc } = useTranslation("common");
   const [trend, setTrend] = useState<MissionCostPoint[] | null>(null);
   const [anomalies, setAnomalies] = useState<Anomaly[] | null>(null);
   const [loading, setLoading] = useState(false);
@@ -27,18 +30,18 @@ export function InsightsView() {
     setLoading(true);
     setError(null);
     try {
-      const [t, a] = await Promise.all([
+      const [trendData, anomalyData] = await Promise.all([
         commands.getCostTrend(50),
         commands.getAnomalies(null),
       ]);
-      setTrend(t);
-      setAnomalies(a);
+      setTrend(trendData);
+      setAnomalies(anomalyData);
     } catch (e) {
-      setError(`Failed to load insights: ${e instanceof Error ? e.message : String(e)}`);
+      setError(t("errorLoading", { message: e instanceof Error ? e.message : String(e) }));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void load();
@@ -48,14 +51,11 @@ export function InsightsView() {
     <div className={styles.container}>
       <div className={styles.header}>
         <div>
-          <h2 className={styles.title}>Insights</h2>
-          <p className={styles.subtitle}>
-            Lightweight dashboard for cost trend and runtime anomalies. Updated
-            on demand from your local SQLite.
-          </p>
+          <h2 className={styles.title}>{t("title")}</h2>
+          <p className={styles.subtitle}>{t("subtitle")}</p>
         </div>
         <Button variant="secondary" onClick={load} disabled={loading}>
-          {loading ? "Loading…" : "Refresh"}
+          {loading ? tc("loading") : tc("refresh")}
         </Button>
       </div>
 
@@ -80,13 +80,15 @@ function CostTrendPanel({
   data: MissionCostPoint[] | null;
   loading: boolean;
 }) {
+  const { t } = useTranslation("insights");
+  const { t: tc } = useTranslation("common");
   const aggregate = useMemo(() => aggregateModelCosts(data ?? []), [data]);
 
   if (loading && !data) {
     return (
       <section className={styles.panel}>
-        <h3 className={styles.panelTitle}>Cost Trend</h3>
-        <div className={styles.empty}>Loading…</div>
+        <h3 className={styles.panelTitle}>{t("costTrendTitle")}</h3>
+        <div className={styles.empty}>{tc("loading")}</div>
       </section>
     );
   }
@@ -94,10 +96,8 @@ function CostTrendPanel({
   if (!data || data.length === 0) {
     return (
       <section className={styles.panel}>
-        <h3 className={styles.panelTitle}>Cost Trend</h3>
-        <div className={styles.empty}>
-          No cost data yet. Run a mission to start tracking.
-        </div>
+        <h3 className={styles.panelTitle}>{t("costTrendTitle")}</h3>
+        <div className={styles.empty}>{t("costTrendEmpty")}</div>
       </section>
     );
   }
@@ -111,28 +111,28 @@ function CostTrendPanel({
 
   return (
     <section className={styles.panel}>
-      <h3 className={styles.panelTitle}>Cost Trend</h3>
+      <h3 className={styles.panelTitle}>{t("costTrendTitle")}</h3>
       <div className={styles.metricRow}>
-        <Metric label="Missions" value={String(data.length)} />
-        <Metric label="Total Cost" value={`$${totalCost.toFixed(4)}`} />
-        <Metric label="Tokens" value={formatTokens(totalTokens)} />
+        <Metric label={t("metricMissions")} value={String(data.length)} />
+        <Metric label={t("metricTotalCost")} value={`$${totalCost.toFixed(4)}`} />
+        <Metric label={t("metricTokens")} value={formatTokens(totalTokens)} />
       </div>
 
       <div className={styles.subSection}>
-        <div className={styles.subTitle}>Cost per Mission</div>
+        <div className={styles.subTitle}>{t("subCostPerMission")}</div>
         <CostSparkline data={data} maxCost={maxCost} />
       </div>
 
       {aggregate.length > 0 && (
         <div className={styles.subSection}>
-          <div className={styles.subTitle}>By Model</div>
+          <div className={styles.subTitle}>{t("subByModel")}</div>
           <table className={styles.modelTable}>
             <thead>
               <tr>
-                <th>Model</th>
-                <th>Cost</th>
-                <th>Tokens</th>
-                <th>%</th>
+                <th>{t("modelTableHeader.model")}</th>
+                <th>{t("modelTableHeader.cost")}</th>
+                <th>{t("modelTableHeader.tokens")}</th>
+                <th>{t("modelTableHeader.percent")}</th>
               </tr>
             </thead>
             <tbody>
@@ -244,13 +244,16 @@ function AnomaliesPanel({
   data: Anomaly[] | null;
   loading: boolean;
 }) {
+  const { t } = useTranslation("insights");
+  const { t: tc } = useTranslation("common");
+  const { t: tr } = useTranslation("report");
   const openMissionReport = useUiStore((s) => s.openMissionReport);
 
   if (loading && !data) {
     return (
       <section className={styles.panel}>
-        <h3 className={styles.panelTitle}>Anomalies</h3>
-        <div className={styles.empty}>Loading…</div>
+        <h3 className={styles.panelTitle}>{t("anomaliesTitle")}</h3>
+        <div className={styles.empty}>{tc("loading")}</div>
       </section>
     );
   }
@@ -259,11 +262,9 @@ function AnomaliesPanel({
     return (
       <section className={styles.panel}>
         <h3 className={styles.panelTitle}>
-          Anomalies <span className={styles.allClear}>All Clear</span>
+          {t("anomaliesTitle")} <span className={styles.allClear}>{t("allClear")}</span>
         </h3>
-        <div className={styles.empty}>
-          No cost spikes, long-running agents, or recent failures detected.
-        </div>
+        <div className={styles.empty}>{t("anomaliesEmpty")}</div>
       </section>
     );
   }
@@ -273,21 +274,21 @@ function AnomaliesPanel({
   return (
     <section className={styles.panel}>
       <h3 className={styles.panelTitle}>
-        Anomalies{" "}
+        {t("anomaliesTitle")}{" "}
         <span className={styles.severityCount}>
           {counts.critical > 0 && (
             <span className={`${styles.badge} ${styles.badgeCritical}`}>
-              {counts.critical} critical
+              {counts.critical} {t("severity.critical")}
             </span>
           )}
           {counts.warn > 0 && (
             <span className={`${styles.badge} ${styles.badgeWarn}`}>
-              {counts.warn} warn
+              {counts.warn} {t("severity.warn")}
             </span>
           )}
           {counts.info > 0 && (
             <span className={`${styles.badge} ${styles.badgeInfo}`}>
-              {counts.info} info
+              {counts.info} {t("severity.info")}
             </span>
           )}
         </span>
@@ -300,10 +301,10 @@ function AnomaliesPanel({
               <span
                 className={`${styles.kindBadge} ${kindBadgeClass(a.kind, styles)}`}
               >
-                {kindLabel(a.kind)}
+                {t(`kind.${a.kind}`)}
               </span>
               <span className={`${styles.badge} ${severityBadgeClass(a.severity, styles)}`}>
-                {a.severity}
+                {t(`severity.${a.severity}`)}
               </span>
               <span className={styles.anomalyTime}>{a.occurred_at.slice(0, 19).replace("T", " ")}</span>
             </div>
@@ -312,7 +313,7 @@ function AnomaliesPanel({
               <button
                 className={styles.linkButton}
                 onClick={() => openMissionReport(a.mission_id)}
-                title="Open mission report"
+                title={tr("title")}
               >
                 {a.mission_title}
               </button>
@@ -331,17 +332,6 @@ function countBySeverity(items: Anomaly[]) {
     c[it.severity] += 1;
   }
   return c;
-}
-
-function kindLabel(kind: Anomaly["kind"]): string {
-  switch (kind) {
-    case "cost_spike":
-      return "Cost Spike";
-    case "long_running":
-      return "Long Running";
-    case "failed_agent":
-      return "Failed Agent";
-  }
 }
 
 function kindBadgeClass(

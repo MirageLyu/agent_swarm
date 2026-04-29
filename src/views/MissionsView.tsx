@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { commands } from "../ipc/commands";
 import type { TaskInfo, Complexity, CreateMissionResponse } from "../ipc/commands";
@@ -25,6 +26,7 @@ import { Button } from "../components/ui";
 import styles from "./MissionsView.module.css";
 
 export function MissionsView() {
+  const { t } = useTranslation("mission");
   const {
     missions,
     selectedMissionId,
@@ -342,7 +344,7 @@ export function MissionsView() {
         .substring(0, 60);
 
       const filePath = await save({
-        title: "Export Mission Template",
+        title: t("exportTemplate"),
         defaultPath: `${defaultName}.mission.yaml`,
         filters: [{ name: "YAML", extensions: ["yaml", "yml"] }],
       });
@@ -362,7 +364,7 @@ export function MissionsView() {
 
   const handleImportMission = useCallback(async () => {
     const selected = await open({
-      title: "Import Mission Template",
+      title: t("importMission"),
       multiple: false,
       filters: [{ name: "YAML", extensions: ["yaml", "yml"] }],
     });
@@ -532,7 +534,7 @@ export function MissionsView() {
                 
                 <div className={styles.cancelBar}>
                   <Button variant="ghost" size="sm" onClick={handlePlanCancel} style={{ color: "var(--color-error)" }}>
-                    Cancel Planning
+                    {t("cancelPlanning")}
                   </Button>
                 </div>
               </div>
@@ -593,7 +595,7 @@ export function MissionsView() {
               onClick={handleConfirmAndStart}
               disabled={!canConfirm && !canStart}
             >
-              {canStart ? "Start Mission" : "Confirm & Start"}
+              {canStart ? t("startMission") : t("confirmAndStart")}
             </Button>
           </div>
         )}
@@ -667,6 +669,7 @@ export function MissionsView() {
  * banner 比 modal 干扰小，且 plan/start 会被 backend 自然拒绝（有错误反馈）。
  */
 function ApiKeyBanner() {
+  const { t } = useTranslation("mission");
   const apiKeyConfigured = useUiStore((s) => s.apiKeyConfigured);
   const setActiveView = useUiStore((s) => s.setActiveView);
 
@@ -677,19 +680,15 @@ function ApiKeyBanner() {
   return (
     <div className={styles.onboardingBanner}>
       <div className={styles.onboardingText}>
-        <strong>Set up your LLM provider to start.</strong>
-        <span>
-          {" "}
-          You need an Anthropic key or any OpenAI-compatible endpoint to plan and
-          execute missions.
-        </span>
+        <strong>{t("apiKeyBannerTitle")}</strong>
+        <span> {t("apiKeyBannerBody")}</span>
       </div>
       <Button
         variant="primary"
         size="sm"
         onClick={() => setActiveView("settings")}
       >
-        Open Settings
+        {t("apiKeyBannerCta")}
       </Button>
     </div>
   );

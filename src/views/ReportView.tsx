@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { save } from "@tauri-apps/plugin-dialog";
 import { useUiStore } from "../stores/ui-store";
 import { useReportStore } from "../stores/report-store";
@@ -39,6 +40,8 @@ interface SectionDef {
 }
 
 export function ReportView() {
+  const { t } = useTranslation("report");
+  const { t: tc } = useTranslation("common");
   const missionId = useUiStore((s) => s.activeReportMissionId);
   const openMissionReport = useUiStore((s) => s.openMissionReport);
   const { reports, errors, loadingMissionId, generatingMissionId, load, generate } =
@@ -75,31 +78,31 @@ export function ReportView() {
     if (!view) return [];
     const r = view.report;
     return [
-      { id: "exec-summary", label: "Executive Summary" },
+      { id: "exec-summary", label: t("tocExecSummary") },
       {
         id: "decisions",
-        label: "Architecture Decisions",
+        label: t("tocDecisions"),
         badge: r.decisions.length || undefined,
       },
       {
         id: "evaluator",
-        label: "Evaluator Review",
+        label: t("tocEvaluator"),
         badge: r.evaluator_review.rounds.length || undefined,
       },
       {
         id: "task-matrix",
-        label: "Task Matrix",
+        label: t("tocTaskMatrix"),
         badge: r.task_matrix.length || undefined,
       },
-      { id: "cost", label: "Cost Breakdown" },
+      { id: "cost", label: t("tocCost") },
       {
         id: "limitations",
-        label: "Known Limitations",
+        label: t("tocLimitations"),
         badge: r.limitations.length || undefined,
       },
-      { id: "learning", label: "Learning Flywheel" },
+      { id: "learning", label: t("tocLearning") },
     ];
-  }, [view]);
+  }, [view, t]);
 
   // ── Scrollspy + 节折叠 + Contract 对照 + 导出
   const [activeSection, setActiveSection] = useState<string>("exec-summary");
@@ -145,15 +148,16 @@ export function ReportView() {
         mission_id: missionId,
         output_path: chosen,
       });
-      setExportNotice(`Saved ${formatBytes(res.bytes_written)} to ${res.output_path}`);
-      // 5s 后自动收起
+      setExportNotice(
+        t("exportSuccess", { path: `${res.output_path} (${formatBytes(res.bytes_written)})` }),
+      );
       setTimeout(() => setExportNotice(null), 5000);
     } catch (err) {
-      setExportError(err instanceof Error ? err.message : String(err));
+      setExportError(t("exportError", { message: err instanceof Error ? err.message : String(err) }));
     } finally {
       setExporting(false);
     }
-  }, [missionId, view]);
+  }, [missionId, view, t]);
 
   // IntersectionObserver 实现 scrollspy。
   // root 必须是滚动容器（.content），不能是默认 viewport，否则永远 false。
@@ -192,17 +196,13 @@ export function ReportView() {
     return (
       <div className={styles.container}>
         <Header
-          title="Mission Report"
-          subtitle="Select a mission to view its report"
+          title={t("title")}
           onClose={handleClose}
           showClose={false}
         />
         <div className={styles.statePanel}>
-          <h2 className={styles.stateTitle}>No mission selected</h2>
-          <p className={styles.stateDescription}>
-            Open a completed mission from <strong>Missions</strong>, then choose
-            "View Full Report" to land here.
-          </p>
+          <h2 className={styles.stateTitle}>{t("noReportTitle")}</h2>
+          <p className={styles.stateDescription}>{t("noReportBody")}</p>
         </div>
       </div>
     );
@@ -211,11 +211,7 @@ export function ReportView() {
   if (isLoading && !view) {
     return (
       <div className={styles.container}>
-        <Header
-          title="Loading report…"
-          subtitle={missionId}
-          onClose={handleClose}
-        />
+        <Header title={tc("loading")} subtitle={missionId} onClose={handleClose} />
         <div className={styles.statePanel}>
           <div className={styles.spinner} />
         </div>
@@ -226,12 +222,12 @@ export function ReportView() {
   if (error && !view) {
     return (
       <div className={styles.container}>
-        <Header title="Report unavailable" subtitle={missionId} onClose={handleClose} />
+        <Header title={t("title")} subtitle={missionId} onClose={handleClose} />
         <div className={styles.statePanel}>
-          <h2 className={styles.stateTitle}>Failed to load report</h2>
+          <h2 className={styles.stateTitle}>{t("loadError", { message: "" })}</h2>
           <p className={styles.stateError}>{error}</p>
           <Button variant="primary" size="sm" onClick={() => void load(missionId, { force: true })}>
-            Retry
+            {tc("retry")}
           </Button>
         </div>
       </div>
@@ -239,24 +235,19 @@ export function ReportView() {
   }
 
   if (!view) {
-    // 没生成过报告
     return (
       <div className={styles.container}>
-        <Header title="Mission Report" subtitle={missionId} onClose={handleClose} />
+        <Header title={t("title")} subtitle={missionId} onClose={handleClose} />
         <div className={styles.statePanel}>
-          <h2 className={styles.stateTitle}>Report not generated yet</h2>
-          <p className={styles.stateDescription}>
-            Aggregating data and writing the executive summary takes up to 30 seconds
-            and uses your configured LLM. If no provider is available, a template
-            summary will be used instead.
-          </p>
+          <h2 className={styles.stateTitle}>{t("noReportTitle")}</h2>
+          <p className={styles.stateDescription}>{t("noReportBody")}</p>
           <Button
             variant="primary"
             size="md"
             onClick={() => void handleGenerate()}
             disabled={isGenerating}
           >
-            {isGenerating ? "Generating…" : "Generate report"}
+            {isGenerating ? t("generating") : t("generate")}
           </Button>
         </div>
       </div>
@@ -270,8 +261,8 @@ export function ReportView() {
   return (
     <div className={styles.container}>
       <Header
-        title={r.mission.title || "Mission Report"}
-        subtitle={`${r.mission.status} · generated ${view.generated_at}`}
+        title={r.mission.title || t("title")}
+        subtitle={`${r.mission.status} · ${t("subtitle", { time: view.generated_at })}`}
         onClose={handleClose}
         right={
           <>
@@ -280,9 +271,9 @@ export function ReportView() {
                 variant={showContract ? "primary" : "ghost"}
                 size="sm"
                 onClick={() => setShowContract((v) => !v)}
-                title="Toggle contract compare panel"
+                title={t("contractCompare.title")}
               >
-                {showContract ? "Hide Contract" : "Compare Contract"}
+                {showContract ? t("hideCompare") : t("compareContract")}
               </Button>
             )}
             <Button
@@ -290,18 +281,18 @@ export function ReportView() {
               size="sm"
               onClick={() => void handleExport()}
               disabled={exporting}
-              title="Export report as Markdown"
+              title={t("exportMarkdown")}
             >
-              {exporting ? "Exporting…" : "Export Markdown"}
+              {exporting ? tc("loading") : t("exportMarkdown")}
             </Button>
             <Button
               variant="ghost"
               size="sm"
               onClick={() => void handleGenerate()}
               disabled={isGenerating}
-              title="Regenerate report from latest data"
+              title={t("regenerate")}
             >
-              {isGenerating ? "Regenerating…" : "Regenerate"}
+              {isGenerating ? t("generating") : t("regenerate")}
             </Button>
           </>
         }
@@ -353,7 +344,7 @@ export function ReportView() {
           <div className={styles.contentInner}>
             <SectionWrapper
               id="exec-summary"
-              title="Executive Summary"
+              title={t("execSummaryHeading")}
               collapsed={collapsed.has("exec-summary")}
               onToggle={toggleCollapse}
             >
@@ -362,14 +353,12 @@ export function ReportView() {
 
             <SectionWrapper
               id="decisions"
-              title="Architecture Decisions"
+              title={t("decisionsHeading")}
               collapsed={collapsed.has("decisions")}
               onToggle={toggleCollapse}
             >
               {r.decisions.length === 0 ? (
-                <p className={styles.sectionPlaceholder}>
-                  No architecture decisions extracted.
-                </p>
+                <p className={styles.sectionPlaceholder}>{tc("none")}</p>
               ) : (
                 <DecisionsSection
                   reportId={view.report_id}
@@ -382,14 +371,12 @@ export function ReportView() {
 
             <SectionWrapper
               id="evaluator"
-              title="Evaluator Review"
+              title={t("evaluatorHeading")}
               collapsed={collapsed.has("evaluator")}
               onToggle={toggleCollapse}
             >
               {r.evaluator_review.rounds.length === 0 ? (
-                <p className={styles.sectionPlaceholder}>
-                  No Evaluator reviews recorded for this mission.
-                </p>
+                <p className={styles.sectionPlaceholder}>{tc("none")}</p>
               ) : (
                 <EvaluatorReviewSection review={r.evaluator_review} />
               )}
@@ -397,12 +384,12 @@ export function ReportView() {
 
             <SectionWrapper
               id="task-matrix"
-              title="Task Matrix"
+              title={t("taskMatrixHeading")}
               collapsed={collapsed.has("task-matrix")}
               onToggle={toggleCollapse}
             >
               {r.task_matrix.length === 0 ? (
-                <p className={styles.sectionPlaceholder}>No tasks in this mission.</p>
+                <p className={styles.sectionPlaceholder}>{tc("none")}</p>
               ) : (
                 <TaskMatrixSection rows={r.task_matrix} />
               )}
@@ -410,7 +397,7 @@ export function ReportView() {
 
             <SectionWrapper
               id="cost"
-              title="Cost Breakdown"
+              title={t("costHeading")}
               collapsed={collapsed.has("cost")}
               onToggle={toggleCollapse}
             >
@@ -419,14 +406,12 @@ export function ReportView() {
 
             <SectionWrapper
               id="limitations"
-              title="Known Limitations"
+              title={t("limitationsHeading")}
               collapsed={collapsed.has("limitations")}
               onToggle={toggleCollapse}
             >
               {r.limitations.length === 0 ? (
-                <p className={styles.sectionPlaceholder}>
-                  No limitations detected.
-                </p>
+                <p className={styles.sectionPlaceholder}>{t("noLimitations")}</p>
               ) : (
                 <KnownLimitationsSection items={r.limitations} />
               )}
@@ -434,7 +419,7 @@ export function ReportView() {
 
             <SectionWrapper
               id="learning"
-              title="Learning Flywheel"
+              title={t("learningHeading")}
               collapsed={collapsed.has("learning")}
               onToggle={toggleCollapse}
             >
@@ -467,6 +452,7 @@ function Header(props: {
   showClose?: boolean;
   right?: React.ReactNode;
 }) {
+  const { t } = useTranslation("common");
   const { title, subtitle, onClose, showClose = true, right } = props;
   return (
     <header className={styles.header}>
@@ -478,7 +464,7 @@ function Header(props: {
         {right}
         {showClose && (
           <Button variant="ghost" size="sm" onClick={onClose}>
-            Close
+            {t("close")}
           </Button>
         )}
       </div>

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation, Trans } from "react-i18next";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Button } from "../ui";
 import styles from "./ConfirmDialog.module.css";
@@ -16,6 +17,8 @@ export function DeleteConfirmDialog({
   onClose,
   onConfirm,
 }: DeleteConfirmDialogProps) {
+  const { t } = useTranslation("mission");
+  const { t: tc } = useTranslation("common");
   const [cleanWorkspace, setCleanWorkspace] = useState(true);
 
   return (
@@ -23,11 +26,15 @@ export function DeleteConfirmDialog({
       <Dialog.Portal>
         <Dialog.Overlay className={styles.overlay} />
         <Dialog.Content className={styles.content}>
-          <Dialog.Title className={styles.title}>Delete Mission</Dialog.Title>
+          <Dialog.Title className={styles.title}>{t("deleteConfirmTitle")}</Dialog.Title>
           <Dialog.Description className={styles.description}>
-            Are you sure you want to delete <strong>{missionTitle}</strong>?
+            <Trans
+              i18nKey="mission:deleteConfirmBodyWithName"
+              values={{ name: missionTitle }}
+              components={{ strong: <strong /> }}
+            />
           </Dialog.Description>
-          <p className={styles.warning}>This action cannot be undone.</p>
+          <p className={styles.warning}>{t("deleteConfirmBody")}</p>
           <label className={styles.checkLabel}>
             <input
               type="checkbox"
@@ -35,18 +42,18 @@ export function DeleteConfirmDialog({
               onChange={(e) => setCleanWorkspace(e.target.checked)}
               className={styles.checkbox}
             />
-            <span>Also clean workspace directory</span>
+            <span>{t("deleteWithWorkspace")}</span>
           </label>
           <div className={styles.actions}>
             <Button variant="secondary" size="sm" onClick={onClose}>
-              Cancel
+              {tc("cancel")}
             </Button>
             <Button
               variant="danger"
               size="sm"
               onClick={() => onConfirm(cleanWorkspace)}
             >
-              Delete
+              {tc("delete")}
             </Button>
           </div>
         </Dialog.Content>

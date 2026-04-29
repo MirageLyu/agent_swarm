@@ -1,3 +1,4 @@
+import { useTranslation, Trans } from "react-i18next";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Button } from "../ui";
 import styles from "./ConfirmDialog.module.css";
@@ -21,6 +22,8 @@ export function RestartConfirmDialog({
   onClose,
   onConfirm,
 }: RestartConfirmDialogProps) {
+  const { t } = useTranslation("mission");
+  const { t: tc } = useTranslation("common");
   const isFullRestart = mode === "full";
 
   return (
@@ -29,30 +32,30 @@ export function RestartConfirmDialog({
         <Dialog.Overlay className={styles.overlay} />
         <Dialog.Content className={styles.content}>
           <Dialog.Title className={styles.title}>
-            {isFullRestart ? "Re-run Mission (Full)" : "Re-run Failed Tasks"}
+            {isFullRestart ? t("restartFullTitle") : t("restartFailedTitle")}
           </Dialog.Title>
           <Dialog.Description className={styles.description}>
             {isFullRestart ? (
-              <>
-                This will reset <strong>all {totalCount} tasks</strong> in{" "}
-                <strong>{missionTitle}</strong> and delete associated agent data.
-              </>
+              <Trans
+                i18nKey="mission:restartFullDescBody"
+                values={{ total: totalCount ?? 0, name: missionTitle }}
+                components={{ strong: <strong /> }}
+              />
             ) : (
-              <>
-                This will reset <strong>{failedCount} failed task(s)</strong> in{" "}
-                <strong>{missionTitle}</strong>. Completed tasks will be preserved.
-              </>
+              <Trans
+                i18nKey="mission:restartFailedDescBody"
+                values={{ count: failedCount ?? 0, name: missionTitle }}
+                components={{ strong: <strong /> }}
+              />
             )}
           </Dialog.Description>
-          <p className={styles.info}>
-            After restart, you will need to select a workspace and click Start.
-          </p>
+          <p className={styles.info}>{t("restartHint")}</p>
           <div className={styles.actions}>
             <Button variant="secondary" size="sm" onClick={onClose}>
-              Cancel
+              {tc("cancel")}
             </Button>
             <Button variant="primary" size="sm" onClick={onConfirm}>
-              {isFullRestart ? "Re-run All" : "Re-run Failed"}
+              {isFullRestart ? t("restartAllBtn") : t("restartFailedBtn")}
             </Button>
           </div>
         </Dialog.Content>
