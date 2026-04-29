@@ -5,6 +5,7 @@ import { Badge } from "../components/ui/Badge";
 import { ApprovalPolicySection } from "../components/approval";
 import { DiagnosticsSection } from "../components/settings/DiagnosticsSection";
 import { commands, type ConfigResponse } from "../ipc";
+import { useUiStore } from "../stores/ui-store";
 import styles from "./SettingsView.module.css";
 
 export function SettingsView() {
@@ -41,6 +42,8 @@ export function SettingsView() {
     try {
       await commands.setApiKey({ provider: config.provider, key: apiKey.trim() });
       setConfig((c) => (c ? { ...c, has_api_key: true } : c));
+      // 让 MissionsView 顶部的引导 banner 立刻消失
+      useUiStore.getState().setApiKeyConfigured(true);
       setApiKey("");
       setMessage("API key saved");
       setTimeout(() => setMessage(""), 2000);

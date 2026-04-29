@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { commands } from "./ipc/commands";
 import { Sidebar } from "./components/Sidebar";
 import { Titlebar } from "./components/Titlebar";
 import { CommandPalette } from "./components/CommandPalette";
@@ -56,6 +57,17 @@ export default function App() {
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  // MVP onboarding：启动时探测 API key 是否已配置。
+  // 失败（如 IPC 未就绪）静默忽略——下次进 Settings 时 useEffect 也会再 fetch。
+  useEffect(() => {
+    commands
+      .getConfig()
+      .then((c) => useUiStore.getState().setApiKeyConfigured(c.has_api_key))
+      .catch(() => {
+        // 不重试：banner 默认不显示（apiKeyConfigured=null），用户进 Settings 自然能配
+      });
   }, []);
 
   // 切 view 时 boundary 自动 reset，避免上一个 view 的错误把新 view 也卡死。

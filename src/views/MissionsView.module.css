@@ -28,6 +28,31 @@
   flex-shrink: 0;
 }
 
+.onboardingBanner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: linear-gradient(
+    90deg,
+    rgba(37, 99, 235, 0.08),
+    rgba(99, 102, 241, 0.08)
+  );
+  border-bottom: 1px solid rgba(37, 99, 235, 0.25);
+  flex-shrink: 0;
+}
+
+.onboardingText {
+  font-size: var(--text-sm);
+  color: var(--color-text-primary);
+  line-height: 1.45;
+}
+
+.onboardingText strong {
+  color: var(--color-accent, #2563eb);
+}
+
 .planningArea {
   display: flex;
   flex-direction: column;

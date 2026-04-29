@@ -510,6 +510,7 @@ export function MissionsView() {
         />
       </div>
       <div className={styles.main}>
+        <ApiKeyBanner />
         {error && <p className={styles.error}>{error}</p>}
 
         <div className={styles.contentSection}>
@@ -652,6 +653,44 @@ export function MissionsView() {
         }}
         onConfirm={handleRestartConfirm}
       />
+    </div>
+  );
+}
+
+/**
+ * MVP onboarding banner：当用户尚未配置 API key 时，在 MissionsView 顶部显眼提示。
+ * - apiKeyConfigured=null（启动时还没探测）→ 不显示，避免闪烁
+ * - apiKeyConfigured=true → 不显示
+ * - apiKeyConfigured=false → 显示，附 "Open Settings" 按钮一键跳转
+ *
+ * 设计取舍：不做模态弹窗，因为用户可能想先浏览 demo mission；
+ * banner 比 modal 干扰小，且 plan/start 会被 backend 自然拒绝（有错误反馈）。
+ */
+function ApiKeyBanner() {
+  const apiKeyConfigured = useUiStore((s) => s.apiKeyConfigured);
+  const setActiveView = useUiStore((s) => s.setActiveView);
+
+  if (apiKeyConfigured !== false) {
+    return null;
+  }
+
+  return (
+    <div className={styles.onboardingBanner}>
+      <div className={styles.onboardingText}>
+        <strong>Set up your LLM provider to start.</strong>
+        <span>
+          {" "}
+          You need an Anthropic key or any OpenAI-compatible endpoint to plan and
+          execute missions.
+        </span>
+      </div>
+      <Button
+        variant="primary"
+        size="sm"
+        onClick={() => setActiveView("settings")}
+      >
+        Open Settings
+      </Button>
     </div>
   );
 }
