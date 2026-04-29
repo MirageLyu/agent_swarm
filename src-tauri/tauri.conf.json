@@ -30,12 +30,27 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "miragelyu",
+    "category": "DeveloperTool",
+    "shortDescription": "Harness-driven multi-agent code generation workbench",
+    "longDescription": "Miragenty orchestrates a swarm of LLM coding agents on isolated git worktrees, mediated by a quality harness: Pre-flight Contract → Planner → multi-agent execution → Evaluator → frontier merge → Mission Report. Designed for users who want trustworthy hand-off, not just parallelism.",
+    "homepage": "https://github.com/miragelyu/Miragenty",
+    "copyright": "Copyright (c) 2026 miragelyu",
+    "licenseFile": "../LICENSE",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
+      }
+    }
   }
 }
