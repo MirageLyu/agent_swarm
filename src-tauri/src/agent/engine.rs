@@ -315,6 +315,48 @@ impl AgentEngine {
                 response.usage.output_tokens,
                 step_cost,
             );
+
+            // FM-14: budget gate —— 累计成本触线时阻塞当前 agent 等待审批。
+            // rejected → 标 task failed 让 mission 自然走完终态判定。
+            // approved / 触发不到（ratio=0 或未签 contract）→ 静默继续。
+            if let Some(coord) = self
+                .app_handle
+                .try_state::<std::sync::Arc<crate::agent::approval::ApprovalCoordinator>>()
+            {
+                let db = self.app_handle.state::<Database>();
+                let mission_id_opt: Option<String> = db
+                    .with_conn(|conn| queries::get_mission_id_for_agent(conn, agent_id))
+                    .ok()
+                    .flatten();
+                if let Some(mission_id) = mission_id_opt {
+                    use crate::agent::approval::ApprovalDecision;
+                    use crate::agent::approval_gate::maybe_trigger_budget;
+                    if let Some(decision) = maybe_trigger_budget(
+                        &self.app_handle,
+                        coord.inner(),
+                        db.inner(),
+                        &self.cancel_token,
+                        &mission_id,
+                        agent_id,
+                    )
+                    .await
+                    {
+                        if matches!(
+                            decision,
+                            ApprovalDecision::Rejected | ApprovalDecision::Cancelled
+                        ) {
+                            let reason = "budget: user rejected continuation past warn threshold";
+                            self.emit_event(agent_id, step, "error", reason);
+                            self.emit_event(agent_id, step, "status_change", "failed");
+                            self.update_agent_status(agent_id, "failed");
+                            self.expire_agent_notes(agent_id);
+                            self.mark_task_failed_with_reason(agent_id, "failed", reason);
+                            return Ok(AgentStatus::Failed);
+                        }
+                    }
+                }
+            }
+
             self.emit_event(
                 agent_id,
                 step,
@@ -524,6 +566,9 @@ impl AgentEngine {
 
     /// 派发工具：`publish_artifact` 由 artifacts 模块直接处理（需要 DB），其它走 ToolExecutor。
     /// `task_complete` 已经在主循环里被截断，这里不会进来。
+    ///
+    /// FM-14：在真正执行前先过 approval_gate.maybe_intercept_tool；命中策略且用户拒绝，
+    /// 则用一个 is_error=true 的 ToolOutput 直接替代结果，让 LLM 自然走"换种方式"路径。
     async fn dispatch_tool(
         &self,
         agent_id: &str,
@@ -533,6 +578,37 @@ impl AgentEngine {
         if name == "publish_artifact" {
             return self.execute_publish_artifact(agent_id, input).await;
         }
+
+        // FM-14 tool gate（write_file 到 protected_paths / shell_exec 到 destructive_commands）。
+        if let Some(coord) = self
+            .app_handle
+            .try_state::<std::sync::Arc<crate::agent::approval::ApprovalCoordinator>>()
+        {
+            let db = self.app_handle.state::<Database>();
+            let mission_id_opt: Option<String> = db
+                .with_conn(|conn| queries::get_mission_id_for_agent(conn, agent_id))
+                .ok()
+                .flatten();
+            if let Some(mission_id) = mission_id_opt {
+                use crate::agent::approval_gate::{maybe_intercept_tool, ToolGateOutcome};
+                match maybe_intercept_tool(
+                    &self.app_handle,
+                    coord.inner(),
+                    db.inner(),
+                    &self.cancel_token,
+                    &mission_id,
+                    agent_id,
+                    name,
+                    input,
+                )
+                .await
+                {
+                    ToolGateOutcome::Allow => {}
+                    ToolGateOutcome::Rejected(out) => return out,
+                }
+            }
+        }
+
         // shell_exec 走带 stream 的入口，把 stdout/stderr emit 给前端 Workspace。
         // 其它工具透传到普通 execute，行为不变。
         self.tool_executor

@@ -320,4 +320,144 @@ mod tests {
                 .await
         );
     }
+
+    // ---- FM-14 IT: 端到端走 submit_and_wait 的三条路径 ----
+
+    use crate::db::{queries, Database};
+    use tokio_util::sync::CancellationToken;
+
+    fn setup_db_with_mission_and_agent() -> Database {
+        let db = Database::open_in_memory().unwrap();
+        db.with_conn(|c| {
+            c.execute("INSERT INTO missions (id, title) VALUES ('m1', 'Test')", [])?;
+            c.execute(
+                "INSERT INTO tasks (id, mission_id, title, description) VALUES ('t1', 'm1', 'task', '')",
+                [],
+            )?;
+            queries::insert_agent_for_task(c, "ag-1", "Test Agent", "t1", "/tmp/wt")?;
+            Ok(())
+        })
+        .unwrap();
+        db
+    }
+
+    fn make_spec(mission_id: &str, agent_id: &str, timeout: i64) -> ApprovalRequestSpec {
+        let mut spec = ApprovalRequestSpec::new(mission_id, ApprovalKind::Tool, "Test approval");
+        spec.agent_id = Some(agent_id.to_string());
+        spec.payload = "{}".into();
+        spec.reason = "IT".into();
+        spec.timeout_seconds = Some(timeout);
+        spec
+    }
+
+    #[tokio::test]
+    async fn it_submit_and_wait_user_approve_round_trip() {
+        let db = setup_db_with_mission_and_agent();
+        let coord = ApprovalCoordinator::new();
+        let cancel = CancellationToken::new();
+        let spec = make_spec("m1", "ag-1", 5);
+
+        let coord_for_resolve = coord.clone();
+        let resolver = tokio::spawn(async move {
+            // 等 coordinator 注册槽位（pending_count 至少 1）
+            for _ in 0..50 {
+                if coord_for_resolve.pending_count().await >= 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            // 找到唯一 pending id 并 resolve（IT 里只可能有一个）
+            let ids: Vec<String> = {
+                let pending = coord_for_resolve.pending.lock().await;
+                pending.keys().cloned().collect()
+            };
+            assert_eq!(ids.len(), 1, "exactly one pending request");
+            coord_for_resolve
+                .resolve(&ids[0], ApprovalDecision::Approved, Some("looks ok".into()))
+                .await
+        });
+
+        let (req_id, outcome) = submit_and_wait(&coord, &db, &spec, &cancel).await.unwrap();
+        assert_eq!(outcome.decision, ApprovalDecision::Approved);
+        assert_eq!(outcome.note.as_deref(), Some("looks ok"));
+        assert!(resolver.await.unwrap());
+
+        // DB 应是 approved，agent 应回到 running
+        let row = db
+            .with_conn(|c| queries::get_approval(c, &req_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, "approved");
+        assert_eq!(row.decided_by.as_deref(), Some("user"));
+        assert_eq!(row.decision_note.as_deref(), Some("looks ok"));
+
+        let agent_status: String = db
+            .with_conn(|c| {
+                Ok(c.query_row("SELECT status FROM agents WHERE id='ag-1'", [], |r| {
+                    r.get::<_, String>(0)
+                })?)
+            })
+            .unwrap();
+        assert_eq!(agent_status, "running");
+    }
+
+    #[tokio::test]
+    async fn it_submit_and_wait_timeout_expires() {
+        let db = setup_db_with_mission_and_agent();
+        let coord = ApprovalCoordinator::new();
+        let cancel = CancellationToken::new();
+        // 1s 超时；不让任何 resolver 出手 → 必走 sleep 分支
+        let spec = make_spec("m1", "ag-1", 1);
+
+        let start = std::time::Instant::now();
+        let (req_id, outcome) = submit_and_wait(&coord, &db, &spec, &cancel).await.unwrap();
+        let elapsed = start.elapsed();
+        assert!(elapsed >= Duration::from_millis(900), "should wait ≥ ~1s");
+        assert_eq!(outcome.decision, ApprovalDecision::Expired);
+
+        let row = db
+            .with_conn(|c| queries::get_approval(c, &req_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, "expired");
+        assert_eq!(row.decided_by.as_deref(), Some("auto_expire"));
+    }
+
+    #[tokio::test]
+    async fn it_submit_and_wait_external_cancel_returns_quickly() {
+        let db = setup_db_with_mission_and_agent();
+        let coord = ApprovalCoordinator::new();
+        let cancel = CancellationToken::new();
+        let spec = make_spec("m1", "ag-1", 30);
+
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            cancel_clone.cancel();
+        });
+
+        let start = std::time::Instant::now();
+        let (req_id, outcome) = submit_and_wait(&coord, &db, &spec, &cancel).await.unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "cancel must short-circuit, not wait full timeout"
+        );
+        assert_eq!(outcome.decision, ApprovalDecision::Cancelled);
+
+        let row = db
+            .with_conn(|c| queries::get_approval(c, &req_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, "cancelled");
+
+        // agent 也应被恢复
+        let agent_status: String = db
+            .with_conn(|c| {
+                Ok(c.query_row("SELECT status FROM agents WHERE id='ag-1'", [], |r| {
+                    r.get::<_, String>(0)
+                })?)
+            })
+            .unwrap();
+        assert_eq!(agent_status, "running");
+    }
 }

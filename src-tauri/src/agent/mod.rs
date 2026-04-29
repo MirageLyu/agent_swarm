@@ -1,4 +1,5 @@
 pub mod approval;
+pub mod approval_gate;
 pub mod artifacts;
 pub mod belief_state;
 pub mod chat;
