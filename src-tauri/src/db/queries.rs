@@ -1862,6 +1862,179 @@ pub fn set_agent_running(conn: &Connection, agent_id: &str) -> Result<()> {
     Ok(())
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// FM-12 Mission Report
+//
+// 设计说明：
+// - upsert_mission_report：mission_id UNIQUE，重复生成走 ON CONFLICT 覆盖。
+//   schema_version 预留未来报告结构升级；当前固定为 1。
+// - get_mission_report_by_mission：按 mission_id 取最新一份（语义上唯一）。
+// - upsert_report_vote：UNIQUE(report_id, decision_id) 保证幂等；
+//   用户切换 agree↔disagree 通过 ON CONFLICT 更新而非新增行。
+// - aggregate_decision_votes：返回某 report 下每个 decision 的 agree/disagree 计数，
+//   供前端 DecisionCard 展示投票总数（这是单用户应用，但保持聚合接口便于后续多人）。
+// ──────────────────────────────────────────────────────────────────────────
+
+pub struct MissionReportRow {
+    pub id: String,
+    pub mission_id: String,
+    pub schema_version: i64,
+    pub report_data: String,
+    pub generated_at: String,
+}
+
+pub fn upsert_mission_report(
+    conn: &Connection,
+    id: &str,
+    mission_id: &str,
+    report_data_json: &str,
+) -> Result<String> {
+    // INSERT ... ON CONFLICT(mission_id) DO UPDATE：覆盖式重新生成。
+    // RETURNING id 让调用方拿到稳定的 report_id（首次插入用入参 id；冲突时返回老 id）。
+    let report_id: String = conn.query_row(
+        "INSERT INTO mission_reports (id, mission_id, schema_version, report_data, generated_at)
+         VALUES (?1, ?2, 1, ?3, datetime('now'))
+         ON CONFLICT(mission_id) DO UPDATE SET
+           report_data = excluded.report_data,
+           generated_at = datetime('now')
+         RETURNING id",
+        params![id, mission_id, report_data_json],
+        |row| row.get(0),
+    )?;
+    Ok(report_id)
+}
+
+pub fn get_mission_report_by_mission(
+    conn: &Connection,
+    mission_id: &str,
+) -> Result<Option<MissionReportRow>> {
+    let row = conn
+        .query_row(
+            "SELECT id, mission_id, schema_version, report_data, generated_at
+             FROM mission_reports
+             WHERE mission_id = ?1",
+            [mission_id],
+            |r| {
+                Ok(MissionReportRow {
+                    id: r.get(0)?,
+                    mission_id: r.get(1)?,
+                    schema_version: r.get(2)?,
+                    report_data: r.get(3)?,
+                    generated_at: r.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(row)
+}
+
+pub fn get_mission_report_by_id(
+    conn: &Connection,
+    report_id: &str,
+) -> Result<Option<MissionReportRow>> {
+    let row = conn
+        .query_row(
+            "SELECT id, mission_id, schema_version, report_data, generated_at
+             FROM mission_reports
+             WHERE id = ?1",
+            [report_id],
+            |r| {
+                Ok(MissionReportRow {
+                    id: r.get(0)?,
+                    mission_id: r.get(1)?,
+                    schema_version: r.get(2)?,
+                    report_data: r.get(3)?,
+                    generated_at: r.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(row)
+}
+
+pub struct ReportVoteRow {
+    pub id: String,
+    pub report_id: String,
+    pub decision_id: String,
+    pub vote: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub fn upsert_report_vote(
+    conn: &Connection,
+    id: &str,
+    report_id: &str,
+    decision_id: &str,
+    vote: &str,
+) -> Result<()> {
+    if vote != "agree" && vote != "disagree" {
+        anyhow::bail!("invalid vote value: {} (expected 'agree' or 'disagree')", vote);
+    }
+    conn.execute(
+        "INSERT INTO report_votes (id, report_id, decision_id, vote)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(report_id, decision_id) DO UPDATE SET
+           vote = excluded.vote,
+           updated_at = datetime('now')",
+        params![id, report_id, decision_id, vote],
+    )?;
+    Ok(())
+}
+
+pub fn list_report_votes(conn: &Connection, report_id: &str) -> Result<Vec<ReportVoteRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, report_id, decision_id, vote, created_at, updated_at
+         FROM report_votes
+         WHERE report_id = ?1
+         ORDER BY decision_id ASC",
+    )?;
+    let rows = stmt
+        .query_map([report_id], |r| {
+            Ok(ReportVoteRow {
+                id: r.get(0)?,
+                report_id: r.get(1)?,
+                decision_id: r.get(2)?,
+                vote: r.get(3)?,
+                created_at: r.get(4)?,
+                updated_at: r.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub struct DecisionVoteAggregate {
+    pub decision_id: String,
+    pub agree_count: i64,
+    pub disagree_count: i64,
+}
+
+pub fn aggregate_decision_votes(
+    conn: &Connection,
+    report_id: &str,
+) -> Result<Vec<DecisionVoteAggregate>> {
+    let mut stmt = conn.prepare(
+        "SELECT decision_id,
+                SUM(CASE WHEN vote = 'agree' THEN 1 ELSE 0 END) AS agree_count,
+                SUM(CASE WHEN vote = 'disagree' THEN 1 ELSE 0 END) AS disagree_count
+         FROM report_votes
+         WHERE report_id = ?1
+         GROUP BY decision_id
+         ORDER BY decision_id ASC",
+    )?;
+    let rows = stmt
+        .query_map([report_id], |r| {
+            Ok(DecisionVoteAggregate {
+                decision_id: r.get(0)?,
+                agree_count: r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                disagree_count: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2909,5 +3082,114 @@ mod tests {
         let bad = make_approval_with_kind("ar-x", "m1", "garbage", 600);
         let res = insert_approval(&conn, &bad);
         assert!(res.is_err(), "kind check constraint must reject 'garbage'");
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // FM-12 Mission Report tests
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fm12_upsert_mission_report_inserts_then_overwrites() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+
+        let id1 = upsert_mission_report(&conn, "rep-1", "m1", r#"{"version":"a"}"#).unwrap();
+        assert_eq!(id1, "rep-1");
+
+        // 重复生成：mission_id UNIQUE 触发覆盖，返回的还是老 id
+        let id2 = upsert_mission_report(&conn, "rep-2", "m1", r#"{"version":"b"}"#).unwrap();
+        assert_eq!(id2, "rep-1", "second upsert should keep old id");
+
+        let row = get_mission_report_by_mission(&conn, "m1").unwrap().unwrap();
+        assert_eq!(row.id, "rep-1");
+        assert!(row.report_data.contains("\"version\":\"b\""), "data should be overwritten");
+        assert_eq!(row.schema_version, 1);
+    }
+
+    #[test]
+    fn fm12_get_mission_report_by_id_works() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+        upsert_mission_report(&conn, "rep-1", "m1", "{}").unwrap();
+
+        let row = get_mission_report_by_id(&conn, "rep-1").unwrap().unwrap();
+        assert_eq!(row.mission_id, "m1");
+
+        let none = get_mission_report_by_id(&conn, "missing").unwrap();
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn fm12_upsert_report_vote_idempotent_and_switchable() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+        upsert_mission_report(&conn, "rep-1", "m1", "{}").unwrap();
+
+        // 首次投票
+        upsert_report_vote(&conn, "v-1", "rep-1", "D-1", "agree").unwrap();
+        let votes = list_report_votes(&conn, "rep-1").unwrap();
+        assert_eq!(votes.len(), 1);
+        assert_eq!(votes[0].vote, "agree");
+
+        // 重复投同一 decision → UPSERT 路径，不应新增
+        upsert_report_vote(&conn, "v-2", "rep-1", "D-1", "disagree").unwrap();
+        let votes = list_report_votes(&conn, "rep-1").unwrap();
+        assert_eq!(votes.len(), 1, "UNIQUE(report_id, decision_id) should prevent duplicates");
+        assert_eq!(votes[0].vote, "disagree", "vote should switch to disagree");
+        // updated_at 应当被更新（与 created_at 不同；这里只断言字段存在）
+        assert!(!votes[0].updated_at.is_empty());
+
+        // 多个 decision
+        upsert_report_vote(&conn, "v-3", "rep-1", "D-2", "agree").unwrap();
+        let votes = list_report_votes(&conn, "rep-1").unwrap();
+        assert_eq!(votes.len(), 2);
+    }
+
+    #[test]
+    fn fm12_upsert_report_vote_rejects_invalid_value() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+        upsert_mission_report(&conn, "rep-1", "m1", "{}").unwrap();
+
+        let res = upsert_report_vote(&conn, "v-1", "rep-1", "D-1", "maybe");
+        assert!(res.is_err(), "invalid vote value should fail before SQL hits CHECK");
+    }
+
+    #[test]
+    fn fm12_aggregate_decision_votes_counts_correctly() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+        upsert_mission_report(&conn, "rep-1", "m1", "{}").unwrap();
+
+        upsert_report_vote(&conn, "v-1", "rep-1", "D-1", "agree").unwrap();
+        upsert_report_vote(&conn, "v-2", "rep-1", "D-2", "disagree").unwrap();
+        // 切换 D-1 投票
+        upsert_report_vote(&conn, "v-3", "rep-1", "D-1", "disagree").unwrap();
+
+        let agg = aggregate_decision_votes(&conn, "rep-1").unwrap();
+        assert_eq!(agg.len(), 2);
+        let d1 = agg.iter().find(|a| a.decision_id == "D-1").unwrap();
+        assert_eq!(d1.agree_count, 0);
+        assert_eq!(d1.disagree_count, 1, "switched vote should be counted as disagree");
+        let d2 = agg.iter().find(|a| a.decision_id == "D-2").unwrap();
+        assert_eq!(d2.disagree_count, 1);
+    }
+
+    #[test]
+    fn fm12_mission_report_cascades_on_mission_delete() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+        upsert_mission_report(&conn, "rep-1", "m1", "{}").unwrap();
+        upsert_report_vote(&conn, "v-1", "rep-1", "D-1", "agree").unwrap();
+
+        conn.execute("DELETE FROM missions WHERE id = 'm1'", []).unwrap();
+
+        let report = get_mission_report_by_mission(&conn, "m1").unwrap();
+        assert!(report.is_none(), "report should cascade-delete with mission");
+
+        let votes_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM report_votes WHERE report_id = 'rep-1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(votes_count, 0, "votes should cascade-delete with report");
     }
 }

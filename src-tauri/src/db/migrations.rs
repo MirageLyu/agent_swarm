@@ -575,6 +575,44 @@ const MIGRATIONS: &[(&str, &str)] = &[(
             WHERE agent_id IS NOT NULL;
         "#,
     ),
+    // FM-12 Mission Report
+    //
+    // 设计要点：
+    // - mission_reports 一对一存储完整报告 JSON（report_data），重新生成则覆盖。
+    //   - generated_at 用于乐观刷新；前端 stale 时可触发后台再生成
+    //   - schema_version 预留：未来报告结构升级时按版本号迁移而非破坏性覆盖
+    // - report_votes 记录用户对 Architecture Decision 的投票，UNIQUE(report_id, decision_id)
+    //   保证幂等：同一 decision 的多次投票直接 UPSERT。
+    //   - decision_id 来源是 report_data.decisions[].id（如 D-1），故为 TEXT 而非 FK
+    //   - 切换投票（agree↔disagree）通过 ON CONFLICT DO UPDATE 实现
+    (
+        "022_fm12_mission_report",
+        r#"
+        CREATE TABLE IF NOT EXISTS mission_reports (
+            id TEXT PRIMARY KEY,
+            mission_id TEXT NOT NULL UNIQUE REFERENCES missions(id) ON DELETE CASCADE,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            report_data TEXT NOT NULL DEFAULT '{}',
+            generated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_mission_reports_mission
+            ON mission_reports(mission_id);
+
+        CREATE TABLE IF NOT EXISTS report_votes (
+            id TEXT PRIMARY KEY,
+            report_id TEXT NOT NULL REFERENCES mission_reports(id) ON DELETE CASCADE,
+            decision_id TEXT NOT NULL,
+            vote TEXT NOT NULL CHECK (vote IN ('agree', 'disagree')),
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(report_id, decision_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_report_votes_report
+            ON report_votes(report_id);
+        "#,
+    ),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
