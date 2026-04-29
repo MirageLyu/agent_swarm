@@ -7,6 +7,7 @@ pub mod mission_template;
 pub mod skills;
 pub mod tools;
 
+use agent::approval::ApprovalCoordinator;
 use agent::planner_fetch::PlannerFetchCoordinator;
 use agent::{AgentRegistry, Scheduler};
 use commands::ConfigManager;
@@ -42,6 +43,41 @@ pub fn run() {
 
             // FM-15 v2.2 (S3-4): Planner fetch_url 用户确认协调器
             app.manage(PlannerFetchCoordinator::new());
+
+            // FM-14: 统一审批协调器 + 后台过期清理任务（每 30s 扫一次）。
+            //   后续 slice 会把 PlannerFetchCoordinator / chat propose 转调到这里，
+            //   现在先把基础设施立起来。
+            let approval_coord = ApprovalCoordinator::new();
+            app.manage(approval_coord.clone());
+            let approval_app_handle = app.handle().clone();
+            let approval_coord_for_task = approval_coord.clone();
+            tauri::async_runtime::spawn(async move {
+                use crate::db::queries;
+                use tauri::Emitter;
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    ticker.tick().await;
+                    let db = approval_app_handle.state::<Database>();
+                    let expired_ids = match db.with_conn(|conn| queries::expire_overdue_approvals(conn)) {
+                        Ok(ids) => ids,
+                        Err(e) => {
+                            tracing::warn!("[approval] expire sweep failed: {e}");
+                            continue;
+                        }
+                    };
+                    for id in expired_ids {
+                        approval_coord_for_task.forget(&id).await;
+                        let _ = approval_app_handle.emit(
+                            "approval-resolved",
+                            serde_json::json!({
+                                "request_id": id,
+                                "status": "expired",
+                            }),
+                        );
+                    }
+                }
+            });
 
             // FM-15 v2.2 (S3-2): 启动时初始化 skill 全局注册表（builtin + 用户级 SKILL.md）。
             // 项目级 skill 在 plan/dispatch 时基于 mission.repo_path 临时叠加，避免串扰。

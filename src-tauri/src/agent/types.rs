@@ -8,6 +8,10 @@ pub enum AgentStatus {
     Completed,
     Failed,
     Cancelled,
+    /// FM-14: Agent paused waiting for human approval on a tool call,
+    /// follow-up escalation, or budget threshold. The watchdog (L1/L4)
+    /// must NOT count time spent in this state — see `engine.rs`.
+    WaitingApproval,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
