@@ -1,4 +1,5 @@
 mod agent;
+mod approval;
 mod artifacts;
 mod chat;
 mod config;
@@ -10,6 +11,7 @@ mod skills;
 mod system;
 
 pub use agent::*;
+pub use approval::*;
 pub use artifacts::*;
 pub use chat::*;
 pub use config::*;

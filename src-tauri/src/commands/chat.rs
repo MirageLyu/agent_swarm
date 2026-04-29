@@ -226,6 +226,47 @@ pub fn confirm_followup_proposal(
         )
     });
 
+    // FM-14: 把对应的 approval row（kind=escalation, chat_message_id=...）顺手 resolve 掉，
+    // 避免它继续在 ApprovalQueue 里挂着。
+    use tauri::Emitter;
+    let matched: Vec<String> = db
+        .with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id FROM approval_requests
+                 WHERE status='pending' AND kind='escalation' AND chat_message_id IS NOT NULL
+                    AND mission_id = ?1
+                 ORDER BY created_at DESC LIMIT 1",
+            )?;
+            let ids = stmt
+                .query_map([&request.parent_mission_id], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            Ok(ids)
+        })
+        .unwrap_or_default();
+    for rid in matched {
+        let _ = db.with_conn(|c| {
+            queries::resolve_approval(c, &rid, "approved", "user", None)
+                .map_err(anyhow::Error::from)
+        });
+        if let Some(coord) =
+            app.try_state::<std::sync::Arc<crate::agent::approval::ApprovalCoordinator>>()
+        {
+            let coord_clone = coord.inner().clone();
+            let rid_clone = rid.clone();
+            tauri::async_runtime::spawn(async move {
+                coord_clone.forget(&rid_clone).await;
+            });
+        }
+        let _ = app.emit(
+            "approval-resolved",
+            serde_json::json!({
+                "request_id": rid,
+                "status": "approved",
+                "decided_by": "user",
+            }),
+        );
+    }
+
     Ok(ConfirmFollowupResponse {
         child_mission_id: child_id,
         repo_path,
@@ -257,5 +298,45 @@ pub fn reject_followup_proposal(
             None,
         )
     })
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+
+    // FM-14: 同步把对应 approval row 标 rejected。
+    use tauri::Emitter;
+    let matched: Vec<String> = db
+        .with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id FROM approval_requests
+                 WHERE status='pending' AND kind='escalation' AND mission_id = ?1
+                 ORDER BY created_at DESC LIMIT 1",
+            )?;
+            let ids = stmt
+                .query_map([&request.mission_id], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            Ok(ids)
+        })
+        .unwrap_or_default();
+    for rid in matched {
+        let _ = db.with_conn(|c| {
+            queries::resolve_approval(c, &rid, "rejected", "user", None)
+                .map_err(anyhow::Error::from)
+        });
+        if let Some(coord) =
+            app.try_state::<std::sync::Arc<crate::agent::approval::ApprovalCoordinator>>()
+        {
+            let coord_clone = coord.inner().clone();
+            let rid_clone = rid.clone();
+            tauri::async_runtime::spawn(async move {
+                coord_clone.forget(&rid_clone).await;
+            });
+        }
+        let _ = app.emit(
+            "approval-resolved",
+            serde_json::json!({
+                "request_id": rid,
+                "status": "rejected",
+                "decided_by": "user",
+            }),
+        );
+    }
+    Ok(())
 }

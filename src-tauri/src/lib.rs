@@ -158,6 +158,13 @@ pub fn run() {
             commands::send_chat_message,
             commands::confirm_followup_proposal,
             commands::reject_followup_proposal,
+            // FM-14: Approval Queue
+            commands::list_pending_approvals,
+            commands::get_approval,
+            commands::resolve_approval,
+            commands::resolve_all_approvals,
+            commands::get_approval_policy,
+            commands::update_approval_policy,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

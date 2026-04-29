@@ -433,6 +433,55 @@ impl ChatAgent {
 
                 let _ = self.app_handle.emit("followup-proposed", payload.clone());
 
+                // FM-14: 同步写入统一审批队列；这是异步审批（chat 不阻塞），
+                // 用户既可以在 ChatPanel 内点确认，也可以在 ApprovalQueue 里处理。
+                // 任何路径上的 approve/reject 都会被 commands/chat.rs 里的 confirm_/reject_
+                // followup_proposal 解析（见 Slice 3 改造）。
+                let approval_id = uuid::Uuid::new_v4().to_string();
+                let payload_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into());
+                let title_for_q = format!("Follow-up mission: {}", title);
+                let reason_for_q = if rationale.is_empty() {
+                    format!("Estimated {estimated_tasks} task(s); chat agent suggests escalating.")
+                } else {
+                    rationale.clone()
+                };
+                let timeout_secs = self
+                    .app_handle
+                    .try_state::<crate::commands::ConfigManager>()
+                    .map(|c| c.get_config_snapshot().approval_policy.timeout_seconds as i64)
+                    .unwrap_or(crate::agent::approval::DEFAULT_APPROVAL_TIMEOUT_SECS);
+                let context_summary_text = trim_context(&combined_text, 240);
+                let new_req = crate::db::queries::NewApproval {
+                    id: &approval_id,
+                    mission_id,
+                    kind: "escalation",
+                    agent_id: None,
+                    planner_session_id: None,
+                    chat_message_id: Some(assistant_msg_id),
+                    title: &title_for_q,
+                    payload: &payload_json,
+                    reason: &reason_for_q,
+                    context_summary: context_summary_text.as_str(),
+                    timeout_seconds: timeout_secs,
+                };
+                if let Err(e) =
+                    db.with_conn(|c| crate::db::queries::insert_approval(c, &new_req))
+                {
+                    tracing::warn!(
+                        "[chat] failed to mirror followup proposal to approval_requests: {e}"
+                    );
+                } else {
+                    let _ = self.app_handle.emit(
+                        "approval-requested",
+                        serde_json::json!({
+                            "request_id": approval_id,
+                            "mission_id": mission_id,
+                            "kind": "escalation",
+                            "title": title_for_q,
+                        }),
+                    );
+                }
+
                 return Ok(ChatTurnSummary {
                     mission_id: mission_id.to_string(),
                     user_message_id: String::new(),
@@ -698,4 +747,9 @@ fn truncate(s: &str, max: usize) -> String {
         return s.to_string();
     }
     s.chars().take(max).collect::<String>() + "…"
+}
+
+/// FM-14: 简易上下文摘要（按字符截断）。供 approval_requests.context_summary 使用。
+fn trim_context(s: &str, max: usize) -> String {
+    truncate(s, max)
 }

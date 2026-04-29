@@ -22,7 +22,7 @@ use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
 use crate::agent::planner::{parse_and_validate, PlannerError, PlannerOutput};
-use crate::agent::planner_fetch::{FetchPolicy, PlannerFetchCoordinator};
+use crate::agent::planner_fetch::FetchPolicy;
 use crate::agent::planner_state::{ContractGuardrail, PlannerState};
 use crate::agent::planner_tools::{
     planner_tool_definitions, PlannerFetchRuntime, PlannerToolExecutor,
@@ -382,22 +382,19 @@ impl PlannerEngine {
         }
         let mut executor = PlannerToolExecutor::new(self.repo_root.clone(), state.clone());
 
-        // FM-15 v2.2 (S3-4): 装载 fetch_url runtime（policy 来自 AppConfig，
-        // coordinator 是 Tauri global state，会被 IPC `confirm_planner_fetch` 唤醒）。
-        if let (Some(coord), Some(cfg)) = (
-            self.app_handle.try_state::<Arc<PlannerFetchCoordinator>>(),
-            self.app_handle.try_state::<ConfigManager>(),
-        ) {
+        // FM-15 v2.2 (S3-4) + FM-14 重构：装载 fetch_url runtime。
+        // policy 来自 AppConfig；用户确认走统一 ApprovalCoordinator（在 fetch_url 内部
+        // 通过 try_state 拿，无需在 runtime 里持有）。
+        if let Some(cfg) = self.app_handle.try_state::<ConfigManager>() {
             let policy = FetchPolicy::from_app_config(&cfg.get_config_snapshot());
             executor = executor.with_fetch_runtime(PlannerFetchRuntime {
                 session_id: session_id.to_string(),
                 app_handle: self.app_handle.clone(),
-                coordinator: coord.inner().clone(),
                 policy,
             });
         } else {
             tracing::warn!(
-                "[planner_engine] fetch_url disabled: PlannerFetchCoordinator or ConfigManager not registered"
+                "[planner_engine] fetch_url disabled: ConfigManager not registered"
             );
         }
 

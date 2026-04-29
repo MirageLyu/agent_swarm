@@ -21,8 +21,7 @@ use tokio::sync::Mutex;
 
 use crate::agent::planner::PlannerOutput;
 use crate::agent::planner_fetch::{
-    self, FetchDecision, FetchError, FetchPolicy, PendingFetchRequest, PlannerFetchCoordinator,
-    CONFIRMATION_TIMEOUT,
+    self, FetchError, FetchPolicy,
 };
 use crate::agent::planner_state::{
     PlannerState, PlannerStateError, ProposeTaskInput, ReviseTaskInput,
@@ -534,14 +533,20 @@ fn tool_err(kind: &str, message: &str) -> ToolOutput {
 }
 
 /// fetch_url runtime 上下文：包含 session_id（用于 grant 计数 + 事件 payload）、
-/// AppHandle（emit `planner-fetch-confirmation` + 通过 try_state 取 Database）、
-/// Coordinator（拿用户确认结果）、Policy（allowlist + 配额）。
+/// AppHandle（emit `planner-fetch-confirmation` + 通过 try_state 取 Database +
+/// ApprovalCoordinator）、Policy（allowlist + 配额）。
+///
+/// FM-14 改造：用户确认走统一的 ApprovalCoordinator（不再用旧 PlannerFetchCoordinator）。
+/// fetch 类型在 ApprovalCard 里给三个按钮：Allow Once / Allow Session / Deny；
+/// 后端通过 `outcome.note` 区分前两者（Some("session") 时写 per-session grant）。
+///
+/// 旧 `PlannerFetchCoordinator` 仍然在 manage 列表（兼容老前端 IPC `confirm_planner_fetch`），
+/// 但不再被这里使用，详见 `commands/planner.rs::confirm_planner_fetch` 的桥接说明。
 ///
 /// 单元测试不传这个 → fetch_url 直接报 `fetch_unavailable`。
 pub struct PlannerFetchRuntime {
     pub session_id: String,
     pub app_handle: tauri::AppHandle,
-    pub coordinator: Arc<PlannerFetchCoordinator>,
     pub policy: FetchPolicy,
 }
 
@@ -784,61 +789,138 @@ impl PlannerToolExecutor {
             };
         }
 
-        // 5) 否则需要用户确认
+        // 5) 否则需要用户确认 —— 走 FM-14 统一 ApprovalCoordinator
         if !allowed_without_prompt {
-            let (request_id, rx) = rt.coordinator.register().await;
-            let payload = PendingFetchRequest {
-                request_id: request_id.clone(),
-                session_id: rt.session_id.clone(),
-                url: normalized_url.clone(),
-                host: host.clone(),
+            use crate::agent::approval::{
+                self, ApprovalCoordinator, ApprovalDecision, ApprovalKind, ApprovalRequestSpec,
             };
-            // emit event；如果 emit 失败也得 forget oneshot
-            if let Err(e) = tauri::Emitter::emit(
+
+            // 反查 mission_id（planner_session.mission_id 在 link 后才有）；缺失就跳过审批
+            // 并直接 Deny，避免越权。
+            let mission_id_opt: Option<String> = db
+                .with_conn(|conn| {
+                    crate::db::queries::get_planner_session(conn, &rt.session_id)
+                        .map(|opt| opt.and_then(|s| s.mission_id))
+                })
+                .unwrap_or(None);
+            let Some(mission_id) = mission_id_opt else {
+                tracing::warn!(
+                    "[planner.fetch_url] session {} has no mission_id; denying fetch",
+                    rt.session_id
+                );
+                return planner_fetch_error(&FetchError::UserDenied(host));
+            };
+
+            let coord = match rt.app_handle.try_state::<Arc<ApprovalCoordinator>>() {
+                Some(c) => c.inner().clone(),
+                None => {
+                    return PlannerToolResult::err(
+                        "internal",
+                        "ApprovalCoordinator not registered; fetch_url cannot await user",
+                    )
+                }
+            };
+
+            // payload：前端按 kind="fetch" 渲染三按钮（Allow Once / Session / Deny）。
+            let payload_json = serde_json::json!({
+                "url": normalized_url,
+                "host": host,
+                "session_id": rt.session_id,
+                "reason": reason,
+            })
+            .to_string();
+            let cfg_timeout = rt
+                .app_handle
+                .try_state::<crate::commands::ConfigManager>()
+                .map(|c| c.get_config_snapshot().approval_policy.timeout_seconds as i64)
+                .unwrap_or(approval::DEFAULT_APPROVAL_TIMEOUT_SECS);
+
+            let mut spec = ApprovalRequestSpec::new(
+                mission_id,
+                ApprovalKind::Fetch,
+                format!("Fetch URL: {host}"),
+            );
+            spec.planner_session_id = Some(rt.session_id.clone());
+            spec.payload = payload_json.clone();
+            spec.reason = reason.clone();
+            spec.context_summary = format!("Planner wants to GET {normalized_url}");
+            spec.timeout_seconds = Some(cfg_timeout);
+
+            // 兼容旧 UI：让 PlannerFetchConfirmDialog 仍能弹出（接收的 request_id 就是
+            // approval_request id；前端 confirm_planner_fetch 调用会被桥接到 ApprovalCoordinator）。
+            // 同时 emit 新事件让 ApprovalQueue 高亮一下。
+            //
+            // request_id 由 submit_and_wait 内部生成；我们先生成一个相同 id 走的策略不可行，
+            // 所以这里改成"先 submit 拿 id 再 emit"。但 submit 是阻塞 await——所以
+            // 拆成 submit + 在 submit 之前不 emit；submit 内部已写 DB，前端通过订阅
+            // approval-requested + 旧 planner-fetch-confirmation 都能感知。
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let db_state = rt.app_handle.state::<Database>();
+
+            let (request_id, outcome) = match approval::submit_and_wait(
+                &coord,
+                db_state.inner(),
+                &spec,
+                &cancel,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    return PlannerToolResult::err(
+                        "internal",
+                        &format!("submit_and_wait(fetch): {e}"),
+                    )
+                }
+            };
+
+            // approval-requested + planner-fetch-confirmation 都补发（订阅方可能已经在 list 上看到，
+            // 但事件能让旧弹窗组件继续工作）。
+            let _ = tauri::Emitter::emit(
+                &rt.app_handle,
+                "approval-requested",
+                serde_json::json!({
+                    "request_id": request_id,
+                    "mission_id": spec.mission_id,
+                    "kind": "fetch",
+                    "title": spec.title,
+                }),
+            );
+            let _ = tauri::Emitter::emit(
                 &rt.app_handle,
                 "planner-fetch-confirmation",
                 serde_json::json!({
-                    "request_id": payload.request_id,
-                    "session_id": payload.session_id,
-                    "url": payload.url,
-                    "host": payload.host,
+                    "request_id": request_id,
+                    "session_id": rt.session_id,
+                    "url": normalized_url,
+                    "host": host,
                     "reason": reason,
                 }),
-            ) {
-                rt.coordinator.forget(&request_id).await;
-                return PlannerToolResult::err(
-                    "internal",
-                    &format!("emit planner-fetch-confirmation failed: {e}"),
-                );
-            }
+            );
 
-            let decision = match tokio::time::timeout(CONFIRMATION_TIMEOUT, rx).await {
-                Ok(Ok(d)) => d,
-                Ok(Err(_)) => {
-                    // sender dropped → coordinator 被 forget；按 Deny 处理
+            match outcome.decision {
+                ApprovalDecision::Approved => {
+                    // note=="session" → 写 grant；其他（"once" 或 None）→ 不写
+                    if outcome.note.as_deref() == Some("session") {
+                        if let Err(e) = db.with_conn(|conn| {
+                            crate::db::queries::record_planner_fetch_grant(
+                                conn,
+                                &rt.session_id,
+                                &host,
+                            )
+                        }) {
+                            tracing::warn!("record_planner_fetch_grant failed: {e}");
+                        }
+                    }
+                }
+                ApprovalDecision::Rejected => {
                     return planner_fetch_error(&FetchError::UserDenied(host));
                 }
-                Err(_) => {
-                    rt.coordinator.forget(&request_id).await;
+                ApprovalDecision::Expired => {
                     return planner_fetch_error(&FetchError::ConfirmationTimeout(host));
                 }
-            };
-
-            match decision {
-                FetchDecision::Deny => {
+                ApprovalDecision::Cancelled => {
                     return planner_fetch_error(&FetchError::UserDenied(host));
-                }
-                FetchDecision::AllowOnce => { /* 不写 grant */ }
-                FetchDecision::AllowSession => {
-                    if let Err(e) = db.with_conn(|conn| {
-                        crate::db::queries::record_planner_fetch_grant(
-                            conn,
-                            &rt.session_id,
-                            &host,
-                        )
-                    }) {
-                        tracing::warn!("record_planner_fetch_grant failed: {e}");
-                    }
                 }
             }
         }

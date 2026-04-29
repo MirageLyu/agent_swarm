@@ -35,6 +35,42 @@ pub struct AppConfig {
     /// Provider 启动时一次性读取，改完需要重启 app（或下一次任务）才生效。
     #[serde(default = "default_agent_step_idle_seconds")]
     pub agent_step_idle_seconds: u64,
+
+    // FM-14: 审批策略 —— 见 ApprovalPolicy::default 注释了解每项语义。
+    #[serde(default)]
+    pub approval_policy: ApprovalPolicy,
+}
+
+/// FM-14: 审批策略；持久化到 config.json，前端在 Settings 里编辑。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalPolicy {
+    /// pending → expired 的等待时长。
+    /// 默认 600s = agent_timeout_seconds 默认 1800s 的 1/3，
+    /// 单次审批不会把 agent 顶到 wall-clock。
+    #[serde(default = "default_approval_timeout_seconds")]
+    pub timeout_seconds: u32,
+
+    /// 工作区根目录的相对路径前缀（POSIX 风格 `/`）。匹配命中即触发 tool 审批。
+    /// 例如：`"package.json"`、`"src-tauri/tauri.conf.json"`、`".github/"`、`"node_modules/"`。
+    /// 默认覆盖典型"动一次伤一次"的元数据文件。
+    #[serde(default = "default_protected_paths")]
+    pub protected_paths: Vec<String>,
+
+    /// shell_exec 命令名（命令首词，小写）。命中即触发 tool 审批。
+    /// 防止 LLM 在不知情的情况下做不可逆操作。
+    #[serde(default = "default_destructive_commands")]
+    pub destructive_commands: Vec<String>,
+
+    /// 累计成本超过 contract.cost_budget_usd × 此比例时，触发 budget 审批。
+    /// 例：0.8 → 用掉 80% 时弹一次。0 = 关闭 budget 审批。
+    #[serde(default = "default_budget_warn_ratio")]
+    pub budget_warn_ratio: f32,
+
+    /// chat agent commit_main_workdir 的"软阈值行数"：超过即触发 chat_commit 审批，
+    /// 不再像旧版直接拒绝（旧版硬上限 30 行仍然在，超 30 直接 reject）。
+    /// 设 0 表示禁用软阈值（所有 commit 都不审批，回退到旧硬上限行为）。
+    #[serde(default = "default_chat_commit_soft_lines")]
+    pub chat_commit_soft_lines: u32,
 }
 
 fn default_planner_max_steps() -> u32 { 80 }
@@ -43,6 +79,48 @@ fn default_planner_max_fetches() -> u32 { 10 }
 fn default_max_agent_steps() -> u32 { 80 }
 fn default_agent_timeout_seconds() -> u64 { 1800 }
 fn default_agent_step_idle_seconds() -> u64 { 60 }
+
+fn default_approval_timeout_seconds() -> u32 { 600 }
+fn default_protected_paths() -> Vec<String> {
+    vec![
+        "package.json".into(),
+        "package-lock.json".into(),
+        "pnpm-lock.yaml".into(),
+        "yarn.lock".into(),
+        "Cargo.toml".into(),
+        "Cargo.lock".into(),
+        "src-tauri/tauri.conf.json".into(),
+        ".github/".into(),
+        ".env".into(),
+        ".env.local".into(),
+    ]
+}
+fn default_destructive_commands() -> Vec<String> {
+    vec![
+        "rm".into(),
+        "git push".into(),
+        "git reset".into(),
+        "git rebase".into(),
+        "npm publish".into(),
+        "pnpm publish".into(),
+        "yarn publish".into(),
+        "cargo publish".into(),
+    ]
+}
+fn default_budget_warn_ratio() -> f32 { 0.8 }
+fn default_chat_commit_soft_lines() -> u32 { 10 }
+
+impl Default for ApprovalPolicy {
+    fn default() -> Self {
+        Self {
+            timeout_seconds: default_approval_timeout_seconds(),
+            protected_paths: default_protected_paths(),
+            destructive_commands: default_destructive_commands(),
+            budget_warn_ratio: default_budget_warn_ratio(),
+            chat_commit_soft_lines: default_chat_commit_soft_lines(),
+        }
+    }
+}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -59,6 +137,7 @@ impl Default for AppConfig {
             max_agent_steps: default_max_agent_steps(),
             agent_timeout_seconds: default_agent_timeout_seconds(),
             agent_step_idle_seconds: default_agent_step_idle_seconds(),
+            approval_policy: ApprovalPolicy::default(),
         }
     }
 }
@@ -190,4 +269,62 @@ pub fn update_config(
         }
     }
     mgr.save().map_err(|e| e.to_string())
+}
+
+// ---- FM-14: Approval Policy IPC ----
+
+#[tauri::command]
+pub fn get_approval_policy(app: tauri::AppHandle) -> Result<ApprovalPolicy, String> {
+    let mgr = app.state::<ConfigManager>();
+    let policy = mgr.config.lock().unwrap().approval_policy.clone();
+    Ok(policy)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateApprovalPolicyRequest {
+    pub timeout_seconds: Option<u32>,
+    pub protected_paths: Option<Vec<String>>,
+    pub destructive_commands: Option<Vec<String>>,
+    pub budget_warn_ratio: Option<f32>,
+    pub chat_commit_soft_lines: Option<u32>,
+}
+
+#[tauri::command]
+pub fn update_approval_policy(
+    app: tauri::AppHandle,
+    request: UpdateApprovalPolicyRequest,
+) -> Result<ApprovalPolicy, String> {
+    let mgr = app.state::<ConfigManager>();
+    let updated = {
+        let mut config = mgr.config.lock().unwrap();
+        let p = &mut config.approval_policy;
+        if let Some(v) = request.timeout_seconds {
+            // 30s 是用户在前端弹窗里能反应过来的最小值；上限 1h 防误填。
+            p.timeout_seconds = v.clamp(30, 3600);
+        }
+        if let Some(v) = request.protected_paths {
+            p.protected_paths = v
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        if let Some(v) = request.destructive_commands {
+            p.destructive_commands = v
+                .into_iter()
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        if let Some(v) = request.budget_warn_ratio {
+            // 0 = 关闭；否则限制 [0.1, 1.0]
+            p.budget_warn_ratio = if v <= 0.0 { 0.0 } else { v.clamp(0.1, 1.0) };
+        }
+        if let Some(v) = request.chat_commit_soft_lines {
+            p.chat_commit_soft_lines = v;
+        }
+        p.clone()
+    };
+    mgr.save().map_err(|e| e.to_string())?;
+    Ok(updated)
 }
