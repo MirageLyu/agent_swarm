@@ -494,6 +494,87 @@ const MIGRATIONS: &[(&str, &str)] = &[(
         ALTER TABLE tasks ADD COLUMN last_failed_at TEXT;
         "#,
     ),
+    // FM-14 Approval Queue — 统一审批队列。
+    //
+    // 收编三类已存在的「审批语义」（fetch_url 域名确认 / followup mission 升级 /
+    // chat agent commit 阈值），并新增两类（tool 拦截 / budget 超限）。所有审批请求
+    // 走同一张表，前端用同一个 ApprovalQueue UI 展示。
+    //
+    // - agents.status 加 'waiting_approval'：SQLite 不支持 ALTER CHECK，必须重建表
+    //   （仿 009_preflight_contract 模式）。
+    // - approval_requests 通用化：kind 区分类别，payload 是各自结构化 JSON。
+    //   - source 关联：agent_id / planner_session_id / chat_message_id 三选一非空
+    //   - decision_note: 用户 reject 时填的解释，会自动 inject 到 agent 上下文
+    //   - decided_by: 'user' | 'auto_threshold' | 'auto_expire' 用于审计与 FM-13 异常检测
+    //   - expires_at: 写入时计算 = created_at + approval_timeout_seconds（默认 600s）
+    (
+        "021_fm14_approval_queue",
+        r#"
+        PRAGMA foreign_keys=OFF;
+
+        CREATE TABLE agents_new (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            task_id TEXT REFERENCES tasks(id),
+            status TEXT NOT NULL DEFAULT 'idle'
+                CHECK (status IN ('idle', 'running', 'completed', 'failed', 'cancelled', 'waiting_approval')),
+            worktree_path TEXT,
+            current_step INTEGER NOT NULL DEFAULT 0,
+            total_steps INTEGER,
+            tokens_used INTEGER NOT NULL DEFAULT 0,
+            cost_usd REAL NOT NULL DEFAULT 0.0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            base_commit_hash TEXT,
+            head_commit_hash TEXT
+        );
+
+        INSERT INTO agents_new (
+            id, name, task_id, status, worktree_path, current_step, total_steps,
+            tokens_used, cost_usd, created_at, updated_at, base_commit_hash, head_commit_hash
+        )
+        SELECT
+            id, name, task_id, status, worktree_path, current_step, total_steps,
+            tokens_used, cost_usd, created_at, updated_at, base_commit_hash, head_commit_hash
+        FROM agents;
+
+        DROP TABLE agents;
+        ALTER TABLE agents_new RENAME TO agents;
+
+        PRAGMA foreign_keys=ON;
+
+        CREATE TABLE IF NOT EXISTS approval_requests (
+            id TEXT PRIMARY KEY,
+            mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL
+                CHECK (kind IN ('tool', 'fetch', 'escalation', 'budget', 'chat_commit')),
+            agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
+            planner_session_id TEXT REFERENCES planner_sessions(id) ON DELETE CASCADE,
+            chat_message_id TEXT REFERENCES mission_chats(id) ON DELETE CASCADE,
+            title TEXT NOT NULL,
+            payload TEXT NOT NULL DEFAULT '{}',
+            reason TEXT NOT NULL DEFAULT '',
+            context_summary TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'approved', 'rejected', 'expired', 'cancelled')),
+            decision_note TEXT,
+            decided_by TEXT
+                CHECK (decided_by IS NULL OR decided_by IN ('user', 'auto_threshold', 'auto_expire')),
+            resolved_at TEXT,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_approval_pending
+            ON approval_requests(status, expires_at)
+            WHERE status = 'pending';
+        CREATE INDEX IF NOT EXISTS idx_approval_mission
+            ON approval_requests(mission_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_approval_agent
+            ON approval_requests(agent_id)
+            WHERE agent_id IS NOT NULL;
+        "#,
+    ),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

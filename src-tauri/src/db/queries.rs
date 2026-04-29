@@ -1622,6 +1622,246 @@ pub fn list_followup_mission_ids(
     Ok(rows)
 }
 
+// ---- FM-14: Approval Queue ----
+//
+// 一个统一的审批请求表，覆盖 5 种 kind：
+// - tool        : ToolExecutor 拦截 protected_paths / destructive_commands
+// - fetch       : Planner fetch_url 域名首次确认（接管旧 PlannerFetchCoordinator）
+// - escalation  : Chat agent propose_followup_mission（接管旧 followup propose channel）
+// - budget      : 累计成本超 contract budget 阈值
+// - chat_commit : Chat agent commit_main_workdir 软阈值（10-30 行进队列，>30 直接 reject）
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ApprovalRow {
+    pub id: String,
+    pub mission_id: String,
+    pub kind: String,
+    pub agent_id: Option<String>,
+    pub planner_session_id: Option<String>,
+    pub chat_message_id: Option<String>,
+    pub title: String,
+    pub payload: String,
+    pub reason: String,
+    pub context_summary: String,
+    pub status: String,
+    pub decision_note: Option<String>,
+    pub decided_by: Option<String>,
+    pub resolved_at: Option<String>,
+    pub expires_at: String,
+    pub created_at: String,
+}
+
+fn map_approval_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRow> {
+    Ok(ApprovalRow {
+        id: row.get(0)?,
+        mission_id: row.get(1)?,
+        kind: row.get(2)?,
+        agent_id: row.get(3)?,
+        planner_session_id: row.get(4)?,
+        chat_message_id: row.get(5)?,
+        title: row.get(6)?,
+        payload: row.get(7)?,
+        reason: row.get(8)?,
+        context_summary: row.get(9)?,
+        status: row.get(10)?,
+        decision_note: row.get(11)?,
+        decided_by: row.get(12)?,
+        resolved_at: row.get(13)?,
+        expires_at: row.get(14)?,
+        created_at: row.get(15)?,
+    })
+}
+
+const APPROVAL_COLUMNS: &str = "id, mission_id, kind, agent_id, planner_session_id, \
+     chat_message_id, title, payload, reason, context_summary, status, decision_note, \
+     decided_by, resolved_at, expires_at, created_at";
+
+pub struct NewApproval<'a> {
+    pub id: &'a str,
+    pub mission_id: &'a str,
+    pub kind: &'a str,
+    pub agent_id: Option<&'a str>,
+    pub planner_session_id: Option<&'a str>,
+    pub chat_message_id: Option<&'a str>,
+    pub title: &'a str,
+    pub payload: &'a str,
+    pub reason: &'a str,
+    pub context_summary: &'a str,
+    /// Seconds from now until the request auto-expires.
+    pub timeout_seconds: i64,
+}
+
+pub fn insert_approval(conn: &Connection, req: &NewApproval<'_>) -> Result<()> {
+    // SQLite datetime modifier 必须是 "+N seconds" 或 "-N seconds"，不能是 "+-N"。
+    let modifier = if req.timeout_seconds >= 0 {
+        format!("+{} seconds", req.timeout_seconds)
+    } else {
+        format!("{} seconds", req.timeout_seconds)
+    };
+    conn.execute(
+        "INSERT INTO approval_requests
+            (id, mission_id, kind, agent_id, planner_session_id, chat_message_id,
+             title, payload, reason, context_summary, status, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending',
+                 datetime('now', ?11))",
+        params![
+            req.id,
+            req.mission_id,
+            req.kind,
+            req.agent_id,
+            req.planner_session_id,
+            req.chat_message_id,
+            req.title,
+            req.payload,
+            req.reason,
+            req.context_summary,
+            modifier,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn get_approval(conn: &Connection, id: &str) -> Result<Option<ApprovalRow>> {
+    let sql = format!(
+        "SELECT {APPROVAL_COLUMNS} FROM approval_requests WHERE id = ?1"
+    );
+    let row = conn
+        .query_row(&sql, [id], map_approval_row)
+        .optional()?;
+    Ok(row)
+}
+
+pub fn list_pending_approvals(
+    conn: &Connection,
+    mission_id: Option<&str>,
+) -> Result<Vec<ApprovalRow>> {
+    let (sql, rows) = match mission_id {
+        Some(mid) => {
+            let sql = format!(
+                "SELECT {APPROVAL_COLUMNS} FROM approval_requests
+                 WHERE status = 'pending' AND mission_id = ?1
+                 ORDER BY created_at ASC"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map([mid], map_approval_row)?
+                .collect::<Result<Vec<_>, _>>()?;
+            (sql, rows)
+        }
+        None => {
+            let sql = format!(
+                "SELECT {APPROVAL_COLUMNS} FROM approval_requests
+                 WHERE status = 'pending'
+                 ORDER BY created_at ASC"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map([], map_approval_row)?
+                .collect::<Result<Vec<_>, _>>()?;
+            (sql, rows)
+        }
+    };
+    let _ = sql;
+    Ok(rows)
+}
+
+pub fn count_pending_approvals(conn: &Connection, mission_id: Option<&str>) -> Result<i64> {
+    let count: i64 = match mission_id {
+        Some(mid) => conn.query_row(
+            "SELECT COUNT(*) FROM approval_requests WHERE status = 'pending' AND mission_id = ?1",
+            [mid],
+            |r| r.get(0),
+        )?,
+        None => conn.query_row(
+            "SELECT COUNT(*) FROM approval_requests WHERE status = 'pending'",
+            [],
+            |r| r.get(0),
+        )?,
+    };
+    Ok(count)
+}
+
+/// Atomically resolve an approval. Returns true if the row transitioned from
+/// pending → status (i.e. caller won the race). Idempotent for already-resolved
+/// rows in the sense that they return false rather than error.
+pub fn resolve_approval(
+    conn: &Connection,
+    id: &str,
+    new_status: &str,
+    decided_by: &str,
+    note: Option<&str>,
+) -> Result<bool> {
+    debug_assert!(matches!(
+        new_status,
+        "approved" | "rejected" | "expired" | "cancelled"
+    ));
+    let rows = conn.execute(
+        "UPDATE approval_requests
+         SET status = ?1, decided_by = ?2, decision_note = ?3,
+             resolved_at = datetime('now')
+         WHERE id = ?4 AND status = 'pending'",
+        params![new_status, decided_by, note, id],
+    )?;
+    Ok(rows > 0)
+}
+
+/// Sweep all pending approvals whose expires_at < now → status='expired'.
+/// Returns the IDs that were transitioned (for caller to notify subscribers).
+pub fn expire_overdue_approvals(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM approval_requests
+         WHERE status = 'pending' AND expires_at < datetime('now')",
+    )?;
+    let ids: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if ids.is_empty() {
+        return Ok(ids);
+    }
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "UPDATE approval_requests SET status = 'expired', decided_by = 'auto_expire',
+            resolved_at = datetime('now')
+         WHERE id IN ({placeholders})"
+    );
+    let params_vec: Vec<&dyn rusqlite::ToSql> =
+        ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    conn.execute(&sql, params_vec.as_slice())?;
+    Ok(ids)
+}
+
+/// Cancel all pending approvals tied to a mission (used when mission is stopped/restarted).
+pub fn cancel_pending_approvals_for_mission(
+    conn: &Connection,
+    mission_id: &str,
+) -> Result<u64> {
+    let n = conn.execute(
+        "UPDATE approval_requests
+         SET status = 'cancelled', decided_by = 'auto_expire',
+             resolved_at = datetime('now')
+         WHERE status = 'pending' AND mission_id = ?1",
+        [mission_id],
+    )?;
+    Ok(n as u64)
+}
+
+/// Set agents.status = 'waiting_approval'. Caller must update back to 'running' on resolve.
+pub fn set_agent_waiting_approval(conn: &Connection, agent_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE agents SET status = 'waiting_approval', updated_at = datetime('now') WHERE id = ?1",
+        [agent_id],
+    )?;
+    Ok(())
+}
+
+pub fn set_agent_running(conn: &Connection, agent_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE agents SET status = 'running', updated_at = datetime('now') WHERE id = ?1",
+        [agent_id],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2500,5 +2740,174 @@ mod tests {
         assert_eq!(conflicts[0].2, "auto", "later write should override");
         assert_eq!(conflicts[1].0, "T-C");
         assert_eq!(conflicts[1].2, "llm_failed_fallback");
+    }
+
+    // ---- FM-14: Approval Queue ----
+
+    fn make_approval_with_kind<'a>(
+        id: &'a str,
+        mission_id: &'a str,
+        kind: &'a str,
+        timeout: i64,
+    ) -> NewApproval<'a> {
+        NewApproval {
+            id,
+            mission_id,
+            kind,
+            agent_id: None,
+            planner_session_id: None,
+            chat_message_id: None,
+            title: "Test approval",
+            payload: "{}",
+            reason: "unit test",
+            context_summary: "",
+            timeout_seconds: timeout,
+        }
+    }
+
+    #[test]
+    fn fm14_approval_insert_and_get_round_trip() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+        let req = make_approval_with_kind("ar-1", "m1", "tool", 600);
+        insert_approval(&conn, &req).unwrap();
+
+        let row = get_approval(&conn, "ar-1").unwrap().expect("row exists");
+        assert_eq!(row.id, "ar-1");
+        assert_eq!(row.kind, "tool");
+        assert_eq!(row.status, "pending");
+        assert!(row.expires_at > row.created_at, "expires_at should be in the future");
+        assert!(row.resolved_at.is_none());
+    }
+
+    #[test]
+    fn fm14_approval_list_pending_filters_resolved() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+        insert_approval(&conn, &make_approval_with_kind("ar-1", "m1", "tool", 600)).unwrap();
+        insert_approval(&conn, &make_approval_with_kind("ar-2", "m1", "fetch", 600)).unwrap();
+        insert_approval(&conn, &make_approval_with_kind("ar-3", "m1", "budget", 600)).unwrap();
+
+        let won = resolve_approval(&conn, "ar-2", "approved", "user", None).unwrap();
+        assert!(won);
+
+        let pending = list_pending_approvals(&conn, Some("m1")).unwrap();
+        assert_eq!(pending.len(), 2);
+        let ids: Vec<&str> = pending.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"ar-1"));
+        assert!(ids.contains(&"ar-3"));
+
+        assert_eq!(count_pending_approvals(&conn, Some("m1")).unwrap(), 2);
+        assert_eq!(count_pending_approvals(&conn, None).unwrap(), 2);
+    }
+
+    #[test]
+    fn fm14_approval_list_pending_scoped_by_mission() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+        create_mission(&conn, "m2");
+        insert_approval(&conn, &make_approval_with_kind("ar-1", "m1", "tool", 600)).unwrap();
+        insert_approval(&conn, &make_approval_with_kind("ar-2", "m2", "tool", 600)).unwrap();
+
+        let m1_pending = list_pending_approvals(&conn, Some("m1")).unwrap();
+        assert_eq!(m1_pending.len(), 1);
+        assert_eq!(m1_pending[0].id, "ar-1");
+
+        let all = list_pending_approvals(&conn, None).unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn fm14_resolve_is_atomic_idempotent() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+        insert_approval(&conn, &make_approval_with_kind("ar-1", "m1", "tool", 600)).unwrap();
+
+        let first = resolve_approval(&conn, "ar-1", "approved", "user", Some("ok")).unwrap();
+        let second = resolve_approval(&conn, "ar-1", "rejected", "user", Some("changed")).unwrap();
+        assert!(first, "first resolve should win");
+        assert!(!second, "second resolve must be a no-op");
+
+        let row = get_approval(&conn, "ar-1").unwrap().unwrap();
+        assert_eq!(row.status, "approved");
+        assert_eq!(row.decided_by.as_deref(), Some("user"));
+        assert_eq!(row.decision_note.as_deref(), Some("ok"));
+        assert!(row.resolved_at.is_some());
+    }
+
+    #[test]
+    fn fm14_expire_overdue_only_touches_due_rows() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+        // ar-old: 已过期 (timeout=-10s)；ar-fresh: 还有 600s
+        insert_approval(&conn, &make_approval_with_kind("ar-old", "m1", "tool", -10)).unwrap();
+        insert_approval(&conn, &make_approval_with_kind("ar-fresh", "m1", "tool", 600)).unwrap();
+
+        let expired = expire_overdue_approvals(&conn).unwrap();
+        assert_eq!(expired, vec!["ar-old".to_string()]);
+
+        let old = get_approval(&conn, "ar-old").unwrap().unwrap();
+        assert_eq!(old.status, "expired");
+        assert_eq!(old.decided_by.as_deref(), Some("auto_expire"));
+
+        let fresh = get_approval(&conn, "ar-fresh").unwrap().unwrap();
+        assert_eq!(fresh.status, "pending");
+
+        // 再跑一次 expire：没有新过期的
+        let again = expire_overdue_approvals(&conn).unwrap();
+        assert!(again.is_empty());
+    }
+
+    #[test]
+    fn fm14_cancel_pending_for_mission() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+        create_mission(&conn, "m2");
+        insert_approval(&conn, &make_approval_with_kind("a1", "m1", "tool", 600)).unwrap();
+        insert_approval(&conn, &make_approval_with_kind("a2", "m1", "fetch", 600)).unwrap();
+        insert_approval(&conn, &make_approval_with_kind("a3", "m2", "tool", 600)).unwrap();
+
+        let n = cancel_pending_approvals_for_mission(&conn, "m1").unwrap();
+        assert_eq!(n, 2);
+
+        assert_eq!(count_pending_approvals(&conn, Some("m1")).unwrap(), 0);
+        assert_eq!(count_pending_approvals(&conn, Some("m2")).unwrap(), 1);
+        let r = get_approval(&conn, "a1").unwrap().unwrap();
+        assert_eq!(r.status, "cancelled");
+    }
+
+    #[test]
+    fn fm14_agent_status_waiting_approval_round_trip() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+        create_task(&conn, "t1", "m1", "running");
+        insert_agent_for_task(&conn, "ag-1", "Test Agent", "t1", "/tmp/wt").unwrap();
+
+        // 默认 idle
+        let status: String = conn
+            .query_row("SELECT status FROM agents WHERE id = 'ag-1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "idle");
+
+        set_agent_waiting_approval(&conn, "ag-1").unwrap();
+        let status: String = conn
+            .query_row("SELECT status FROM agents WHERE id = 'ag-1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "waiting_approval");
+
+        set_agent_running(&conn, "ag-1").unwrap();
+        let status: String = conn
+            .query_row("SELECT status FROM agents WHERE id = 'ag-1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "running");
+    }
+
+    #[test]
+    fn fm14_approval_kind_check_constraint() {
+        let conn = setup_db();
+        create_mission(&conn, "m1");
+        let bad = make_approval_with_kind("ar-x", "m1", "garbage", 600);
+        let res = insert_approval(&conn, &bad);
+        assert!(res.is_err(), "kind check constraint must reject 'garbage'");
     }
 }
