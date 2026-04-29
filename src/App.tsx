@@ -3,7 +3,6 @@ import { Sidebar } from "./components/Sidebar";
 import { Titlebar } from "./components/Titlebar";
 import { CommandPalette } from "./components/CommandPalette";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { PlannerFetchConfirmDialog } from "./components/mission";
 import { useUiStore } from "./stores/ui-store";
 import { useTheme } from "./hooks/useTheme";
 import { usePlannerEventSync } from "./hooks/usePlannerEventSync";
@@ -78,9 +77,6 @@ export default function App() {
       </div>
       <ErrorBoundary scope="CommandPalette">
         <CommandPalette />
-      </ErrorBoundary>
-      <ErrorBoundary scope="PlannerFetchConfirmDialog">
-        <PlannerFetchConfirmDialog />
       </ErrorBoundary>
     </div>
   );

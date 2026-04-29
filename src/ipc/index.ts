@@ -34,6 +34,15 @@ export type {
   GetAnnotationsRequest,
   UpdateAnnotationStatusRequest,
   TriggerEvaluationResponse,
+  ApprovalKind,
+  ApprovalStatus,
+  ApprovalView,
+  ApprovalPolicy,
+  ResolveApprovalRequest,
+  ResolveApprovalResponse,
+  ResolveAllApprovalsRequest,
+  ResolveAllApprovalsResponse,
+  UpdateApprovalPolicyRequest,
 } from "./commands";
 export {
   onAgentEvent,
@@ -44,6 +53,8 @@ export {
   onMissionStatusChanged,
   onPlannerStream,
   onEvaluationComplete,
+  onApprovalRequested,
+  onApprovalResolved,
 } from "./events";
 export type {
   AgentEventPayload,
@@ -54,4 +65,6 @@ export type {
   MissionStatusChangedPayload,
   PlannerStreamPayload,
   EvaluationCompletePayload,
+  ApprovalRequestedPayload,
+  ApprovalResolvedPayload,
 } from "./events";

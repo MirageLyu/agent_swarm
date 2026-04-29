@@ -402,3 +402,38 @@ export function onFollowupProposed(
     });
   });
 }
+
+// FM-14: Approval Queue 事件。所有审批生命周期变化都会广播到这两个 channel，
+// 前端 ApprovalQueue / Sidebar Badge 订阅即可保持视图同步而无需轮询。
+
+export interface ApprovalRequestedPayload {
+  request_id: string;
+  mission_id: string;
+  kind: "tool" | "fetch" | "escalation" | "budget" | "chat_commit";
+  title: string;
+}
+
+export function onApprovalRequested(
+  callback: (payload: ApprovalRequestedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<ApprovalRequestedPayload>("approval-requested", (event) => {
+    callback(event.payload);
+  });
+}
+
+export interface ApprovalResolvedPayload {
+  request_id: string;
+  /** approved / rejected / expired / cancelled */
+  status: string;
+  /** "user" / "auto_expire" 等；和后端 decided_by 列对齐 */
+  decided_by?: string;
+  note?: string | null;
+}
+
+export function onApprovalResolved(
+  callback: (payload: ApprovalResolvedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<ApprovalResolvedPayload>("approval-resolved", (event) => {
+    callback(event.payload);
+  });
+}

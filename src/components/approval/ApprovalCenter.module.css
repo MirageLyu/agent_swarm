@@ -1,0 +1,124 @@
+.toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background 120ms var(--ease-out);
+}
+
+.toggle:hover {
+  background: var(--color-bg-subtle, rgba(0, 0, 0, 0.05));
+  color: var(--color-text-primary);
+}
+
+.toggle.active {
+  background: var(--color-bg-subtle, rgba(0, 0, 0, 0.05));
+  color: var(--color-text-primary);
+}
+
+.badgePill {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  color: white;
+  background: var(--color-error, #dc2626);
+  border-radius: 8px;
+  text-align: center;
+  pointer-events: none;
+  box-shadow: 0 0 0 1.5px var(--color-bg-base);
+}
+
+/* === Drawer === */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.2);
+  z-index: 220;
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 420px;
+  max-width: 100vw;
+  background: var(--color-bg-base);
+  border-left: 1px solid var(--color-border);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.08);
+  display: flex;
+  flex-direction: column;
+  z-index: 221;
+}
+
+.drawerHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-4) var(--space-4) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.drawerTitle {
+  font-size: var(--text-base);
+  font-weight: 600;
+  margin: 0;
+  color: var(--color-text-primary);
+}
+
+.drawerClose {
+  border: none;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  font-size: var(--text-lg);
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+}
+
+.drawerClose:hover {
+  background: var(--color-bg-subtle, rgba(0, 0, 0, 0.05));
+  color: var(--color-text-primary);
+}
+
+.drawerBody {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.empty {
+  margin: var(--space-6) 0;
+  text-align: center;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+}
+
+.errorBanner {
+  margin: 0 0 var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: rgba(220, 38, 38, 0.08);
+  color: var(--color-error, #dc2626);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+}

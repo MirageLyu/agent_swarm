@@ -623,6 +623,76 @@ export interface ConfirmFollowupResponse {
 
 // ---------- FM-08: Mission Lifecycle ----------
 
+// ---------- FM-14: Approval Queue ----------
+
+export type ApprovalKind = "tool" | "fetch" | "escalation" | "budget" | "chat_commit";
+export type ApprovalStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "expired"
+  | "cancelled";
+
+/** 数据库行的前端镜像；payload/reason/context_summary 是字符串以保持透传。 */
+export interface ApprovalView {
+  id: string;
+  mission_id: string;
+  kind: ApprovalKind;
+  agent_id: string | null;
+  planner_session_id: string | null;
+  chat_message_id: string | null;
+  title: string;
+  /** JSON 字符串；前端按 kind 解析（fetch -> {url,host}, tool -> {tool_name,input,...}）。 */
+  payload: string;
+  reason: string;
+  context_summary: string;
+  status: ApprovalStatus;
+  decision_note: string | null;
+  decided_by: string | null;
+  resolved_at: string | null;
+  expires_at: string;
+  created_at: string;
+}
+
+export interface ResolveApprovalRequest {
+  request_id: string;
+  /** "approved" | "rejected" — 仅人为决定可经此命令传入 */
+  decision: "approved" | "rejected";
+  /** 可选备注（reject 必填，approve 可选；fetch 类用 "once" / "session" 区分） */
+  note?: string | null;
+}
+
+export interface ResolveApprovalResponse {
+  delivered: boolean;
+  final_status: ApprovalStatus;
+}
+
+export interface ResolveAllApprovalsRequest {
+  mission_id: string;
+  decision: "approved" | "rejected";
+  note?: string | null;
+}
+
+export interface ResolveAllApprovalsResponse {
+  resolved_count: number;
+}
+
+export interface ApprovalPolicy {
+  timeout_seconds: number;
+  protected_paths: string[];
+  destructive_commands: string[];
+  budget_warn_ratio: number;
+  chat_commit_soft_lines: number;
+}
+
+export interface UpdateApprovalPolicyRequest {
+  timeout_seconds?: number | null;
+  protected_paths?: string[] | null;
+  destructive_commands?: string[] | null;
+  budget_warn_ratio?: number | null;
+  chat_commit_soft_lines?: number | null;
+}
+
 export interface DeleteMissionRequest {
   mission_id: string;
   clean_workspace: boolean;
@@ -833,4 +903,24 @@ export const commands = {
 
   rejectFollowupProposal: (missionId: string) =>
     invoke<void>("reject_followup_proposal", { request: { mission_id: missionId } }),
+
+  // FM-14: Approval Queue
+  listPendingApprovals: (missionId?: string) =>
+    invoke<ApprovalView[]>("list_pending_approvals", {
+      missionId: missionId ?? null,
+    }),
+
+  getApproval: (requestId: string) =>
+    invoke<ApprovalView | null>("get_approval", { requestId }),
+
+  resolveApproval: (request: ResolveApprovalRequest) =>
+    invoke<ResolveApprovalResponse>("resolve_approval", { request }),
+
+  resolveAllApprovals: (request: ResolveAllApprovalsRequest) =>
+    invoke<ResolveAllApprovalsResponse>("resolve_all_approvals", { request }),
+
+  getApprovalPolicy: () => invoke<ApprovalPolicy>("get_approval_policy"),
+
+  updateApprovalPolicy: (request: UpdateApprovalPolicyRequest) =>
+    invoke<ApprovalPolicy>("update_approval_policy", { request }),
 };

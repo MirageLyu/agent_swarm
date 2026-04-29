@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Badge } from "../components/ui/Badge";
+import { ApprovalPolicySection } from "../components/approval";
 import { commands, type ConfigResponse } from "../ipc";
 import styles from "./SettingsView.module.css";
 
@@ -199,6 +200,8 @@ export function SettingsView() {
           </Button>
         </div>
       )}
+
+      <ApprovalPolicySection />
     </div>
   );
 }

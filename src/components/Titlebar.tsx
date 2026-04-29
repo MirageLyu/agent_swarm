@@ -1,5 +1,6 @@
 import { useUiStore, type Theme } from "../stores/ui-store";
 import { TopBarMetrics } from "./TopBarMetrics";
+import { ApprovalCenter } from "./approval";
 import styles from "./Titlebar.module.css";
 
 const themeIcons: Record<Theme, React.ReactNode> = {
@@ -69,6 +70,7 @@ export function Titlebar() {
       <div className={styles.spacer} data-tauri-drag-region />
       <TopBarMetrics />
       <div className={styles.actions}>
+        <ApprovalCenter />
         <button className={styles.actionBtn} onClick={cycleTheme} title={`Theme: ${theme}`}>
           {themeIcons[theme]}
         </button>
