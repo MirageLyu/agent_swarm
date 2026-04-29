@@ -3,6 +3,7 @@ import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Badge } from "../components/ui/Badge";
 import { ApprovalPolicySection } from "../components/approval";
+import { DiagnosticsSection } from "../components/settings/DiagnosticsSection";
 import { commands, type ConfigResponse } from "../ipc";
 import styles from "./SettingsView.module.css";
 
@@ -202,6 +203,7 @@ export function SettingsView() {
       )}
 
       <ApprovalPolicySection />
+      <DiagnosticsSection />
     </div>
   );
 }

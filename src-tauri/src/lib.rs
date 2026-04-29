@@ -12,17 +12,72 @@ use agent::planner_fetch::PlannerFetchCoordinator;
 use agent::{AgentRegistry, Scheduler};
 use commands::ConfigManager;
 use db::Database;
+use std::path::Path;
 use tauri::Manager;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+/// 日志子系统初始化。
+///
+/// - stdout layer：开发期 `cargo tauri dev` 直接看输出
+/// - file layer：生产期落盘到 `<data_dir>/logs/miragenty.log.<rotation-suffix>`
+///   按天滚动，旧文件由用户/OS 自行清理（macOS Finder/Windows 资源管理器都能定位）
+/// - WorkerGuard 必须 `mem::forget` 到全局，否则它 drop 时关闭文件句柄，
+///   后续 `tracing::*` 调用会静默失败。这里牺牲一个 guard 的生命周期换日志可靠性
+///
+/// 容错：
+/// - 创建日志目录失败（权限、磁盘满）：fallback 到 stdout-only，不阻塞 app 启动
+/// - tracing 全局 subscriber 已被设置（极端情况，如重复 init）：忽略错误
+fn init_logging(data_dir: &Path) {
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("miragenty=debug,info"));
+
+    let stdout_layer = tracing_subscriber::fmt::layer()
+        .with_target(true)
+        .with_writer(std::io::stdout);
+
+    let logs_dir = data_dir.join("logs");
+    let mut file_layer_opt = None;
+
+    match std::fs::create_dir_all(&logs_dir) {
+        Ok(()) => {
+            // daily rotation；日志文件名 = miragenty.log.YYYY-MM-DD
+            let appender = tracing_appender::rolling::daily(&logs_dir, "miragenty.log");
+            // non_blocking 防止文件 IO 阻塞 agent 主循环
+            let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+            // guard 必须活到进程退出；这里 leak 是可接受的（一次性，~bytes 大小）
+            std::mem::forget(guard);
+            let file_layer = tracing_subscriber::fmt::layer()
+                .with_ansi(false) // 文件里不要 ANSI 转义码
+                .with_target(true)
+                .with_writer(non_blocking);
+            file_layer_opt = Some(file_layer);
+        }
+        Err(e) => {
+            // 还没初始化 tracing 时不能用 tracing::warn!；用 eprintln 兜底
+            eprintln!(
+                "[init_logging] failed to create logs dir {}: {} (continuing with stdout only)",
+                logs_dir.display(),
+                e
+            );
+        }
+    }
+
+    let registry = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stdout_layer);
+
+    let result = match file_layer_opt {
+        Some(file_layer) => registry.with(file_layer).try_init(),
+        None => registry.try_init(),
+    };
+
+    if let Err(e) = result {
+        eprintln!("[init_logging] global subscriber already set, skipping: {}", e);
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "miragenty=debug,info".into()),
-        )
-        .init();
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -31,6 +86,13 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .expect("Failed to resolve app data dir");
+
+            // 日志在 data_dir 已知后才初始化。设计要点：
+            // - stdout layer：开发期 cargo tauri dev / pnpm tauri dev 看得见
+            // - file layer (rolling daily)：生产期用户机器上落盘到 logs/miragenty.log.YYYY-MM-DD
+            //   保留 7 天。后续 export_diagnostics 命令读这个文件
+            // - guard 必须 leak 到全局，否则 drop 时会 flush 然后关闭文件，再写就静默失败
+            init_logging(&data_dir);
 
             let database = Database::open(&data_dir)?;
             app.manage(database);
@@ -170,6 +232,8 @@ pub fn run() {
             commands::get_mission_report,
             commands::vote_decision,
             commands::export_report_markdown,
+            // MVP polish: diagnostic export
+            commands::export_diagnostics,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

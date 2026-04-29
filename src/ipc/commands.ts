@@ -1113,4 +1113,19 @@ export const commands = {
 
   exportReportMarkdown: (request: ExportReportMarkdownRequest) =>
     invoke<ExportReportMarkdownResponse>("export_report_markdown", { request }),
+
+  // MVP polish: diagnostic export
+  exportDiagnostics: (request: ExportDiagnosticsRequest) =>
+    invoke<ExportDiagnosticsResponse>("export_diagnostics", { request }),
 };
+
+export interface ExportDiagnosticsRequest {
+  output_path: string;
+  log_tail_lines?: number;
+}
+
+export interface ExportDiagnosticsResponse {
+  bytes_written: number;
+  output_path: string;
+  log_files_included: number;
+}
