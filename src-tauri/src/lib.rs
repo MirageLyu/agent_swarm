@@ -168,6 +168,8 @@ pub fn run() {
             // FM-12: Mission Report
             commands::generate_mission_report,
             commands::get_mission_report,
+            commands::vote_decision,
+            commands::export_report_markdown,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
