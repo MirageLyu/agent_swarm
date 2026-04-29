@@ -1,0 +1,111 @@
+.tableWrap {
+  border: 0.5px solid var(--color-separator);
+  border-radius: var(--radius-md, 8px);
+  overflow: hidden;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+  background: var(--color-bg-secondary);
+}
+
+.table th,
+.table td {
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  border-bottom: 0.5px solid var(--color-separator);
+}
+
+.table thead th {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.table tbody tr:hover {
+  background: var(--color-bg-tertiary);
+}
+
+.colTask {
+  width: 35%;
+}
+.colAgent {
+  width: 18%;
+}
+.colScore,
+.colCost,
+.colDuration,
+.colStatus {
+  width: 12%;
+}
+
+.cellTask {
+  color: var(--color-text-primary);
+  font-weight: 500;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cellAgent {
+  color: var(--color-text-secondary);
+}
+
+.cellScore,
+.cellCost,
+.cellDuration {
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+}
+
+.rowLowScore {
+  background: rgba(255, 59, 48, 0.06);
+}
+
+.rowLowScore:hover {
+  background: rgba(255, 59, 48, 0.12) !important;
+}
+
+.rowLowScore .cellScore {
+  color: #c0392b;
+  font-weight: 600;
+}
+
+.pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: capitalize;
+}
+
+.pill_ok {
+  background: rgba(52, 199, 89, 0.15);
+  color: #1f8a3d;
+}
+
+.pill_bad {
+  background: rgba(255, 59, 48, 0.15);
+  color: #c0392b;
+}
+
+.pill_warn {
+  background: rgba(255, 159, 10, 0.18);
+  color: #b56500;
+}
+
+.pill_neutral {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+}

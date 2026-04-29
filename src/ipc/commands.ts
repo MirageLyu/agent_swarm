@@ -713,6 +713,183 @@ export interface RestartResult {
   repo_path: string | null;
 }
 
+// ---------- FM-12: Mission Report ----------
+
+export interface MissionReportMission {
+  id: string;
+  title: string;
+  description: string;
+  status: string;
+  started_at: string;
+  completed_at: string | null;
+  duration_seconds: number;
+  total_cost_usd: number;
+  main_branch: string | null;
+}
+
+export interface MissionReportMetrics {
+  tasks_total: number;
+  tasks_completed: number;
+  tasks_failed: number;
+  duration_seconds: number;
+  total_cost_usd: number;
+  avg_quality_score: number | null;
+  auto_fixes: number;
+  review_reduction_rate: number | null;
+}
+
+export interface MissionReportSummary {
+  executive: string;
+  metrics: MissionReportMetrics;
+}
+
+export interface MissionReportDecision {
+  id: string;
+  title: string;
+  rationale: string;
+  trade_off: string;
+  risk: string;
+}
+
+export interface MissionReportEvaluatorRound {
+  agent_id: string;
+  agent_name: string;
+  task_title: string;
+  score: number;
+  issues: number;
+  auto_fixed: number;
+  summary: string;
+  created_at: string;
+}
+
+export interface MissionReportEvaluatorReview {
+  rounds: MissionReportEvaluatorRound[];
+  total_issues: number;
+  auto_fixed: number;
+}
+
+export interface MissionReportTaskRow {
+  task_id: string;
+  title: string;
+  agent_id: string | null;
+  agent_name: string | null;
+  score: number | null;
+  cost_usd: number;
+  duration_seconds: number | null;
+  status: string;
+}
+
+export interface MissionReportCostModel {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+}
+
+export interface MissionReportCostTask {
+  task_id: string;
+  title: string;
+  cost_usd: number;
+}
+
+export interface MissionReportCostAgent {
+  agent_id: string;
+  agent_name: string;
+  cost_usd: number;
+}
+
+export interface MissionReportCostBreakdown {
+  total_usd: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  by_model: MissionReportCostModel[];
+  by_task: MissionReportCostTask[];
+  by_agent: MissionReportCostAgent[];
+  budget_usd: number | null;
+  budget_used_ratio: number | null;
+}
+
+export interface MissionReportContractItem {
+  section: string;
+  text: string;
+  achieved: boolean;
+}
+
+export interface MissionReportContract {
+  status: string;
+  items: MissionReportContractItem[];
+  budget_usd: number | null;
+  quality_threshold: number | null;
+  max_duration_hours: number | null;
+}
+
+export interface MissionReportArtifact {
+  artifact_type: string;
+  local_name: string;
+  summary: string;
+  file_paths: string[];
+}
+
+export interface MissionReportLearningFlywheel {
+  past_decision_patterns: string[];
+  insight: string;
+}
+
+export interface MissionReportData {
+  schema_version: number;
+  mission: MissionReportMission;
+  summary: MissionReportSummary;
+  decisions: MissionReportDecision[];
+  evaluator_review: MissionReportEvaluatorReview;
+  task_matrix: MissionReportTaskRow[];
+  cost_breakdown: MissionReportCostBreakdown;
+  limitations: string[];
+  contract: MissionReportContract | null;
+  artifacts: MissionReportArtifact[];
+  learning_flywheel: MissionReportLearningFlywheel;
+}
+
+export interface DecisionVoteView {
+  decision_id: string;
+  vote: "agree" | "disagree";
+}
+
+export interface MissionReportView {
+  report_id: string;
+  mission_id: string;
+  generated_at: string;
+  schema_version: number;
+  report: MissionReportData;
+  votes: DecisionVoteView[];
+}
+
+export interface GenerateMissionReportResponse {
+  report_id: string;
+  generated_at: string;
+}
+
+export interface VoteDecisionRequest {
+  report_id: string;
+  decision_id: string;
+  vote: "agree" | "disagree";
+}
+
+export interface VoteDecisionResponse {
+  report_id: string;
+  decision_id: string;
+  vote: "agree" | "disagree";
+}
+
+export interface ExportReportMarkdownRequest {
+  mission_id: string;
+  output_path: string;
+}
+
+export interface ExportReportMarkdownResponse {
+  bytes_written: number;
+  output_path: string;
+}
+
 // ---------- commands ----------
 
 export const commands = {
@@ -923,4 +1100,17 @@ export const commands = {
 
   updateApprovalPolicy: (request: UpdateApprovalPolicyRequest) =>
     invoke<ApprovalPolicy>("update_approval_policy", { request }),
+
+  // FM-12: Mission Report
+  generateMissionReport: (missionId: string) =>
+    invoke<GenerateMissionReportResponse>("generate_mission_report", { missionId }),
+
+  getMissionReport: (missionId: string) =>
+    invoke<MissionReportView | null>("get_mission_report", { missionId }),
+
+  voteDecision: (request: VoteDecisionRequest) =>
+    invoke<VoteDecisionResponse>("vote_decision", { request }),
+
+  exportReportMarkdown: (request: ExportReportMarkdownRequest) =>
+    invoke<ExportReportMarkdownResponse>("export_report_markdown", { request }),
 };

@@ -1,0 +1,109 @@
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.card {
+  border: 0.5px solid var(--color-separator);
+  background: var(--color-bg-secondary);
+  border-radius: var(--radius-md, 8px);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.cardHeader {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.cardId {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  background: var(--color-bg-tertiary);
+  padding: 1px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.cardTitle {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+.field {
+  margin: 0;
+  font-size: var(--text-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fieldLabel {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.fieldValue {
+  color: var(--color-text-primary);
+  line-height: 1.5;
+}
+
+.voteRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.voteButton {
+  appearance: none;
+  border: 0.5px solid var(--color-border);
+  background: var(--color-bg-primary);
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-sm);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+  font-family: var(--font-sans);
+  color: var(--color-text-secondary);
+}
+
+.voteButton:hover:not(:disabled) {
+  border-color: var(--color-text-tertiary);
+  color: var(--color-text-primary);
+}
+
+.voteButton:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+.voteActive.vote_agree {
+  background: rgba(52, 199, 89, 0.18);
+  border-color: rgba(52, 199, 89, 0.5);
+  color: #1f8a3d;
+}
+
+.voteActive.vote_disagree {
+  background: rgba(255, 59, 48, 0.15);
+  border-color: rgba(255, 59, 48, 0.5);
+  color: #c0392b;
+}
+
+.voteError {
+  font-size: var(--text-xs);
+  color: var(--color-error);
+  margin-left: var(--space-2);
+}

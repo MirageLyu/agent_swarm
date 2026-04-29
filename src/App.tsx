@@ -10,6 +10,7 @@ import { MissionsView } from "./views/MissionsView";
 import { PreflightView } from "./views/PreflightView";
 import { WorkspaceView } from "./views/WorkspaceView";
 import { AgentsView } from "./views/AgentsView";
+import { ReportView } from "./views/ReportView";
 import { ReviewView } from "./views/ReviewView";
 import { InsightsView } from "./views/InsightsView";
 import { SettingsView } from "./views/SettingsView";
@@ -28,6 +29,8 @@ function ActiveView() {
       return <AgentsView />;
     case "review":
       return <ReviewView />;
+    case "report":
+      return <ReportView />;
     case "insights":
       return <InsightsView />;
     case "settings":

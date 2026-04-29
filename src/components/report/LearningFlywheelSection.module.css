@@ -1,0 +1,54 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.insight {
+  display: flex;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-left: 3px solid rgba(175, 82, 222, 0.6);
+  background: rgba(175, 82, 222, 0.06);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.icon {
+  font-size: 20px;
+  color: rgba(175, 82, 222, 0.9);
+  line-height: 1.2;
+  flex-shrink: 0;
+}
+
+.insightText {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-primary);
+  line-height: 1.5;
+}
+
+.patterns {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.patternsTitle {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0;
+}
+
+.patternsList {
+  list-style: disc;
+  padding-left: var(--space-5);
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
