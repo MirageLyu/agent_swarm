@@ -7,6 +7,7 @@ import { ApprovalPolicySection } from "../components/approval";
 import { DiagnosticsSection } from "../components/settings/DiagnosticsSection";
 import { LanguageSection } from "../components/settings/LanguageSection";
 import { commands, type ConfigResponse } from "../ipc";
+import { formatBackendError } from "../i18n";
 import { useUiStore } from "../stores/ui-store";
 import styles from "./SettingsView.module.css";
 
@@ -57,7 +58,7 @@ export function SettingsView() {
       setMessage(t("saveKeySuccess"));
       setTimeout(() => setMessage(""), 2000);
     } catch (e) {
-      setMessage(tc("errorPrefix", { message: String(e) }));
+      setMessage(tc("errorPrefix", { message: formatBackendError(e) }));
     } finally {
       setSaving(false);
     }
@@ -79,7 +80,7 @@ export function SettingsView() {
       setMessage(t("configSavedHint"));
       setTimeout(() => setMessage(""), 3000);
     } catch (e) {
-      setMessage(tc("errorPrefix", { message: String(e) }));
+      setMessage(tc("errorPrefix", { message: formatBackendError(e) }));
     } finally {
       setSaving(false);
     }

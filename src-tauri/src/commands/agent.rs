@@ -90,10 +90,10 @@ pub async fn run_agent(
     };
 
     let api_key = config_mgr.get_api_key(provider_key).ok_or_else(|| {
-        format!(
-            "API key not configured for provider '{}'. Go to Settings to add it.",
-            config.provider
-        )
+        // i18n: 返回 IpcError JSON 让前端 i18n 渲染本地化文案。
+        // 兜底：如果前端还没 update i18n，JSON.parse 会失败，前端显示原 JSON——
+        // 仍可读，不会"白屏"。
+        crate::error_code::IpcError::no_api_key(provider_key.to_string()).to_string()
     })?;
 
     let stream_idle = config.agent_step_idle_seconds;

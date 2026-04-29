@@ -116,6 +116,8 @@ void i18n.use(initReactI18next).init({
 
 export default i18n;
 
+export { formatBackendError, formatErrorWithPrefix } from "./format-error";
+
 /**
  * 在 React 树外（例如 store / utility）需要翻译时用。
  * 在 React 组件里**必须**用 `useTranslation`，因为它能在 changeLanguage 时触发 re-render。

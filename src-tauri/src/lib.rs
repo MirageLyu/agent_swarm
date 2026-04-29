@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod commands;
 pub mod db;
+pub mod error_code;
 pub mod git;
 pub mod llm;
 pub mod mission_template;

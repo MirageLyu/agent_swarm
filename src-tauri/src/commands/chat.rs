@@ -92,7 +92,9 @@ pub async fn send_chat_message(
             )
             .map_err(anyhow::Error::from)
         })
-        .map_err(|e| format!("Mission not found: {e}"))?;
+        .map_err(|_| {
+            crate::error_code::IpcError::mission_not_found(mission_id.clone()).to_string()
+        })?;
 
     if !matches!(status.as_str(), "completed" | "failed" | "running") {
         return Err(format!(

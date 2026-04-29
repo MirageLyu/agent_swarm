@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { commands } from "../ipc/commands";
+import { formatBackendError } from "../i18n";
 import type { TaskInfo, Complexity, CreateMissionResponse } from "../ipc/commands";
 import { useTaskStore } from "../stores/task-store";
 import { useUiStore } from "../stores/ui-store";
@@ -191,7 +192,7 @@ export function MissionsView() {
         setDetail(detail.tasks, detail.dependencies);
       } catch (e) {
         if (!planCancelledRef.current) {
-          setError(String(e));
+          setError(formatBackendError(e));
         }
       } finally {
         setPlanning(false);
@@ -232,7 +233,7 @@ export function MissionsView() {
         setActivePreflight(result.mission_id, result.session_id);
         setActiveView("preflight");
       } catch (e) {
-        setError(String(e));
+        setError(formatBackendError(e));
       }
     },
     [addMission, setActivePreflight, setActiveView, setError],
@@ -295,7 +296,7 @@ export function MissionsView() {
         }));
         addTaskLocal(task, newDeps);
       } catch (e) {
-        setError(String(e));
+        setError(formatBackendError(e));
       }
     },
     [selectedMissionId, addTaskLocal, setError],
@@ -313,7 +314,7 @@ export function MissionsView() {
 
       setStartDialogOpen(true);
     } catch (e) {
-      setError(String(e));
+      setError(formatBackendError(e));
     }
   }, [selectedMissionId, selectedMission?.status, updateMissionStatus, setError]);
 
@@ -329,7 +330,7 @@ export function MissionsView() {
         setStartDialogOpen(false);
         setActiveView("workspace");
       } catch (e) {
-        setError(String(e));
+        setError(formatBackendError(e));
         setStartDialogOpen(false);
       }
     },
@@ -356,7 +357,7 @@ export function MissionsView() {
           file_path: filePath,
         });
       } catch (e) {
-        setError(String(e));
+        setError(formatBackendError(e));
       }
     },
     [missions, setError],
@@ -376,7 +377,7 @@ export function MissionsView() {
       addMission(newMission);
       selectMission(newMission.id);
     } catch (e) {
-      setError(String(e));
+      setError(formatBackendError(e));
     }
   }, [addMission, selectMission, setError]);
 
@@ -395,7 +396,7 @@ export function MissionsView() {
           commands
             .stopMissionExecution(id)
             .then(() => updateMissionStatus(id, "failed"))
-            .catch((e) => setError(String(e)));
+            .catch((e) => setError(formatBackendError(e)));
           break;
         case "restart_full":
           setRestartTargetId(id);
@@ -426,7 +427,7 @@ export function MissionsView() {
         });
         removeMission(deleteTargetId);
       } catch (e) {
-        setError(String(e));
+        setError(formatBackendError(e));
       } finally {
         setDeleteDialogOpen(false);
         setDeleteTargetId(null);
@@ -457,7 +458,7 @@ export function MissionsView() {
         setStartDialogOpen(true);
       }
     } catch (e) {
-      setError(String(e));
+      setError(formatBackendError(e));
     } finally {
       setRestartDialogOpen(false);
       setRestartTargetId(null);

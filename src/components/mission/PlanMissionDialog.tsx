@@ -1,9 +1,11 @@
 import { useState, useCallback, useMemo } from "react";
+import { useTranslation, Trans } from "react-i18next";
 import * as Dialog from "@radix-ui/react-dialog";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { commands } from "../../ipc/commands";
 import type { CreateMissionResponse, RepoOrigin } from "../../ipc/commands";
 import { Button } from "../ui";
+import { tImperative } from "../../i18n";
 import styles from "./PlanMissionDialog.module.css";
 
 interface PlanMissionDialogProps {
@@ -25,7 +27,7 @@ function deriveTitle(description: string): string {
     .split("\n")
     .map((s) => s.trim())
     .find((s) => s.length > 0) ?? "";
-  if (!firstLine) return "Untitled mission";
+  if (!firstLine) return tImperative("mission:planDialog.untitled");
   return firstLine.length > MAX_TITLE ? firstLine.slice(0, MAX_TITLE) + "…" : firstLine;
 }
 
@@ -35,6 +37,8 @@ export function PlanMissionDialog({
   onPlanReady,
   onPreflightReady,
 }: PlanMissionDialogProps) {
+  const { t } = useTranslation("mission");
+  const { t: tc } = useTranslation("common");
   // Step 1 — mission setup
   const [text, setText] = useState("");
   const [origin, setOrigin] = useState<RepoOrigin>("from_scratch");
@@ -69,7 +73,7 @@ export function PlanMissionDialog({
       const selected = await openDialog({
         directory: true,
         multiple: false,
-        title: "Select repository root",
+        title: t("planDialog.pickDirectory"),
       });
       if (typeof selected === "string") {
         setExistingPath(selected);
@@ -131,23 +135,21 @@ export function PlanMissionDialog({
   // Setup step ------------------------------------------------------
   const renderSetup = () => (
     <>
-      <Dialog.Title className={styles.title}>New Mission</Dialog.Title>
-      <p className={styles.subtitle}>
-        描述你的目标，选择项目来源。Planner 会基于真实仓库做 codebase grounding。
-      </p>
+      <Dialog.Title className={styles.title}>{t("planDialog.step1Title")}</Dialog.Title>
+      <p className={styles.subtitle}>{t("planDialog.step1Subtitle")}</p>
 
       <textarea
         className={styles.textarea}
         value={text}
         onChange={(e) => setText(e.target.value.slice(0, MAX_CHARS))}
         onKeyDown={handleKeyDown}
-        placeholder="e.g. 实现用户认证系统，包含注册、登录和密码重置"
+        placeholder={t("planDialog.descPlaceholder")}
         rows={5}
         autoFocus
       />
 
       <div className={styles.originSection}>
-        <div className={styles.modeLabel}>项目仓库</div>
+        <div className={styles.modeLabel}>{t("planDialog.repoSection")}</div>
         <div className={styles.originRow}>
           <label className={`${styles.originOption} ${origin === "from_scratch" ? styles.originOptionActive : ""}`}>
             <input
@@ -158,9 +160,12 @@ export function PlanMissionDialog({
               onChange={() => setOrigin("from_scratch")}
             />
             <div className={styles.originOptionBody}>
-              <div className={styles.originOptionTitle}>从零开始</div>
+              <div className={styles.originOptionTitle}>{t("planDialog.fromScratchTitle")}</div>
               <div className={styles.originOptionDesc}>
-                自动在 <code>~/miragenty-workspaces/</code> 下创建并 git init
+                <Trans
+                  i18nKey="mission:planDialog.fromScratchDesc"
+                  components={{ code: <code /> }}
+                />
               </div>
             </div>
           </label>
@@ -173,10 +178,8 @@ export function PlanMissionDialog({
               onChange={() => setOrigin("from_existing")}
             />
             <div className={styles.originOptionBody}>
-              <div className={styles.originOptionTitle}>已有仓库</div>
-              <div className={styles.originOptionDesc}>
-                选择本地目录，Pre-flight / Planner 可只读浏览 codebase
-              </div>
+              <div className={styles.originOptionTitle}>{t("planDialog.fromExistingTitle")}</div>
+              <div className={styles.originOptionDesc}>{t("planDialog.fromExistingDesc")}</div>
             </div>
           </label>
         </div>
@@ -184,18 +187,18 @@ export function PlanMissionDialog({
         {origin === "from_existing" && (
           <div className={styles.repoPickerRow}>
             <Button variant="secondary" size="sm" onClick={handlePickRepo}>
-              选择目录…
+              {t("planDialog.pickDirectory")}
             </Button>
             <span
               className={styles.repoPath}
               title={existingPath || ""}
               data-empty={existingPath ? undefined : "true"}
             >
-              {existingPath || "尚未选择目录"}
+              {existingPath || t("planDialog.noDirChosen")}
             </span>
             {existingPath && (
               <Button variant="ghost" size="sm" onClick={() => setExistingPath("")}>
-                清除
+                {t("planDialog.clear")}
               </Button>
             )}
           </div>
@@ -210,10 +213,10 @@ export function PlanMissionDialog({
         </span>
         <div className={styles.actions}>
           <Button variant="ghost" size="sm" onClick={() => handleOpenChange(false)} disabled={creating}>
-            取消
+            {tc("cancel")}
           </Button>
           <Button variant="primary" size="sm" onClick={handleContinue} disabled={!canSubmitSetup}>
-            {creating ? "创建中…" : "下一步 →"}
+            {creating ? t("planDialog.creating") : t("planDialog.next")}
           </Button>
         </div>
       </div>
@@ -223,14 +226,20 @@ export function PlanMissionDialog({
   // Mode step -------------------------------------------------------
   const renderMode = () => (
     <>
-      <Dialog.Title className={styles.title}>选择启动方式</Dialog.Title>
+      <Dialog.Title className={styles.title}>{t("planDialog.step2Title")}</Dialog.Title>
       <p className={styles.subtitle}>
-        Mission 已创建：<strong>{createdMission?.title}</strong>
+        <Trans
+          i18nKey="mission:planDialog.step2Subtitle"
+          values={{ name: createdMission?.title ?? "" }}
+          components={{ strong: <strong /> }}
+        />
       </p>
 
       <div className={styles.repoSummary}>
         <span className={styles.repoSummaryLabel}>
-          {createdMission?.repo_origin === "from_scratch" ? "新建仓库" : "已有仓库"}
+          {createdMission?.repo_origin === "from_scratch"
+            ? t("planDialog.newRepo")
+            : t("planDialog.existingRepo")}
         </span>
         <span className={styles.repoSummaryPath} title={createdMission?.repo_path ?? ""}>
           {createdMission?.repo_path}
@@ -245,13 +254,11 @@ export function PlanMissionDialog({
               className={`${styles.modeCard} ${styles.preflightCard}`}
               onClick={handlePreflight}
             >
-              <div className={styles.cardBadge}>推荐</div>
+              <div className={styles.cardBadge}>{t("planDialog.preflightBadge")}</div>
               <div className={styles.cardIcon}>💬</div>
-              <div className={styles.cardTitle}>Pre-flight 澄清</div>
-              <div className={styles.cardDesc}>
-                与 AI 多轮对话澄清需求边界、排除歧义，签订 Contract 后再交给 Planner
-              </div>
-              <div className={styles.cardMeta}>约 3-5 分钟 · 更高质量</div>
+              <div className={styles.cardTitle}>{t("planDialog.preflightCardTitle")}</div>
+              <div className={styles.cardDesc}>{t("planDialog.preflightCardDesc")}</div>
+              <div className={styles.cardMeta}>{t("planDialog.preflightCardMeta")}</div>
             </button>
           )}
           <button
@@ -260,11 +267,9 @@ export function PlanMissionDialog({
             onClick={handleQuickPlan}
           >
             <div className={styles.cardIcon}>⚡</div>
-            <div className={styles.cardTitle}>Quick Plan</div>
-            <div className={styles.cardDesc}>
-              直接进入 Planner Agent Loop，跳过澄清，适合目标已明确的任务
-            </div>
-            <div className={styles.cardMeta}>多步迭代 · 实时透传</div>
+            <div className={styles.cardTitle}>{t("planDialog.quickCardTitle")}</div>
+            <div className={styles.cardDesc}>{t("planDialog.quickCardDesc")}</div>
+            <div className={styles.cardMeta}>{t("planDialog.quickCardMeta")}</div>
           </button>
         </div>
       </div>
@@ -272,7 +277,7 @@ export function PlanMissionDialog({
       <div className={styles.footer}>
         <span className={styles.charCount} />
         <Button variant="ghost" size="sm" onClick={() => handleOpenChange(false)}>
-          稍后再决定
+          {t("planDialog.decideLater")}
         </Button>
       </div>
     </>
