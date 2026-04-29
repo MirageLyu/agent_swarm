@@ -124,6 +124,8 @@ The follow-up chat at the bottom of the Mission view lets you:
 - Request a small fix (the chat agent can write/commit directly with your approval)
 - Escalate to a child mission with inherited context
 
+> 📋 For a step-by-step verification of every workflow, see [docs/e2e-checklist.md](docs/e2e-checklist.md). Run this before tagging any release.
+
 ---
 
 ## Architecture at a glance
