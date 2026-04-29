@@ -1117,7 +1117,47 @@ export const commands = {
   // MVP polish: diagnostic export
   exportDiagnostics: (request: ExportDiagnosticsRequest) =>
     invoke<ExportDiagnosticsResponse>("export_diagnostics", { request }),
+
+  // FM-13 lite: insights / anomaly detection
+  getCostTrend: (limit?: number) =>
+    invoke<MissionCostPoint[]>("get_cost_trend", { limit }),
+
+  getAnomalies: (missionId?: string | null) =>
+    invoke<Anomaly[]>("get_anomalies", { missionId }),
 };
+
+// ---------- FM-13 lite types ----------
+
+export interface ModelCostEntry {
+  model: string;
+  cost: number;
+  tokens: number;
+}
+
+export interface MissionCostPoint {
+  mission_id: string;
+  mission_title: string;
+  status: string;
+  created_at: string;
+  total_cost: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  model_breakdown: ModelCostEntry[];
+}
+
+export type AnomalyKind = "cost_spike" | "long_running" | "failed_agent";
+export type AnomalySeverity = "info" | "warn" | "critical";
+
+export interface Anomaly {
+  kind: AnomalyKind;
+  severity: AnomalySeverity;
+  mission_id: string;
+  mission_title: string;
+  agent_id: string | null;
+  task_title: string | null;
+  message: string;
+  occurred_at: string;
+}
 
 export interface ExportDiagnosticsRequest {
   output_path: string;

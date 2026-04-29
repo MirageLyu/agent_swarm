@@ -234,6 +234,9 @@ pub fn run() {
             commands::export_report_markdown,
             // MVP polish: diagnostic export
             commands::export_diagnostics,
+            // FM-13 lite: insights / anomaly detection
+            commands::get_cost_trend,
+            commands::get_anomalies,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

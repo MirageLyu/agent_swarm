@@ -49,7 +49,7 @@ You stay in the loop at the **decisions** that matter (signing the Contract, app
 | FM-10 Pre-flight & Contract | ✅ | Multi-turn clarification → structured Contract |
 | FM-11 Evaluator Agent | ✅ | Auto code review + line annotations + quality scoring + auto-fix |
 | FM-12 Mission Report | ✅ | Executive summary + decisions + evaluator diff + markdown export |
-| FM-13 Harness Dashboard | 🟡 | Lightweight version (cost + anomalies); full dashboard post-MVP |
+| FM-13 Harness Dashboard | ✅ | Lightweight version: cost trend + anomaly detection. Full dashboard (gantt, live polling, ring progress) post-MVP |
 | FM-14 Approval Queue | ✅ | Tool/budget/escalation/fetch/chat-commit approval queue with policy config |
 | FM-15 Worktree v2.2 | ✅ | Frontier merge + 3-layer conflict resolver + delivery panel |
 
