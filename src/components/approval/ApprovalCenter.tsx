@@ -10,11 +10,15 @@
  * 负责"事件订阅"的组件，避免重复订阅 / 内存泄露。
  */
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useApprovalStore } from "../../stores/approval-store";
 import { ApprovalCard } from "./ApprovalCard";
 import styles from "./ApprovalCenter.module.css";
 
 export function ApprovalCenter() {
+  const { t } = useTranslation("approval");
+  const { t: tn } = useTranslation("nav");
+  const { t: tc } = useTranslation("common");
   const { init, dispose, items, error } = useApprovalStore();
   const [open, setOpen] = useState(false);
 
@@ -33,8 +37,8 @@ export function ApprovalCenter() {
       <button
         className={`${styles.toggle} ${open ? styles.active : ""}`}
         onClick={() => setOpen((v) => !v)}
-        aria-label={`Approval queue (${count} pending)`}
-        title={`Approvals — ${count} pending`}
+        aria-label={`${tn("approvals")} (${tn("approvalsBadge", { count })})`}
+        title={`${tn("approvals")} — ${tn("approvalsBadge", { count })}`}
       >
         <BellIcon />
         {count > 0 && (
@@ -45,26 +49,23 @@ export function ApprovalCenter() {
       {open && (
         <>
           <div className={styles.overlay} onClick={() => setOpen(false)} />
-          <aside className={styles.drawer} role="dialog" aria-label="Approval queue">
+          <aside className={styles.drawer} role="dialog" aria-label={t("centerTitle")}>
             <div className={styles.drawerHeader}>
-              <h2 className={styles.drawerTitle}>Approvals</h2>
+              <h2 className={styles.drawerTitle}>{t("centerTitle")}</h2>
               <button
                 className={styles.drawerClose}
                 onClick={() => setOpen(false)}
-                aria-label="Close approvals"
+                aria-label={tc("close")}
               >
                 ×
               </button>
             </div>
             <div className={styles.drawerBody}>
               {error && (
-                <p className={styles.errorBanner}>Approval queue offline: {error}</p>
+                <p className={styles.errorBanner}>{tc("errorPrefix", { message: error })}</p>
               )}
               {items.length === 0 ? (
-                <p className={styles.empty}>
-                  No pending approvals. Anything that needs your decision will show
-                  up here.
-                </p>
+                <p className={styles.empty}>{t("centerEmpty")}</p>
               ) : (
                 items.map((it) => <ApprovalCard key={it.id} approval={it} />)
               )}

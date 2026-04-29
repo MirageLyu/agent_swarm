@@ -14,6 +14,7 @@
  * 比较干净，避免双写状态。
  */
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Badge, Button } from "../ui";
 import { commands, type ApprovalView } from "../../ipc/commands";
 import { useApprovalStore } from "../../stores/approval-store";
@@ -25,6 +26,7 @@ interface ApprovalCardProps {
 }
 
 export function ApprovalCard({ approval }: ApprovalCardProps) {
+  const { t } = useTranslation("approval");
   const removeLocal = useApprovalStore((s) => s.removeLocal);
   const [busy, setBusy] = useState(false);
   const [rejectOpen, setRejectOpen] = useState(false);
@@ -40,11 +42,11 @@ export function ApprovalCard({ approval }: ApprovalCardProps) {
     const exp = Date.parse(approval.expires_at + "Z");
     if (Number.isNaN(exp)) return null;
     const diff = Math.max(0, Math.floor((exp - now) / 1000));
-    if (diff <= 0) return "expiring…";
-    if (diff < 60) return `${diff}s left`;
-    if (diff < 3600) return `${Math.floor(diff / 60)}m left`;
-    return `${Math.floor(diff / 3600)}h left`;
-  }, [approval.expires_at, now]);
+    if (diff <= 0) return t("expiringNow");
+    if (diff < 60) return t("expiresSecs", { count: diff });
+    if (diff < 3600) return t("expiresMins", { count: Math.floor(diff / 60) });
+    return t("expiresHours", { count: Math.floor(diff / 3600) });
+  }, [approval.expires_at, now, t]);
 
   const payload = useMemo(() => {
     try {
@@ -107,6 +109,7 @@ export function ApprovalCard({ approval }: ApprovalCardProps) {
 }
 
 function KindBadge({ kind }: { kind: ApprovalView["kind"] }) {
+  const { t } = useTranslation("approval");
   const variant = (() => {
     switch (kind) {
       case "tool":
@@ -123,21 +126,24 @@ function KindBadge({ kind }: { kind: ApprovalView["kind"] }) {
         return "default" as const;
     }
   })();
-  return <Badge variant={variant}>{kindLabel(kind)}</Badge>;
+  return <Badge variant={variant}>{kindLabel(kind, t)}</Badge>;
 }
 
-function kindLabel(kind: ApprovalView["kind"]): string {
+function kindLabel(
+  kind: ApprovalView["kind"],
+  t: (key: string) => string,
+): string {
   switch (kind) {
     case "tool":
-      return "Tool";
+      return t("kindTool");
     case "fetch":
-      return "Fetch";
+      return t("kindFetch");
     case "escalation":
-      return "Escalate";
+      return t("kindEscalation");
     case "budget":
-      return "Budget";
+      return t("kindBudget");
     case "chat_commit":
-      return "Chat Commit";
+      return t("kindChatCommit");
     default:
       return kind;
   }
@@ -150,17 +156,18 @@ function KindMeta({
   kind: ApprovalView["kind"];
   payload: Record<string, unknown>;
 }) {
+  const { t } = useTranslation("approval");
   if (kind === "fetch") {
     return (
       <dl className={styles.meta}>
         <div className={styles.metaRow}>
-          <dt>URL</dt>
+          <dt>{t("metaUrl")}</dt>
           <dd>
             <code className={styles.code}>{String(payload.url ?? "")}</code>
           </dd>
         </div>
         <div className={styles.metaRow}>
-          <dt>Host</dt>
+          <dt>{t("metaHost")}</dt>
           <dd>
             <code className={styles.code}>{String(payload.host ?? "")}</code>
           </dd>
@@ -175,7 +182,7 @@ function KindMeta({
       <dl className={styles.meta}>
         {toolName && (
           <div className={styles.metaRow}>
-            <dt>Tool</dt>
+            <dt>{t("metaTool")}</dt>
             <dd>
               <code className={styles.code}>{toolName}</code>
             </dd>
@@ -183,7 +190,7 @@ function KindMeta({
         )}
         {summary && (
           <div className={styles.metaRow}>
-            <dt>Args</dt>
+            <dt>{t("metaArgs")}</dt>
             <dd>{summary}</dd>
           </div>
         )}
@@ -197,13 +204,13 @@ function KindMeta({
       <dl className={styles.meta}>
         {tasks != null && (
           <div className={styles.metaRow}>
-            <dt>Tasks</dt>
+            <dt>{t("metaTasks")}</dt>
             <dd>~{String(tasks)}</dd>
           </div>
         )}
         {requestSummary != null && String(requestSummary).trim() !== "" && (
           <div className={styles.metaRow}>
-            <dt>Request</dt>
+            <dt>{t("metaRequest")}</dt>
             <dd>{String(requestSummary)}</dd>
           </div>
         )}
@@ -214,11 +221,11 @@ function KindMeta({
     return (
       <dl className={styles.meta}>
         <div className={styles.metaRow}>
-          <dt>Used</dt>
+          <dt>{t("metaUsed")}</dt>
           <dd>${String(payload.used_usd ?? "?")}</dd>
         </div>
         <div className={styles.metaRow}>
-          <dt>Budget</dt>
+          <dt>{t("metaBudget")}</dt>
           <dd>${String(payload.budget_usd ?? "?")}</dd>
         </div>
       </dl>
@@ -228,11 +235,11 @@ function KindMeta({
     return (
       <dl className={styles.meta}>
         <div className={styles.metaRow}>
-          <dt>Files</dt>
+          <dt>{t("metaFiles")}</dt>
           <dd>{String(payload.files_changed ?? "?")}</dd>
         </div>
         <div className={styles.metaRow}>
-          <dt>Lines</dt>
+          <dt>{t("metaLines")}</dt>
           <dd>{String(payload.lines_changed ?? "?")}</dd>
         </div>
       </dl>
@@ -247,11 +254,35 @@ function renderActions(
   resolve: (d: "approved" | "rejected", note?: string) => Promise<void>,
   openReject: () => void,
 ) {
+  // 不能在 helper 里直接用 hook，但渲染时这个组件已经在 React 树里——
+  // 改成让 ApprovalCard 调用时传 t；为了少改 prop，我把 helper 提升成内联组件
+  return (
+    <ActionRow
+      kind={kind}
+      busy={busy}
+      resolve={resolve}
+      openReject={openReject}
+    />
+  );
+}
+
+function ActionRow({
+  kind,
+  busy,
+  resolve,
+  openReject,
+}: {
+  kind: ApprovalView["kind"];
+  busy: boolean;
+  resolve: (d: "approved" | "rejected", note?: string) => Promise<void>;
+  openReject: () => void;
+}) {
+  const { t } = useTranslation("approval");
   if (kind === "fetch") {
     return (
       <>
         <Button variant="secondary" size="sm" onClick={openReject} disabled={busy}>
-          Reject
+          {t("reject")}
         </Button>
         <Button
           variant="secondary"
@@ -259,7 +290,7 @@ function renderActions(
           onClick={() => resolve("approved", "session")}
           disabled={busy}
         >
-          Allow this session
+          {t("fetchAllowSession")}
         </Button>
         <Button
           variant="primary"
@@ -267,7 +298,7 @@ function renderActions(
           onClick={() => resolve("approved", "once")}
           disabled={busy}
         >
-          Allow once
+          {t("fetchAllowOnce")}
         </Button>
       </>
     );
@@ -275,7 +306,7 @@ function renderActions(
   return (
     <>
       <Button variant="secondary" size="sm" onClick={openReject} disabled={busy}>
-        Reject
+        {t("reject")}
       </Button>
       <Button
         variant="primary"
@@ -283,7 +314,7 @@ function renderActions(
         onClick={() => resolve("approved")}
         disabled={busy}
       >
-        Approve
+        {t("approve")}
       </Button>
     </>
   );

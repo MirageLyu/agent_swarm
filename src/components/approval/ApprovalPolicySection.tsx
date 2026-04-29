@@ -6,11 +6,15 @@
  * 保存时按换行拆分；这样比写 chip-input 简单且对用户更直观。
  */
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Button } from "../ui";
 import { commands, type ApprovalPolicy } from "../../ipc/commands";
 import styles from "./ApprovalPolicySection.module.css";
 
 export function ApprovalPolicySection() {
+  const { t } = useTranslation("settings");
+  const { t: tc } = useTranslation("common");
+  const { t: ta } = useTranslation("approval");
   const [policy, setPolicy] = useState<ApprovalPolicy | null>(null);
   const [timeoutSec, setTimeoutSec] = useState("");
   const [protectedPaths, setProtectedPaths] = useState("");
@@ -50,10 +54,10 @@ export function ApprovalPolicySection() {
           parseInt(chatSoft, 10) || policy?.chat_commit_soft_lines || 0,
       });
       apply(next);
-      setMessage("Approval policy saved.");
+      setMessage(ta("policySaved"));
       setTimeout(() => setMessage(""), 2500);
     } catch (e) {
-      setMessage(`Save failed: ${e}`);
+      setMessage(tc("errorPrefix", { message: String(e) }));
     } finally {
       setSaving(false);
     }
@@ -63,15 +67,11 @@ export function ApprovalPolicySection() {
 
   return (
     <div className={styles.section}>
-      <h2 className={styles.sectionTitle}>Approval Policy</h2>
-      <p className={styles.intro}>
-        Decide which agent actions need your sign-off before they run.
-        Anything matched here is paused, mirrored to the approvals drawer in the
-        top bar, and resumed only after you approve or reject it.
-      </p>
+      <h2 className={styles.sectionTitle}>{t("approvalPolicyHeader")}</h2>
+      <p className={styles.intro}>{t("approvalPolicyIntro")}</p>
 
       <div className={styles.field}>
-        <label className={styles.label}>Approval timeout (seconds)</label>
+        <label className={styles.label}>{t("approvalTimeoutLabel")}</label>
         <input
           className={styles.input}
           type="number"
@@ -83,15 +83,11 @@ export function ApprovalPolicySection() {
           min={30}
           max={3600}
         />
-        <p className={styles.hint}>
-          Pending requests auto-expire (treated as rejected) after this many seconds.
-          Default 600s = 10min, intentionally below the agent wall-clock so a
-          single approval never starves the run.
-        </p>
+        <p className={styles.hint}>{t("approvalTimeoutHint")}</p>
       </div>
 
       <div className={styles.field}>
-        <label className={styles.label}>Protected paths (one per line)</label>
+        <label className={styles.label}>{t("protectedPathsLabel")}</label>
         <textarea
           className={styles.textarea}
           rows={6}
@@ -102,14 +98,11 @@ export function ApprovalPolicySection() {
           }}
           placeholder={"package.json\nsrc-tauri/tauri.conf.json\n.github/"}
         />
-        <p className={styles.hint}>
-          Workspace-relative path prefixes (POSIX style). Any write_file /
-          delete_file targeting these paths will require approval.
-        </p>
+        <p className={styles.hint}>{t("protectedPathsHint")}</p>
       </div>
 
       <div className={styles.field}>
-        <label className={styles.label}>Destructive commands (one per line)</label>
+        <label className={styles.label}>{t("destructiveCommandsLabel")}</label>
         <textarea
           className={styles.textarea}
           rows={5}
@@ -120,14 +113,11 @@ export function ApprovalPolicySection() {
           }}
           placeholder={"rm\ngit push\ngit reset"}
         />
-        <p className={styles.hint}>
-          Match against the first word(s) of any shell_exec call. Comparison is
-          lower-cased and prefix-based.
-        </p>
+        <p className={styles.hint}>{t("destructiveCommandsHint")}</p>
       </div>
 
       <div className={styles.field}>
-        <label className={styles.label}>Budget warn ratio</label>
+        <label className={styles.label}>{t("budgetWarnRatioLabel")}</label>
         <input
           className={styles.input}
           type="number"
@@ -140,14 +130,11 @@ export function ApprovalPolicySection() {
             markDirty();
           }}
         />
-        <p className={styles.hint}>
-          When mission cost reaches this fraction of the contract budget,
-          a budget approval is queued. 0 = disable.
-        </p>
+        <p className={styles.hint}>{t("budgetWarnRatioHint")}</p>
       </div>
 
       <div className={styles.field}>
-        <label className={styles.label}>Chat commit soft threshold (lines)</label>
+        <label className={styles.label}>{t("chatCommitSoftLinesLabel")}</label>
         <input
           className={styles.input}
           type="number"
@@ -158,16 +145,13 @@ export function ApprovalPolicySection() {
             markDirty();
           }}
         />
-        <p className={styles.hint}>
-          Chat agent commits over this many diff lines (but still under the hard
-          30-line ceiling) require approval. 0 = no soft gate.
-        </p>
+        <p className={styles.hint}>{t("chatCommitSoftLinesHint")}</p>
       </div>
 
       {dirty && (
         <div className={styles.saveRow}>
           <Button variant="primary" onClick={save} disabled={saving}>
-            {saving ? "Saving…" : "Save approval policy"}
+            {saving ? tc("saving") : tc("save")}
           </Button>
         </div>
       )}

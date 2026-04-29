@@ -5,12 +5,14 @@
  * 后端会做 API key 脱敏 + 用户名脱敏，前端不需要重复处理。
  */
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Button } from "../ui";
 import { commands } from "../../ipc/commands";
 import styles from "./DiagnosticsSection.module.css";
 
 export function DiagnosticsSection() {
+  const { t } = useTranslation("settings");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -22,16 +24,15 @@ export function DiagnosticsSection() {
     let target: string | null = null;
     try {
       target = await save({
-        title: "Save diagnostic bundle",
+        title: t("exportDiagnostics"),
         defaultPath: `miragenty-diagnostics-${new Date().toISOString().slice(0, 10)}.txt`,
         filters: [{ name: "Text", extensions: ["txt"] }],
       });
     } catch (e) {
-      setError(`Dialog error: ${e instanceof Error ? e.message : String(e)}`);
+      setError(t("exportDiagnosticsError", { message: e instanceof Error ? e.message : String(e) }));
       return;
     }
     if (!target) {
-      // 用户取消，安静返回
       return;
     }
 
@@ -42,11 +43,14 @@ export function DiagnosticsSection() {
         log_tail_lines: 2000,
       });
       setMessage(
-        `Wrote ${formatBytes(res.bytes_written)} to ${res.output_path} ` +
-          `(${res.log_files_included} log file(s) included).`,
+        t("exportDiagnosticsSuccess", {
+          size: formatBytes(res.bytes_written),
+          path: res.output_path,
+          count: res.log_files_included,
+        }),
       );
     } catch (e) {
-      setError(`Export failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(t("exportDiagnosticsError", { message: e instanceof Error ? e.message : String(e) }));
     } finally {
       setBusy(false);
     }
@@ -54,15 +58,11 @@ export function DiagnosticsSection() {
 
   return (
     <div className={styles.section}>
-      <h3 className={styles.title}>Diagnostics</h3>
-      <p className={styles.intro}>
-        Export a text bundle with the latest backend logs, app version, database
-        summary, and recent errors. Use this when filing a bug report — sensitive
-        data (API keys, your home username) is redacted automatically.
-      </p>
+      <h3 className={styles.title}>{t("diagnosticsHeader")}</h3>
+      <p className={styles.intro}>{t("diagnosticsIntro")}</p>
       <div className={styles.row}>
         <Button variant="secondary" onClick={handleExport} disabled={busy}>
-          {busy ? "Exporting..." : "Export Diagnostics"}
+          {busy ? t("exporting") : t("exportDiagnostics")}
         </Button>
       </div>
       {message && <p className={styles.success}>{message}</p>}

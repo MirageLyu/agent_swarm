@@ -6,6 +6,7 @@
  * `inject_agent_note`），所以哪怕只填一行也比留空有用。
  */
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Button } from "../ui";
 import styles from "./RejectDialog.module.css";
@@ -19,6 +20,8 @@ interface RejectDialogProps {
 }
 
 export function RejectDialog({ open, approvalTitle, onConfirm, onCancel }: RejectDialogProps) {
+  const { t } = useTranslation("approval");
+  const { t: tc } = useTranslation("common");
   const [note, setNote] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -43,34 +46,29 @@ export function RejectDialog({ open, approvalTitle, onConfirm, onCancel }: Rejec
       <Dialog.Portal>
         <Dialog.Overlay className={styles.overlay} />
         <Dialog.Content className={styles.content}>
-          <Dialog.Title className={styles.title}>Reject approval</Dialog.Title>
+          <Dialog.Title className={styles.title}>{t("rejectDialogTitle")}</Dialog.Title>
           <Dialog.Description className={styles.subtitle}>{approvalTitle}</Dialog.Description>
 
           <label className={styles.label} htmlFor="reject-note">
-            Reason / hint to the agent (optional)
+            {t("rejectReasonLabel")}
           </label>
           <textarea
             id="reject-note"
             className={styles.textarea}
             value={note}
             onChange={(e) => setNote(e.target.value)}
-            placeholder={
-              "e.g. Don't touch package.json — use src/utils/version.ts instead"
-            }
+            placeholder={t("rejectReasonPlaceholder")}
             disabled={submitting}
             autoFocus
           />
-          <p className={styles.hint}>
-            Your note will be injected into the agent so it knows why and what to do
-            next. Leave empty if you just want to refuse the action.
-          </p>
+          <p className={styles.hint}>{t("rejectReasonHint")}</p>
 
           <div className={styles.actions}>
             <Button variant="secondary" size="sm" onClick={onCancel} disabled={submitting}>
-              Cancel
+              {tc("cancel")}
             </Button>
             <Button variant="primary" size="sm" onClick={handleConfirm} disabled={submitting}>
-              {submitting ? "Rejecting…" : "Reject"}
+              {submitting ? t("rejecting") : t("reject")}
             </Button>
           </div>
         </Dialog.Content>

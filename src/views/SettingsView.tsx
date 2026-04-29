@@ -1,14 +1,19 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Badge } from "../components/ui/Badge";
 import { ApprovalPolicySection } from "../components/approval";
 import { DiagnosticsSection } from "../components/settings/DiagnosticsSection";
+import { LanguageSection } from "../components/settings/LanguageSection";
 import { commands, type ConfigResponse } from "../ipc";
 import { useUiStore } from "../stores/ui-store";
 import styles from "./SettingsView.module.css";
 
 export function SettingsView() {
+  const { t } = useTranslation("settings");
+  const { t: tc } = useTranslation("common");
+
   const [config, setConfig] = useState<ConfigResponse | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
@@ -24,16 +29,20 @@ export function SettingsView() {
   const [configDirty, setConfigDirty] = useState(false);
 
   useEffect(() => {
-    commands.getConfig().then((c) => {
-      setConfig(c);
-      setProvider(c.provider);
-      setBaseUrl(c.base_url);
-      setDefaultModel(c.default_model);
-      setMaxAgents(String(c.max_concurrent_agents));
-      setMaxSteps(String(c.max_agent_steps));
-      setAgentTimeout(String(c.agent_timeout_seconds));
-      setStepIdle(String(c.agent_step_idle_seconds));
-    }).catch(console.error);
+    commands
+      .getConfig()
+      .then((c) => {
+        setConfig(c);
+        setProvider(c.provider);
+        setBaseUrl(c.base_url);
+        setDefaultModel(c.default_model);
+        setMaxAgents(String(c.max_concurrent_agents));
+        setMaxSteps(String(c.max_agent_steps));
+        setAgentTimeout(String(c.agent_timeout_seconds));
+        setStepIdle(String(c.agent_step_idle_seconds));
+      })
+      // eslint-disable-next-line no-console
+      .catch(console.error);
   }, []);
 
   const handleSaveKey = async () => {
@@ -45,10 +54,10 @@ export function SettingsView() {
       // 让 MissionsView 顶部的引导 banner 立刻消失
       useUiStore.getState().setApiKeyConfigured(true);
       setApiKey("");
-      setMessage("API key saved");
+      setMessage(t("saveKeySuccess"));
       setTimeout(() => setMessage(""), 2000);
     } catch (e) {
-      setMessage(`Error: ${e}`);
+      setMessage(tc("errorPrefix", { message: String(e) }));
     } finally {
       setSaving(false);
     }
@@ -67,10 +76,10 @@ export function SettingsView() {
         agent_step_idle_seconds: Math.max(0, parseInt(stepIdle, 10) || 0),
       });
       setConfigDirty(false);
-      setMessage("Configuration saved. New values take effect on the next agent run.");
+      setMessage(t("configSavedHint"));
       setTimeout(() => setMessage(""), 3000);
     } catch (e) {
-      setMessage(`Error: ${e}`);
+      setMessage(tc("errorPrefix", { message: String(e) }));
     } finally {
       setSaving(false);
     }
@@ -81,58 +90,69 @@ export function SettingsView() {
   return (
     <div className={styles.container}>
       <div className={styles.section}>
-        <h2 className={styles.sectionTitle}>LLM Provider</h2>
+        <h2 className={styles.sectionTitle}>{t("providerHeader")}</h2>
         <div className={styles.field}>
           <div className={styles.fieldHeader}>
-            <span>Provider</span>
+            <span>{t("providerNameLabel")}</span>
           </div>
           <Input
             value={provider}
-            onChange={(e) => { setProvider(e.target.value); markDirty(); }}
-            placeholder="openai"
+            onChange={(e) => {
+              setProvider(e.target.value);
+              markDirty();
+            }}
+            placeholder={t("providerPlaceholder")}
           />
+          <p className={styles.hint}>{t("providerHint")}</p>
         </div>
         <div className={styles.field}>
           <div className={styles.fieldHeader}>
-            <span>Base URL</span>
+            <span>{t("baseUrlLabel")}</span>
           </div>
           <Input
             value={baseUrl}
-            onChange={(e) => { setBaseUrl(e.target.value); markDirty(); }}
-            placeholder="https://api.openai.com/v1"
+            onChange={(e) => {
+              setBaseUrl(e.target.value);
+              markDirty();
+            }}
+            placeholder={t("baseUrlPlaceholder")}
           />
         </div>
         <div className={styles.field}>
           <div className={styles.fieldHeader}>
-            <span>Model</span>
+            <span>{t("modelLabel")}</span>
           </div>
           <Input
             value={defaultModel}
-            onChange={(e) => { setDefaultModel(e.target.value); markDirty(); }}
-            placeholder="gpt-4o"
+            onChange={(e) => {
+              setDefaultModel(e.target.value);
+              markDirty();
+            }}
+            placeholder={t("modelPlaceholder")}
           />
         </div>
       </div>
 
       <div className={styles.section}>
-        <h2 className={styles.sectionTitle}>API Key</h2>
+        <h2 className={styles.sectionTitle}>{t("apiKeysHeader")}</h2>
+        <p className={styles.hint}>{t("apiKeysIntro")}</p>
         <div className={styles.field}>
           <div className={styles.fieldHeader}>
-            <span>{config?.provider ?? "Provider"}</span>
+            <span>{config?.provider ?? t("providerNameLabel")}</span>
             <Badge variant={config?.has_api_key ? "success" : "warning"}>
-              {config?.has_api_key ? "Configured" : "Not Set"}
+              {config?.has_api_key ? t("apiKeyConfigured") : t("apiKeyMissing")}
             </Badge>
           </div>
           <div className={styles.fieldRow}>
             <Input
               type="password"
-              placeholder="sk-..."
+              placeholder={t("apiKeyPlaceholder")}
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               style={{ flex: 1 }}
             />
             <Button variant="primary" size="sm" onClick={handleSaveKey} disabled={saving}>
-              {saving ? "Saving..." : "Save"}
+              {saving ? tc("saving") : t("saveKey")}
             </Button>
           </div>
         </div>
@@ -140,71 +160,77 @@ export function SettingsView() {
       </div>
 
       <div className={styles.section}>
-        <h2 className={styles.sectionTitle}>Agents</h2>
+        <h2 className={styles.sectionTitle}>{t("agentsHeader")}</h2>
         <div className={styles.field}>
           <div className={styles.fieldHeader}>
-            <span>Max Concurrent Agents</span>
+            <span>{t("maxAgentsLabel")}</span>
           </div>
           <Input
             type="number"
             value={maxAgents}
-            onChange={(e) => { setMaxAgents(e.target.value); markDirty(); }}
+            onChange={(e) => {
+              setMaxAgents(e.target.value);
+              markDirty();
+            }}
             placeholder="4"
           />
         </div>
         <div className={styles.field}>
           <div className={styles.fieldHeader}>
-            <span>Max Steps per Agent</span>
+            <span>{t("maxStepsLabel")}</span>
           </div>
           <Input
             type="number"
             value={maxSteps}
-            onChange={(e) => { setMaxSteps(e.target.value); markDirty(); }}
+            onChange={(e) => {
+              setMaxSteps(e.target.value);
+              markDirty();
+            }}
             placeholder="80"
           />
-          <p className={styles.hint}>
-            硬上限：一次任务里 LLM step 数。超出即按 max_steps 失败，且会在 DAG 节点上写明原因。
-          </p>
+          <p className={styles.hint}>{t("maxStepsHint")}</p>
         </div>
         <div className={styles.field}>
           <div className={styles.fieldHeader}>
-            <span>Agent Wall-clock Timeout (seconds)</span>
+            <span>{t("agentTimeoutLabel")}</span>
           </div>
           <Input
             type="number"
             value={agentTimeout}
-            onChange={(e) => { setAgentTimeout(e.target.value); markDirty(); }}
+            onChange={(e) => {
+              setAgentTimeout(e.target.value);
+              markDirty();
+            }}
             placeholder="1800"
           />
-          <p className={styles.hint}>
-            一次 Agent 任务从拉起到结束的总墙钟超时（兜底防御无限循环）。建议 ≥ 600s。
-          </p>
+          <p className={styles.hint}>{t("agentTimeoutHint")}</p>
         </div>
         <div className={styles.field}>
           <div className={styles.fieldHeader}>
-            <span>LLM Stream Idle Timeout (seconds)</span>
+            <span>{t("stepIdleLabel")}</span>
           </div>
           <Input
             type="number"
             value={stepIdle}
-            onChange={(e) => { setStepIdle(e.target.value); markDirty(); }}
+            onChange={(e) => {
+              setStepIdle(e.target.value);
+              markDirty();
+            }}
             placeholder="60"
           />
-          <p className={styles.hint}>
-            LLM 流式响应"相邻 chunk 静默"上限。0 = 关闭 idle 检测仅靠 wall-clock 兜底。
-            修改在下一次 Agent / Chat / Planner 任务启动时即生效；正在运行中的 Agent 仍沿用旧值。
-          </p>
+          <p className={styles.hint}>{t("stepIdleHint")}</p>
         </div>
       </div>
 
       {configDirty && (
         <div className={styles.saveRow}>
           <Button variant="primary" onClick={handleSaveConfig} disabled={saving}>
-            {saving ? "Saving..." : "Save Configuration"}
+            {saving ? tc("saving") : t("saveConfig")}
           </Button>
         </div>
       )}
 
+      <LanguageSection />
       <ApprovalPolicySection />
       <DiagnosticsSection />
     </div>
