@@ -477,7 +477,8 @@ fn compute_duration_seconds(
         .ok()
         .flatten();
     let _ = mission_id;
-    result.map(|s| s.max(0.0) as i64).unwrap_or(0)
+    // julianday 是双精度浮点，900s 可能算出 899.9999...；用 round 而不是 trunc 保留语义。
+    result.map(|s| s.max(0.0).round() as i64).unwrap_or(0)
 }
 
 fn collect_task_matrix(conn: &Connection, mission_id: &str) -> Result<Vec<ReportTaskRow>> {
@@ -526,7 +527,7 @@ fn collect_task_matrix(conn: &Connection, mission_id: &str) -> Result<Vec<Report
             )
             .ok()
             .flatten()
-            .map(|s| s.max(0.0) as i64)
+            .map(|s| s.max(0.0).round() as i64)
         } else {
             None
         };
@@ -1255,6 +1256,19 @@ fn escape_md_cell(s: &str) -> String {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+pub(crate) fn aggregate_data_for_test(
+    conn: &Connection,
+    mission_id: &str,
+) -> Result<MissionReport> {
+    let agg = aggregate_data(conn, mission_id)?;
+    let mut report = agg.into_report();
+    let (exec, decisions) = fallback_executive_and_decisions(&aggregate_data(conn, mission_id)?);
+    report.summary.executive = exec;
+    report.decisions = decisions;
+    Ok(report)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1450,5 +1464,225 @@ mod tests {
             risk: "May not scale.".into(),
         }];
         report
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Integration tests: aggregate_data on a real in-memory DB
+    // ──────────────────────────────────────────────────────────────────
+
+    use crate::db::migrations_run_on;
+    use rusqlite::{params, Connection};
+
+    fn fresh_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        migrations_run_on(&conn).unwrap();
+        conn
+    }
+
+    fn seed_completed_mission_with_one_task(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO missions (id, title, description, status, total_cost_usd, created_at, updated_at)
+             VALUES ('m1', 'Build login flow', 'Add OAuth2 login', 'completed', 0.05,
+                     '2026-04-29 10:00:00', '2026-04-29 10:30:00')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, mission_id, title, description, status, complexity, created_at, completed_at)
+             VALUES ('t1', 'm1', 'Implement OAuth2 callback', '', 'completed', 'medium',
+                     '2026-04-29 10:05:00', '2026-04-29 10:20:00')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, task_id, status, worktree_path, created_at, updated_at)
+             VALUES ('ag1', 'OAuth Agent', 't1', 'completed', '/tmp/wt-1',
+                     '2026-04-29 10:05:00', '2026-04-29 10:20:00')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO cost_records (id, agent_id, task_id, model, input_tokens, output_tokens, cost_usd)
+             VALUES ('cr1', 'ag1', 't1', 'claude-sonnet-4-5', 1000, 500, 0.05)",
+            [],
+        ).unwrap();
+    }
+
+    #[test]
+    fn aggregate_data_basic_completed_mission() {
+        let conn = fresh_db();
+        seed_completed_mission_with_one_task(&conn);
+
+        let report = aggregate_data_for_test(&conn, "m1").unwrap();
+
+        assert_eq!(report.mission.id, "m1");
+        assert_eq!(report.mission.title, "Build login flow");
+        assert_eq!(report.mission.status, "completed");
+        assert_eq!(report.mission.duration_seconds, 1800, "10:00 → 10:30 == 1800s");
+        assert!((report.mission.total_cost_usd - 0.05).abs() < 1e-9);
+
+        assert_eq!(report.summary.metrics.tasks_total, 1);
+        assert_eq!(report.summary.metrics.tasks_completed, 1);
+        assert_eq!(report.summary.metrics.tasks_failed, 0);
+
+        assert_eq!(report.task_matrix.len(), 1);
+        let row = &report.task_matrix[0];
+        assert_eq!(row.task_id, "t1");
+        assert_eq!(row.agent_name.as_deref(), Some("OAuth Agent"));
+        assert!((row.cost_usd - 0.05).abs() < 1e-9);
+        assert_eq!(row.duration_seconds, Some(900), "10:05 → 10:20 == 900s");
+
+        assert_eq!(report.cost_breakdown.by_model.len(), 1);
+        assert_eq!(report.cost_breakdown.by_model[0].model, "claude-sonnet-4-5");
+        assert_eq!(report.cost_breakdown.total_input_tokens, 1000);
+        assert_eq!(report.cost_breakdown.total_output_tokens, 500);
+
+        assert!(report.contract.is_none(), "no contract seeded");
+        assert!(report.artifacts.is_empty());
+
+        // 降级 executive 必含关键指标
+        assert!(report.summary.executive.contains("1 个任务"));
+        assert!(report.summary.executive.contains("$0.0500"));
+
+        // Markdown 渲染端到端跑通
+        let md = render_markdown(&report);
+        assert!(md.contains("# Mission Report — Build login flow"));
+        assert!(md.contains("OAuth Agent"));
+        assert!(md.contains("claude-sonnet-4-5"));
+        assert!(md.contains("$0.0500"));
+    }
+
+    #[test]
+    fn aggregate_data_with_evaluator_review() {
+        let conn = fresh_db();
+        seed_completed_mission_with_one_task(&conn);
+
+        // evaluator_review + 2 个 annotations，1 个 auto_fixed
+        conn.execute(
+            "INSERT INTO evaluator_reviews (id, agent_id, mission_id, overall_score, summary, created_at)
+             VALUES ('er1', 'ag1', 'm1', 8.2, 'Looks good with minor concerns.', '2026-04-29 10:25:00')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO evaluator_annotations
+             (id, review_id, agent_id, file_path, line_number, type, severity, status, message, auto_fixable)
+             VALUES
+             ('a1', 'er1', 'ag1', 'src/login.rs', 10, 'bug', 'warning', 'open', 'check this', 1),
+             ('a2', 'er1', 'ag1', 'src/login.rs', 20, 'style', 'info', 'auto_fixed', 'formatted', 1)",
+            [],
+        ).unwrap();
+
+        let report = aggregate_data_for_test(&conn, "m1").unwrap();
+
+        assert_eq!(report.evaluator_review.rounds.len(), 1);
+        assert!((report.evaluator_review.rounds[0].score - 8.2).abs() < 1e-9);
+        assert_eq!(report.evaluator_review.total_issues, 2);
+        assert_eq!(report.evaluator_review.auto_fixed, 1);
+        assert_eq!(
+            report.summary.metrics.review_reduction_rate,
+            Some(0.5),
+            "1 / 2 = 0.5"
+        );
+        assert_eq!(report.summary.metrics.avg_quality_score, Some(8.2));
+        assert_eq!(report.summary.metrics.auto_fixes, 1);
+
+        assert_eq!(report.task_matrix[0].score, Some(8.2));
+    }
+
+    #[test]
+    fn aggregate_data_with_signed_contract() {
+        let conn = fresh_db();
+        seed_completed_mission_with_one_task(&conn);
+        conn.execute(
+            "INSERT INTO mission_contracts (id, mission_id, status, budget_usd, quality_threshold)
+             VALUES ('c1', 'm1', 'signed', 1.0, 7.5)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO contract_items (id, contract_id, section, text, source) VALUES
+             ('ci1', 'c1', 'scope', 'OAuth2 login flow', 'user'),
+             ('ci2', 'c1', 'constraints', 'No third-party SDK', 'user'),
+             ('ci3', 'c1', 'exclusions', 'No password reset', 'user')",
+            [],
+        ).unwrap();
+
+        let report = aggregate_data_for_test(&conn, "m1").unwrap();
+
+        let c = report.contract.expect("contract should be present");
+        assert_eq!(c.status, "signed");
+        assert_eq!(c.budget_usd, Some(1.0));
+        assert_eq!(c.quality_threshold, Some(7.5));
+        assert_eq!(c.items.len(), 3);
+
+        // mission completed → scope/constraints achieved=true
+        assert!(c.items.iter().find(|i| i.section == "scope").unwrap().achieved);
+        assert!(c.items.iter().find(|i| i.section == "constraints").unwrap().achieved);
+        // exclusions 默认 true（无需主动验证）
+        assert!(c.items.iter().find(|i| i.section == "exclusions").unwrap().achieved);
+
+        assert_eq!(report.cost_breakdown.budget_usd, Some(1.0));
+        // budget_used_ratio = 0.05 / 1.0 = 0.05
+        let ratio = report.cost_breakdown.budget_used_ratio.unwrap();
+        assert!((ratio - 0.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aggregate_data_failed_mission_marks_scope_unachieved() {
+        let conn = fresh_db();
+        conn.execute(
+            "INSERT INTO missions (id, title, description, status, total_cost_usd, created_at, updated_at)
+             VALUES ('m2', 'Failed mission', '', 'failed', 0.01,
+                     '2026-04-29 11:00:00', '2026-04-29 11:05:00')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO mission_contracts (id, mission_id, status) VALUES ('c2', 'm2', 'signed')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO contract_items (id, contract_id, section, text, source)
+             VALUES ('ci-x', 'c2', 'scope', 'Build the thing', 'user')",
+            [],
+        ).unwrap();
+
+        let report = aggregate_data_for_test(&conn, "m2").unwrap();
+        let scope = report
+            .contract
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .find(|i| i.section == "scope")
+            .unwrap();
+        assert!(!scope.achieved, "failed mission → scope unachieved");
+    }
+
+    #[test]
+    fn aggregate_data_handles_failed_task_in_metrics() {
+        let conn = fresh_db();
+        conn.execute(
+            "INSERT INTO missions (id, title, status, created_at, updated_at)
+             VALUES ('m3', 'Mixed', 'completed', '2026-04-29 09:00:00', '2026-04-29 09:30:00')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, mission_id, title, status, created_at) VALUES
+             ('t1', 'm3', 'A', 'completed', '2026-04-29 09:05:00'),
+             ('t2', 'm3', 'B', 'failed', '2026-04-29 09:10:00'),
+             ('t3', 'm3', 'C', 'cancelled', '2026-04-29 09:15:00')",
+            [],
+        ).unwrap();
+
+        let report = aggregate_data_for_test(&conn, "m3").unwrap();
+        assert_eq!(report.summary.metrics.tasks_total, 3);
+        assert_eq!(report.summary.metrics.tasks_completed, 1);
+        assert_eq!(report.summary.metrics.tasks_failed, 2);
+        assert!(report.limitations.iter().any(|l| l.contains("2 个任务未完成")));
+    }
+
+    #[test]
+    fn aggregate_data_returns_err_for_unknown_mission() {
+        let conn = fresh_db();
+        let res = aggregate_data_for_test(&conn, "does-not-exist");
+        assert!(res.is_err());
+        let _ = params![]; // 引用避免 unused-import 警告
     }
 }

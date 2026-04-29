@@ -5,7 +5,13 @@ import type { MissionInfo, MissionStatus } from "../../ipc/commands";
 import { Badge, Button } from "../ui";
 import styles from "./MissionListItem.module.css";
 
-export type MissionAction = "delete" | "stop" | "restart_full" | "restart_failed" | "export";
+export type MissionAction =
+  | "delete"
+  | "stop"
+  | "restart_full"
+  | "restart_failed"
+  | "export"
+  | "view_report";
 
 interface MissionListItemProps {
   mission: MissionInfo;
@@ -27,9 +33,9 @@ function getAvailableActions(status: MissionStatus): MissionAction[] {
     case "running":
       return ["export", "stop"];
     case "completed":
-      return ["export", "restart_full", "delete"];
+      return ["view_report", "export", "restart_full", "delete"];
     case "failed":
-      return ["export", "restart_full", "restart_failed", "delete"];
+      return ["view_report", "export", "restart_full", "restart_failed", "delete"];
     case "draft":
     case "planned":
       return ["export", "delete"];
@@ -44,6 +50,7 @@ const ACTION_LABELS: Record<MissionAction, string> = {
   restart_full: "Re-run (Full)",
   restart_failed: "Re-run (Failed Only)",
   export: "Export Template",
+  view_report: "View Report",
 };
 
 export function MissionListItem({

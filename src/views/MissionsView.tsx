@@ -405,6 +405,10 @@ export function MissionsView() {
           setRestartMode("failed_only");
           setRestartDialogOpen(true);
           break;
+        case "view_report":
+          // FM-12: 跳到 ReportView，store 内部会切 activeView 并设 missionId
+          useUiStore.getState().openMissionReport(id);
+          break;
       }
     },
     [handleExportMission, updateMissionStatus, setError],

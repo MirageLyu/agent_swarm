@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { Button } from "../ui";
 import { commands } from "../../ipc/commands";
+import { useUiStore } from "../../stores/ui-store";
 import type { MissionDeliveredPayload } from "../../ipc/events";
 import styles from "./MissionDeliveryPanel.module.css";
 
@@ -21,6 +22,7 @@ interface MissionDeliveryPanelProps {
  */
 export function MissionDeliveryPanel({ payload }: MissionDeliveryPanelProps) {
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const openMissionReport = useUiStore((s) => s.openMissionReport);
 
   const handleOpen = useCallback(
     async (action: "editor" | "terminal" | "finder") => {
@@ -96,6 +98,14 @@ export function MissionDeliveryPanel({ payload }: MissionDeliveryPanelProps) {
           disabled={busyKey !== null}
         >
           {busyKey === "finder" ? "Opening\u2026" : "Reveal in Finder"}
+        </Button>
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={() => openMissionReport(payload.missionId)}
+          title="Open the full mission report"
+        >
+          View Full Report
         </Button>
       </div>
 

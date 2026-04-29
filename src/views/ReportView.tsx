@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { save } from "@tauri-apps/plugin-dialog";
 import { useUiStore } from "../stores/ui-store";
 import { useReportStore } from "../stores/report-store";
+import { commands } from "../ipc/commands";
 import { Button } from "../components/ui";
 import {
   ExecSummarySection,
@@ -10,6 +12,7 @@ import {
   CostBreakdownSection,
   KnownLimitationsSection,
   LearningFlywheelSection,
+  ContractCompareOverlay,
 } from "../components/report";
 import styles from "./ReportView.module.css";
 
@@ -98,9 +101,13 @@ export function ReportView() {
     ];
   }, [view]);
 
-  // ── Scrollspy + 节折叠
+  // ── Scrollspy + 节折叠 + Contract 对照 + 导出
   const [activeSection, setActiveSection] = useState<string>("exec-summary");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [showContract, setShowContract] = useState<boolean>(false);
+  const [exporting, setExporting] = useState<boolean>(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportNotice, setExportNotice] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const toggleCollapse = useCallback((id: string) => {
@@ -117,6 +124,36 @@ export function ReportView() {
     if (!el) return;
     el.scrollIntoView({ behavior: "smooth", block: "start" });
   }, []);
+
+  const handleExport = useCallback(async () => {
+    if (!missionId || !view) return;
+    setExportError(null);
+    setExportNotice(null);
+    try {
+      const defaultName = `mission-report-${view.report.mission.title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .slice(0, 40)
+        .replace(/(^-|-$)/g, "") || "untitled"}.md`;
+      const chosen = await save({
+        defaultPath: defaultName,
+        filters: [{ name: "Markdown", extensions: ["md"] }],
+      });
+      if (!chosen) return; // 用户取消
+      setExporting(true);
+      const res = await commands.exportReportMarkdown({
+        mission_id: missionId,
+        output_path: chosen,
+      });
+      setExportNotice(`Saved ${formatBytes(res.bytes_written)} to ${res.output_path}`);
+      // 5s 后自动收起
+      setTimeout(() => setExportNotice(null), 5000);
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setExporting(false);
+    }
+  }, [missionId, view]);
 
   // IntersectionObserver 实现 scrollspy。
   // root 必须是滚动容器（.content），不能是默认 viewport，否则永远 false。
@@ -228,6 +265,8 @@ export function ReportView() {
 
   // ── 正常渲染报告
   const r = view.report;
+  const hasContract = r.contract !== null;
+
   return (
     <div className={styles.container}>
       <Header
@@ -236,6 +275,25 @@ export function ReportView() {
         onClose={handleClose}
         right={
           <>
+            {hasContract && (
+              <Button
+                variant={showContract ? "primary" : "ghost"}
+                size="sm"
+                onClick={() => setShowContract((v) => !v)}
+                title="Toggle contract compare panel"
+              >
+                {showContract ? "Hide Contract" : "Compare Contract"}
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => void handleExport()}
+              disabled={exporting}
+              title="Export report as Markdown"
+            >
+              {exporting ? "Exporting…" : "Export Markdown"}
+            </Button>
             <Button
               variant="ghost"
               size="sm"
@@ -249,7 +307,27 @@ export function ReportView() {
         }
       />
 
-      <div className={styles.body}>
+      {(exportError || exportNotice) && (
+        <div className={exportError ? styles.exportBannerError : styles.exportBannerOk}>
+          <span>{exportError ?? exportNotice}</span>
+          <button
+            type="button"
+            className={styles.bannerClose}
+            onClick={() => {
+              setExportError(null);
+              setExportNotice(null);
+            }}
+          >
+            ×
+          </button>
+        </div>
+      )}
+
+      <div
+        className={`${styles.body} ${
+          showContract && hasContract ? styles.bodyWithCompare : ""
+        }`}
+      >
         <aside className={styles.toc}>
           <ul className={styles.tocList}>
             {sections.map((s) => (
@@ -364,9 +442,22 @@ export function ReportView() {
             </SectionWrapper>
           </div>
         </div>
+
+        {showContract && hasContract && (
+          <ContractCompareOverlay
+            contract={r.contract}
+            onClose={() => setShowContract(false)}
+          />
+        )}
       </div>
     </div>
   );
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function Header(props: {
