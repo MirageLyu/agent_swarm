@@ -165,6 +165,9 @@ pub fn run() {
             commands::resolve_all_approvals,
             commands::get_approval_policy,
             commands::update_approval_policy,
+            // FM-12: Mission Report
+            commands::generate_mission_report,
+            commands::get_mission_report,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

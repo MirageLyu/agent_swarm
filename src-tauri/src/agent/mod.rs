@@ -14,6 +14,7 @@ pub mod planner_fetch;
 pub mod planner_state;
 pub mod planner_tools;
 mod registry;
+pub mod report_generator;
 pub mod roles;
 pub mod scheduler;
 mod types;
