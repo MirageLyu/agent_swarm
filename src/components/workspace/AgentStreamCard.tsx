@@ -1,4 +1,5 @@
 import { memo } from "react";
+import { useTranslation } from "react-i18next";
 import { Badge } from "../ui/Badge";
 import type { Agent } from "../../stores/agent-store";
 import styles from "./AgentStreamCard.module.css";
@@ -43,6 +44,7 @@ export const AgentStreamCard = memo(function AgentStreamCard({
   isActive,
   onClick,
 }: AgentStreamCardProps) {
+  const { t } = useTranslation("workspace");
   const latestEvent = getLatestEvent(agent);
   const isWarning = agent.costUsd >= COST_WARNING_THRESHOLD;
 
@@ -64,18 +66,18 @@ export const AgentStreamCard = memo(function AgentStreamCard({
 
       <div className={styles.metrics}>
         <div className={styles.metric}>
-          <span className={styles.metricLabel}>Step</span>
+          <span className={styles.metricLabel}>{t("card.step")}</span>
           <span className={styles.metricValue}>
             {agent.currentStep}
             {agent.totalSteps != null ? `/${agent.totalSteps}` : ""}
           </span>
         </div>
         <div className={styles.metric}>
-          <span className={styles.metricLabel}>Tokens</span>
+          <span className={styles.metricLabel}>{t("card.tokens")}</span>
           <span className={styles.metricValue}>{formatTokens(agent.tokensUsed)}</span>
         </div>
         <div className={`${styles.metric} ${isWarning ? styles.metricWarning : ""}`}>
-          <span className={styles.metricLabel}>Cost</span>
+          <span className={styles.metricLabel}>{t("card.cost")}</span>
           <span className={styles.metricValue}>{formatCost(agent.costUsd)}</span>
         </div>
       </div>

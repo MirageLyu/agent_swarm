@@ -1,5 +1,7 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import { commands } from "../ipc/commands";
+import { formatBackendError } from "../i18n/format-error";
 import type {
   ContractInfo,
   ContractItemInfo,
@@ -18,6 +20,8 @@ import { PlannerLoopPanel } from "../components/mission";
 import styles from "./PreflightView.module.css";
 
 export function PreflightView() {
+  const { t } = useTranslation("preflight");
+  const { t: tc } = useTranslation("common");
   const missionId = useUiStore((s) => s.activePreflightMissionId);
   const sessionId = useUiStore((s) => s.activePreflightSessionId);
   const setActivePreflight = useUiStore((s) => s.setActivePreflight);
@@ -151,24 +155,30 @@ export function PreflightView() {
           mode,
         })
         .catch((e) => {
-          setError(String(e));
+          setError(formatBackendError(e));
           setStreaming(false);
         });
     },
     [sessionId, missionId, mode],
   );
 
-  const MODE_LABELS: Record<PreflightMode, string> = {
-    scenario_walk: "场景走查",
-    devils_advocate: "魔鬼代言人",
-    risk_highlighter: "风险标记",
-  };
+  const MODE_LABELS = useMemo<Record<PreflightMode, string>>(
+    () => ({
+      scenario_walk: t("modeLabel.scenario_walk"),
+      devils_advocate: t("modeLabel.devils_advocate"),
+      risk_highlighter: t("modeLabel.risk_highlighter"),
+    }),
+    [t],
+  );
 
-  const MODE_OPENERS: Record<PreflightMode, string> = {
-    scenario_walk: "请以场景走查模式继续审视之前的需求讨论，从下一个关键决策点开始提问。",
-    devils_advocate: "请以魔鬼代言人的角度重新审视当前需求，找出最关键的一个漏洞或隐含假设。",
-    risk_highlighter: "请以风险分析师的角度审视当前需求，找出最高影响的一个技术或安全风险。",
-  };
+  const MODE_OPENERS = useMemo<Record<PreflightMode, string>>(
+    () => ({
+      scenario_walk: t("modeOpener.scenario_walk"),
+      devils_advocate: t("modeOpener.devils_advocate"),
+      risk_highlighter: t("modeOpener.risk_highlighter"),
+    }),
+    [t],
+  );
 
   const handleModeChange = useCallback((newMode: PreflightMode) => {
     if (newMode === mode || !sessionId || !missionId) return;
@@ -178,7 +188,7 @@ export function PreflightView() {
     // Insert visual divider as a system message
     const dividerMsg: PreflightMessageInfo = {
       role: "assistant",
-      content: `── 切换到「${MODE_LABELS[newMode]}」模式 ──`,
+      content: t("modeSwitchedDivider", { mode: MODE_LABELS[newMode] }),
       choices: [],
     };
     setMessages((prev) => [...prev, dividerMsg]);
@@ -194,10 +204,10 @@ export function PreflightView() {
         mode: newMode,
       })
       .catch((e) => {
-        setError(String(e));
+        setError(formatBackendError(e));
         setStreaming(false);
       });
-  }, [mode, sessionId, missionId]);
+  }, [mode, sessionId, missionId, MODE_LABELS, MODE_OPENERS, t]);
 
   const handleChoiceSelect = useCallback(
     (choice: PreflightChoice) => {
@@ -272,7 +282,7 @@ export function PreflightView() {
       setActivePreflight(null, null);
       setActiveView("missions");
     } catch (e) {
-      setError(String(e));
+      setError(formatBackendError(e));
     } finally {
       setSigning(false);
     }
@@ -282,7 +292,7 @@ export function PreflightView() {
     return (
       <div className={styles.container}>
         <div className={styles.errorBanner}>
-          No active pre-flight session. Please start one from the Missions view.
+          {t("noActiveSession")}
         </div>
       </div>
     );
@@ -293,7 +303,7 @@ export function PreflightView() {
       {error && (
         <div className={styles.errorBanner}>
           <span>{error}</span>
-          <button className={styles.errorClose} onClick={() => setError(null)} title="关闭">×</button>
+          <button className={styles.errorClose} onClick={() => setError(null)} title={tc("close")}>×</button>
         </div>
       )}
       <div className={styles.main}>
@@ -318,7 +328,7 @@ export function PreflightView() {
         />
       </div>
       {signing && (
-        <PlannerLoopPanel label="Pre-flight planner" isLive />
+        <PlannerLoopPanel label={t("plannerLabel")} isLive />
       )}
       <PreflightStatusBar
         convergenceScore={convergenceScore}

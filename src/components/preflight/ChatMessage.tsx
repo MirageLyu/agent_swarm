@@ -1,4 +1,5 @@
 import Markdown from "react-markdown";
+import { useTranslation } from "react-i18next";
 import type { PreflightMode } from "../../ipc/commands";
 import styles from "./ChatMessage.module.css";
 
@@ -8,12 +9,6 @@ interface ChatMessageProps {
   mode?: PreflightMode;
 }
 
-const MODE_LABEL: Record<string, string> = {
-  scenario_walk: "场景走查",
-  devils_advocate: "魔鬼代言人",
-  risk_highlighter: "风险标记",
-};
-
 const MODE_STYLE: Record<string, string> = {
   scenario_walk: styles.modeScenario,
   devils_advocate: styles.modeDevil,
@@ -21,6 +16,7 @@ const MODE_STYLE: Record<string, string> = {
 };
 
 export function ChatMessage({ role, content, mode }: ChatMessageProps) {
+  const { t } = useTranslation("preflight");
   const isUser = role === "user";
   const modeClass = !isUser && mode ? (MODE_STYLE[mode] ?? "") : "";
   const className = `${styles.message} ${isUser ? styles.user : styles.agent} ${modeClass}`;
@@ -28,9 +24,9 @@ export function ChatMessage({ role, content, mode }: ChatMessageProps) {
   return (
     <div className={className}>
       <div className={styles.label}>
-        {isUser ? "你" : "Swarm Agent"}
+        {isUser ? t("userLabel") : t("agentLabel")}
         {!isUser && mode && mode !== "scenario_walk" && (
-          <span className={styles.modeBadge}>{MODE_LABEL[mode]}</span>
+          <span className={styles.modeBadge}>{t(`modeLabel.${mode}`)}</span>
         )}
       </div>
       <div className={styles.bubble}>

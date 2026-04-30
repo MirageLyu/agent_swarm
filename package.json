@@ -9,6 +9,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "bundle": "pnpm tauri build && mkdir -p pkg && cp -f src-tauri/target/release/bundle/dmg/*.dmg pkg/ && ls -lh pkg/",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\"",

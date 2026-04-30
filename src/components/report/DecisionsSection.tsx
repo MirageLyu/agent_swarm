@@ -1,6 +1,8 @@
 import { useCallback, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { commands, type DecisionVoteView, type MissionReportDecision } from "../../ipc/commands";
 import { useReportStore } from "../../stores/report-store";
+import { formatBackendError } from "../../i18n";
 import styles from "./DecisionsSection.module.css";
 
 interface Props {
@@ -51,6 +53,7 @@ interface CardProps {
 }
 
 function DecisionCard({ reportId, missionId, decision, currentVote, onVoted }: CardProps) {
+  const { t } = useTranslation("report");
   const [submitting, setSubmitting] = useState<"agree" | "disagree" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -66,7 +69,7 @@ function DecisionCard({ reportId, missionId, decision, currentVote, onVoted }: C
         });
         onVoted(missionId, decision.id, vote);
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(formatBackendError(err));
       } finally {
         setSubmitting(null);
       }
@@ -82,18 +85,18 @@ function DecisionCard({ reportId, missionId, decision, currentVote, onVoted }: C
       </header>
 
       <p className={styles.field}>
-        <span className={styles.fieldLabel}>Rationale</span>
+        <span className={styles.fieldLabel}>{t("decisionRationale")}</span>
         <span className={styles.fieldValue}>{decision.rationale}</span>
       </p>
       {decision.trade_off && (
         <p className={styles.field}>
-          <span className={styles.fieldLabel}>Trade-off</span>
+          <span className={styles.fieldLabel}>{t("decisionTradeOff")}</span>
           <span className={styles.fieldValue}>{decision.trade_off}</span>
         </p>
       )}
       {decision.risk && (
         <p className={styles.field}>
-          <span className={styles.fieldLabel}>Risk</span>
+          <span className={styles.fieldLabel}>{t("decisionRisk")}</span>
           <span className={styles.fieldValue}>{decision.risk}</span>
         </p>
       )}
@@ -105,7 +108,7 @@ function DecisionCard({ reportId, missionId, decision, currentVote, onVoted }: C
           submitting={submitting === "agree"}
           onClick={() => void handleVote("agree")}
         >
-          Agree
+          {t("decisionsAgree")}
         </VoteButton>
         <VoteButton
           tone="disagree"
@@ -113,7 +116,7 @@ function DecisionCard({ reportId, missionId, decision, currentVote, onVoted }: C
           submitting={submitting === "disagree"}
           onClick={() => void handleVote("disagree")}
         >
-          Disagree
+          {t("decisionsDisagree")}
         </VoteButton>
         {error && <span className={styles.voteError}>{error}</span>}
       </footer>

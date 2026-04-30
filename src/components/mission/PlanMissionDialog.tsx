@@ -81,7 +81,7 @@ export function PlanMissionDialog({
     } catch (e) {
       console.warn("repo folder pick cancelled or failed:", e);
     }
-  }, []);
+  }, [t]);
 
   const handleContinue = useCallback(async () => {
     if (!canSubmitSetup) return;

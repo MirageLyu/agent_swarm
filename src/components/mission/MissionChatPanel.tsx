@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { commands, type ChatMessageInfo, type ChatTurnSummary } from "../../ipc/commands";
+import { formatBackendError } from "../../i18n/format-error";
 import {
   onChatStream,
   onFollowupProposed,
@@ -20,6 +22,7 @@ interface MissionChatPanelProps {
 type PendingProposal = FollowupProposedPayload;
 
 export function MissionChatPanel({ missionId, enabled, onFollowupCreated }: MissionChatPanelProps) {
+  const { t } = useTranslation("mission");
   const [history, setHistory] = useState<ChatMessageInfo[]>([]);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
@@ -40,7 +43,7 @@ export function MissionChatPanel({ missionId, enabled, onFollowupCreated }: Miss
         if (!cancelled) setHistory(rows);
       })
       .catch((err) => {
-        if (!cancelled) setError(String(err));
+        if (!cancelled) setError(formatBackendError(err));
       });
     return () => {
       cancelled = true;
@@ -102,7 +105,7 @@ export function MissionChatPanel({ missionId, enabled, onFollowupCreated }: Miss
         return next;
       });
     } catch (err) {
-      setError(String(err));
+      setError(formatBackendError(err));
     }
   }, [missionId]);
 
@@ -124,15 +127,15 @@ export function MissionChatPanel({ missionId, enabled, onFollowupCreated }: Miss
         if (overrideDirect ?? forceDirect) setForceDirect(false);
         await refreshHistory();
         if (summary.status === "rejected_oversize") {
-          setError(summary.error ?? "Change exceeded chat hard limit.");
+          setError(summary.error ?? t("chat.errorOversize"));
         }
       } catch (err) {
-        setError(String(err));
+        setError(formatBackendError(err));
       } finally {
         setBusy(false);
       }
     },
-    [draft, forceDirect, missionId, refreshHistory],
+    [draft, forceDirect, missionId, refreshHistory, t],
   );
 
   const handleConfirmProposal = useCallback(
@@ -148,7 +151,7 @@ export function MissionChatPanel({ missionId, enabled, onFollowupCreated }: Miss
         await refreshHistory();
         onFollowupCreated?.(resp.child_mission_id);
       } catch (err) {
-        setError(String(err));
+        setError(formatBackendError(err));
       } finally {
         setBusy(false);
       }
@@ -164,7 +167,7 @@ export function MissionChatPanel({ missionId, enabled, onFollowupCreated }: Miss
       setForceDirect(true);
       await refreshHistory();
     } catch (err) {
-      setError(String(err));
+      setError(formatBackendError(err));
     } finally {
       setBusy(false);
     }
@@ -189,7 +192,7 @@ export function MissionChatPanel({ missionId, enabled, onFollowupCreated }: Miss
   if (!enabled) {
     return (
       <div className={styles.disabled}>
-        Chat will become available once the mission has produced output.
+        {t("chat.disabled")}
       </div>
     );
   }
@@ -197,17 +200,16 @@ export function MissionChatPanel({ missionId, enabled, onFollowupCreated }: Miss
   return (
     <div className={styles.container}>
       <div className={styles.header}>
-        <span className={styles.title}>Follow-up Chat</span>
+        <span className={styles.title}>{t("chat.title")}</span>
         {forceDirect ? (
-          <span className={styles.badge}>direct mode</span>
+          <span className={styles.badge}>{t("chat.directMode")}</span>
         ) : null}
       </div>
 
       <div className={styles.thread} ref={scrollRef}>
         {renderedMessages.length === 0 && !activeStream ? (
           <div className={styles.empty}>
-            Ask the agent to refine, fix, or extend the mission output. Small tweaks happen in
-            place; large requests will surface a confirmation to spin off a new follow-up mission.
+            {t("chat.empty")}
           </div>
         ) : null}
 
@@ -223,7 +225,7 @@ export function MissionChatPanel({ missionId, enabled, onFollowupCreated }: Miss
             }`}
           >
             <div className={styles.bubbleMeta}>
-              <span className={styles.role}>{msg.role}</span>
+              <span className={styles.role}>{t(`chat.rolePill.${msg.role}`, { defaultValue: msg.role })}</span>
               <span className={styles.timestamp}>{formatTs(msg.created_at)}</span>
             </div>
             <pre className={styles.content}>{msg.displayText}</pre>
@@ -242,8 +244,8 @@ export function MissionChatPanel({ missionId, enabled, onFollowupCreated }: Miss
         {activeStream ? (
           <div className={`${styles.bubble} ${styles.bubbleAssistant} ${styles.streaming}`}>
             <div className={styles.bubbleMeta}>
-              <span className={styles.role}>assistant</span>
-              <span className={styles.timestamp}>streaming…</span>
+              <span className={styles.role}>{t("chat.rolePill.assistant")}</span>
+              <span className={styles.timestamp}>{t("chat.streaming")}</span>
             </div>
             <pre className={styles.content}>{activeStream}</pre>
           </div>
@@ -253,16 +255,16 @@ export function MissionChatPanel({ missionId, enabled, onFollowupCreated }: Miss
       {pendingProposal ? (
         <div className={styles.proposalCard}>
           <div className={styles.proposalTitle}>
-            Escalate to a follow-up mission?
+            {t("chat.proposalTitle")}
           </div>
           <div className={styles.proposalLine}>
-            <strong>Title:</strong> {pendingProposal.title}
+            <strong>{t("chat.proposalLabel.title")}:</strong> {pendingProposal.title}
           </div>
           <div className={styles.proposalLine}>
-            <strong>Why:</strong> {pendingProposal.rationale}
+            <strong>{t("chat.proposalLabel.why")}:</strong> {pendingProposal.rationale}
           </div>
           <div className={styles.proposalLine}>
-            <strong>Estimated tasks:</strong> {pendingProposal.estimatedTasks}
+            <strong>{t("chat.proposalLabel.estimatedTasks")}:</strong> {pendingProposal.estimatedTasks}
           </div>
           <div className={styles.proposalActions}>
             <Button
@@ -271,7 +273,7 @@ export function MissionChatPanel({ missionId, enabled, onFollowupCreated }: Miss
               onClick={() => handleConfirmProposal(pendingProposal)}
               disabled={busy}
             >
-              Yes, plan it as a new mission
+              {t("chat.proposalAccept")}
             </Button>
             <Button
               variant="secondary"
@@ -279,7 +281,7 @@ export function MissionChatPanel({ missionId, enabled, onFollowupCreated }: Miss
               onClick={handleRejectProposal}
               disabled={busy}
             >
-              No, just do it directly
+              {t("chat.proposalReject")}
             </Button>
           </div>
         </div>
@@ -294,10 +296,10 @@ export function MissionChatPanel({ missionId, enabled, onFollowupCreated }: Miss
           onChange={(e) => setDraft(e.target.value)}
           placeholder={
             pendingProposal
-              ? "Resolve the proposal above first…"
+              ? t("chat.placeholder.pendingProposal")
               : forceDirect
-                ? "Force-direct mode. Describe the small change…"
-                : "Ask for a small fix, or describe a large request — the agent will decide."
+                ? t("chat.placeholder.forceDirect")
+                : t("chat.placeholder.default")
           }
           rows={3}
           disabled={busy || pendingProposal !== null}
@@ -309,14 +311,14 @@ export function MissionChatPanel({ missionId, enabled, onFollowupCreated }: Miss
           }}
         />
         <div className={styles.composerActions}>
-          <span className={styles.hint}>⌘/Ctrl + Enter to send</span>
+          <span className={styles.hint}>{t("chat.hintShortcut")}</span>
           <Button
             variant="primary"
             size="sm"
             onClick={() => handleSend()}
             disabled={busy || draft.trim().length === 0 || pendingProposal !== null}
           >
-            {busy ? "Sending…" : "Send"}
+            {busy ? t("chat.sending") : t("chat.send")}
           </Button>
         </div>
       </div>

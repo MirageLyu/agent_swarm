@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import type { ConversationPhase } from "../../ipc/commands";
 import styles from "./PreflightStatusBar.module.css";
 
@@ -7,14 +8,11 @@ interface PreflightStatusBarProps {
   messageCount: number;
 }
 
-const PHASE_CONFIG: Record<
-  ConversationPhase,
-  { label: string; color: string }
-> = {
-  exploring: { label: "探索", color: "#007AFF" },
-  narrowing: { label: "收窄", color: "#AF52DE" },
-  confirming: { label: "确认", color: "#34C759" },
-  ready_to_sign: { label: "就绪", color: "#FF9500" },
+const PHASE_COLOR: Record<ConversationPhase, string> = {
+  exploring: "#007AFF",
+  narrowing: "#AF52DE",
+  confirming: "#34C759",
+  ready_to_sign: "#FF9500",
 };
 
 export function PreflightStatusBar({
@@ -22,35 +20,36 @@ export function PreflightStatusBar({
   phase,
   messageCount,
 }: PreflightStatusBarProps) {
+  const { t } = useTranslation("preflight");
   const percent = Math.round(convergenceScore * 100);
-  const config = PHASE_CONFIG[phase] ?? PHASE_CONFIG.exploring;
+  const color = PHASE_COLOR[phase] ?? PHASE_COLOR.exploring;
   const isReady = phase === "ready_to_sign";
 
   const hint = isReady
-    ? "澄清完成，可签署 Contract"
+    ? t("statusBar.hintReady")
     : percent >= 60
-      ? "即将完成，再确认几个关键点"
+      ? t("statusBar.hintAlmost")
       : messageCount === 0
-        ? "与 AI 多轮对话，逐步澄清需求边界"
-        : "5 分钟澄清 → 节省 ~$50 错误方向成本";
+        ? t("statusBar.hintEmpty")
+        : t("statusBar.hintGeneric");
 
   return (
     <div className={styles.bar}>
       <div className={styles.statusItem}>
         <div
           className={`${styles.statusDot} ${isReady ? styles.statusDotComplete : ""}`}
-          style={{ background: config.color }}
+          style={{ background: color }}
         />
-        <span>{isReady ? "Pre-flight 就绪" : "Pre-flight 进行中"}</span>
+        <span>{isReady ? t("statusBar.ready") : t("statusBar.inProgress")}</span>
       </div>
-      <div className={styles.phaseLabel} style={{ color: config.color }}>
-        {config.label}
+      <div className={styles.phaseLabel} style={{ color }}>
+        {t(`statusBar.phase.${phase}`)}
       </div>
       <div className={styles.progress}>
         <div className={styles.progressBg}>
           <div
             className={styles.progressFill}
-            style={{ width: `${percent}%`, background: config.color }}
+            style={{ width: `${percent}%`, background: color }}
           />
         </div>
         <span>{percent}%</span>

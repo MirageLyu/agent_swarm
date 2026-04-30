@@ -8,6 +8,7 @@
  * 内部订阅 `onPlannerStep` 并按 step_no 增量追加。
  */
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { onPlannerStep, type PlannerStepPayload } from "../../ipc/events";
 import { commands, type PlannerStepRow } from "../../ipc/commands";
 
@@ -70,8 +71,10 @@ const KIND_BADGE: Record<string, { bg: string; fg: string; label: string }> = {
 export function PlannerLoopPanel({
   sessionId,
   isLive = true,
-  label = "Planner Agent Loop",
+  label,
 }: PlannerLoopPanelProps) {
+  const { t } = useTranslation("mission");
+  const resolvedLabel = label ?? t("planner.label");
   const [steps, setSteps] = useState<DisplayStep[]>([]);
   const [discoveredSessionId, setDiscoveredSessionId] = useState<string | null>(
     sessionId ?? null,
@@ -147,16 +150,16 @@ export function PlannerLoopPanel({
       ref={containerRef}
     >
       <div style={{ fontWeight: 600, marginBottom: 8, color: "var(--color-text-muted)" }}>
-        {label}
+        {resolvedLabel}
         {discoveredSessionId
-          ? ` · session ${discoveredSessionId.slice(0, 8)}…`
-          : " · waiting for session"}
+          ? ` · ${t("planner.session", { id: discoveredSessionId.slice(0, 8) })}`
+          : ` · ${t("planner.waitingSession")}`}
         {" · "}
-        {steps.length} step(s)
+        {t("planner.stepCount", { count: steps.length })}
       </div>
       {steps.length === 0 && (
         <div style={{ color: "var(--color-text-muted)", fontStyle: "italic" }}>
-          waiting for planner steps…
+          {t("planner.waitingSteps")}
         </div>
       )}
       {steps.map((s) => {
@@ -195,7 +198,7 @@ export function PlannerLoopPanel({
                   fontSize: 11,
                 }}
               >
-                args: {s.tool_args}
+                {t("planner.argsPrefix")}: {s.tool_args}
               </pre>
             )}
             {s.tool_result && (
@@ -221,7 +224,7 @@ export function PlannerLoopPanel({
               </div>
             )}
             {s.error && (
-              <div style={{ marginTop: 4, color: "#b91c1c" }}>error: {s.error}</div>
+              <div style={{ marginTop: 4, color: "#b91c1c" }}>{t("planner.errorPrefix")}: {s.error}</div>
             )}
           </div>
         );

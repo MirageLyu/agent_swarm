@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import type { ContractItemInfo, ContractSection as SectionType } from "../../ipc/commands";
 import styles from "./ContractSection.module.css";
 
@@ -9,41 +10,19 @@ interface ContractSectionProps {
   readOnly?: boolean;
 }
 
-const SECTION_CONFIG: Record<SectionType, {
+interface SectionConfig {
   label: string;
   icon: string;
   dotClass: string;
   iconClass: string;
   emptyText: string;
-}> = {
-  scope: {
-    label: "用户明确要求的",
-    icon: "✓",
-    dotClass: styles.dotScope,
-    iconClass: styles.iconScope,
-    emptyText: "等待对话确认…",
-  },
-  constraints: {
-    label: "Agent 自主决策",
-    icon: "◆",
-    dotClass: styles.dotConstraints,
-    iconClass: styles.iconConstraints,
-    emptyText: "当你选择「你决定」时填充",
-  },
-  exclusions: {
-    label: "明确不做的",
-    icon: "✕",
-    dotClass: styles.dotExclusions,
-    iconClass: styles.iconExclusions,
-    emptyText: "排除范围待确认…",
-  },
-  assumptions: {
-    label: "已确认的环境前提",
-    icon: "○",
-    dotClass: styles.dotAssumptions,
-    iconClass: styles.iconAssumptions,
-    emptyText: "环境信息待确认…",
-  },
+}
+
+const SECTION_VISUAL: Record<SectionType, { icon: string; dotClass: string; iconClass: string }> = {
+  scope: { icon: "✓", dotClass: styles.dotScope, iconClass: styles.iconScope },
+  constraints: { icon: "◆", dotClass: styles.dotConstraints, iconClass: styles.iconConstraints },
+  exclusions: { icon: "✕", dotClass: styles.dotExclusions, iconClass: styles.iconExclusions },
+  assumptions: { icon: "○", dotClass: styles.dotAssumptions, iconClass: styles.iconAssumptions },
 };
 
 function ItemWithNew({
@@ -54,11 +33,12 @@ function ItemWithNew({
   isNew,
 }: {
   item: ContractItemInfo;
-  config: typeof SECTION_CONFIG.scope;
+  config: SectionConfig;
   onRemove: (id: string) => void;
   readOnly?: boolean;
   isNew: boolean;
 }) {
+  const { t } = useTranslation("preflight");
   const [showTag, setShowTag] = useState(isNew);
 
   useEffect(() => {
@@ -73,7 +53,7 @@ function ItemWithNew({
       <span className={styles.itemText}>{item.text}</span>
       {showTag && <span className={styles.itemTag}>NEW</span>}
       {!readOnly && (
-        <button className={styles.removeBtn} onClick={() => onRemove(item.id)} title="移除">
+        <button className={styles.removeBtn} onClick={() => onRemove(item.id)} title={t("remove")}>
           ×
         </button>
       )}
@@ -82,7 +62,16 @@ function ItemWithNew({
 }
 
 export function ContractSection({ section, items, onRemove, readOnly }: ContractSectionProps) {
-  const config = SECTION_CONFIG[section];
+  const { t } = useTranslation("preflight");
+  const visual = SECTION_VISUAL[section];
+  const config = useMemo<SectionConfig>(
+    () => ({
+      ...visual,
+      label: t(`section.${section}Label`),
+      emptyText: t(`section.${section}Empty`),
+    }),
+    [t, section, visual],
+  );
   const prevCountRef = useRef(items.length);
   const [newItemIds, setNewItemIds] = useState<Set<string>>(new Set());
 
@@ -160,7 +149,7 @@ export function ContractSection({ section, items, onRemove, readOnly }: Contract
         <>
           {hiddenAbove > 0 && (
             <div className={`${styles.moreIndicator} ${styles.moreAbove}`}>
-              ↑ {hiddenAbove} more {hiddenAbove === 1 ? "item" : "items"}
+              {t("moreItems", { count: hiddenAbove })}
             </div>
           )}
 
@@ -179,7 +168,7 @@ export function ContractSection({ section, items, onRemove, readOnly }: Contract
 
           {hiddenBelow > 0 && (
             <div className={`${styles.moreIndicator} ${styles.moreBelow}`}>
-              ↓ {hiddenBelow} more {hiddenBelow === 1 ? "item" : "items"}
+              {t("moreItemsBelow", { count: hiddenBelow })}
             </div>
           )}
         </>

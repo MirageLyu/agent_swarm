@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import { Badge } from "../ui/Badge";
 import { InterventionPanel } from "./InterventionPanel";
 import type { Agent, AgentEvent } from "../../stores/agent-store";
@@ -67,6 +68,7 @@ export const AgentTimeline = memo(function AgentTimeline({
   agent,
   onBack,
 }: AgentTimelineProps) {
+  const { t } = useTranslation("workspace");
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -79,7 +81,7 @@ export const AgentTimeline = memo(function AgentTimeline({
     <div className={styles.container}>
       <div className={styles.header}>
         <button className={styles.backButton} onClick={onBack} type="button">
-          ← Back
+          ← {t("timeline.back")}
         </button>
         <div className={styles.agentMeta}>
           <span className={styles.statusDot} data-status={agent.status} />
@@ -99,8 +101,8 @@ export const AgentTimeline = memo(function AgentTimeline({
           </Badge>
         </div>
         <div className={styles.agentStats}>
-          <span className={styles.stat}>Step {agent.currentStep}</span>
-          <span className={styles.stat}>{agent.tokensUsed.toLocaleString()} tokens</span>
+          <span className={styles.stat}>{t("timeline.stat.step", { n: agent.currentStep })}</span>
+          <span className={styles.stat}>{t("timeline.stat.tokens", { count: agent.tokensUsed })}</span>
           <span className={styles.stat}>${agent.costUsd.toFixed(4)}</span>
         </div>
       </div>
@@ -118,7 +120,7 @@ export const AgentTimeline = memo(function AgentTimeline({
         )}
 
         {agent.events.length === 0 && !agent.streamBuffer && (
-          <div className={styles.empty}>No events yet</div>
+          <div className={styles.empty}>{t("timeline.noEvents")}</div>
         )}
       </div>
 

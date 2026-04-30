@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import type { MissionReportLearningFlywheel } from "../../ipc/commands";
 import styles from "./LearningFlywheelSection.module.css";
 
@@ -11,6 +12,7 @@ interface Props {
  * MVP 阶段单 mission 无积累，主要展示 insight 文字。FM-13 完成后会拓展。
  */
 export function LearningFlywheelSection({ data }: Props) {
+  const { t } = useTranslation("report");
   return (
     <div className={styles.container}>
       <div className={styles.insight}>
@@ -22,7 +24,7 @@ export function LearningFlywheelSection({ data }: Props) {
 
       {data.past_decision_patterns.length > 0 && (
         <div className={styles.patterns}>
-          <h4 className={styles.patternsTitle}>Past Decision Patterns</h4>
+          <h4 className={styles.patternsTitle}>{t("learningPatternsTitle")}</h4>
           <ul className={styles.patternsList}>
             {data.past_decision_patterns.map((p, i) => (
               <li key={i}>{p}</li>

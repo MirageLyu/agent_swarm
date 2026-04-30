@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import type { TaskInfo, TaskStatus } from "../../ipc/commands";
 import styles from "./DagSummaryBar.module.css";
 
@@ -17,6 +18,7 @@ const STATUS_CLASS: Record<string, string> = {
 };
 
 export function DagSummaryBar({ tasks }: DagSummaryBarProps) {
+  const { t } = useTranslation("mission");
   if (tasks.length === 0) return null;
 
   const counts: Record<string, number> = {};
@@ -31,13 +33,13 @@ export function DagSummaryBar({ tasks }: DagSummaryBarProps) {
 
   return (
     <div className={styles.bar}>
-      <span>{tasks.length} tasks:</span>
+      <span>{t("dagSummary.tasksLabel", { count: tasks.length })}</span>
       <div className={styles.stats}>
         {parts.map((p, i) => (
           <span key={p.status}>
             {i > 0 && <span className={styles.separator}> · </span>}
             <span className={STATUS_CLASS[p.status]}>
-              {p.count} {p.status}
+              {p.count} {t(`dagSummary.status.${p.status}`, { defaultValue: p.status })}
             </span>
           </span>
         ))}

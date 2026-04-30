@@ -241,7 +241,132 @@
     "followupReject": "拒绝",
     "apiKeyBannerTitle": "请先配置 LLM 供应商。",
     "apiKeyBannerBody": "你需要一个 Anthropic 密钥或任意 OpenAI 兼容端点，才能规划与执行任务。",
-    "apiKeyBannerCta": "打开设置"
+    "apiKeyBannerCta": "打开设置",
+    "chat": {
+      "disabled": "Chat 将在任务产出输出后开放。",
+      "title": "后续 Chat",
+      "directMode": "直通模式",
+      "empty": "请 Agent 修订、修复或扩展任务输出。小修小补会就地完成；较大的请求会弹出确认，派生一个新的后续任务。",
+      "streaming": "生成中…",
+      "rolePill": {
+        "user": "用户",
+        "assistant": "Agent",
+        "system": "系统"
+      },
+      "proposalTitle": "升级为新的后续任务？",
+      "proposalLabel": {
+        "title": "标题",
+        "why": "原因",
+        "estimatedTasks": "预估任务数"
+      },
+      "proposalAccept": "好，作为新任务规划",
+      "proposalReject": "不，直接完成",
+      "placeholder": {
+        "pendingProposal": "请先处理上方的提案…",
+        "forceDirect": "直通模式。请描述要做的小改动…",
+        "default": "提出一个小修复，或描述一个较大请求 — Agent 会自动判断。"
+      },
+      "hintShortcut": "⌘/Ctrl + Enter 发送",
+      "send": "发送",
+      "sending": "发送中…",
+      "errorOversize": "改动超过 Chat 硬上限。"
+    },
+    "dag": {
+      "noTasks": "暂无任务",
+      "addTask": "+ 添加任务",
+      "autoLayout": "自动布局"
+    },
+    "taskNode": {
+      "edit": "编辑",
+      "delete": "删除",
+      "noDescription": "暂无描述",
+      "expected": "预期产出：",
+      "produces": "产出：",
+      "consumes": "消费：",
+      "skills": "技能：",
+      "status": "状态：",
+      "lastError": "上次错误："
+    },
+    "plannerStream": {
+      "thinking": "思考中…",
+      "planningComplete": "规划完成",
+      "error": "错误",
+      "cancelled": "已取消",
+      "tokensSuffix": "tokens",
+      "secondsSuffix": "秒",
+      "slowWarning": "连接可能较慢…"
+    },
+    "planInput": {
+      "placeholder": "描述你的任务……（例如：构建一个包含登录、注册和密码重置的用户认证系统）",
+      "planning": "规划中…",
+      "planMission": "规划任务"
+    },
+    "dagSummary": {
+      "tasksLabel_one": "{{count}} 个任务：",
+      "tasksLabel_other": "{{count}} 个任务：",
+      "status": {
+        "completed": "已完成",
+        "running": "运行中",
+        "pending": "等待",
+        "ready": "就绪",
+        "failed": "失败",
+        "cancelled": "已取消"
+      }
+    },
+    "taskDetail": {
+      "emptyHint": "点击节点查看详情",
+      "focusTitle": "在 DAG 中定位",
+      "failureCause": "失败原因",
+      "complexity": "复杂度",
+      "agent": "Agent",
+      "upstream": "上游",
+      "downstream": "下游",
+      "status": {
+        "completed": "已完成",
+        "running": "运行中",
+        "pending": "等待中",
+        "ready": "就绪",
+        "failed": "失败",
+        "cancelled": "已取消"
+      }
+    },
+    "taskDialog": {
+      "editTitle": "编辑任务",
+      "addTitle": "添加任务",
+      "fieldTitle": "标题",
+      "fieldDescription": "描述",
+      "fieldComplexity": "复杂度",
+      "complexityHint": "仅供展示，不影响调度与执行流程。",
+      "dependsOn": "依赖",
+      "save": "保存",
+      "add": "添加",
+      "complexity": {
+        "low": "低",
+        "medium": "中",
+        "high": "高"
+      }
+    },
+    "startDialog": {
+      "title": "启动任务",
+      "subtitle": "为 Agent 执行选择一个工作区目录。如果目录不是 Git 仓库，会自动初始化。",
+      "workspacePath": "工作区路径",
+      "browse": "浏览",
+      "browseDialogTitle": "选择工作区目录",
+      "hint": "如果目录不存在会自动创建；非 Git 目录会自动 git init。",
+      "starting": "启动中…",
+      "start": "启动"
+    },
+    "planner": {
+      "label": "Planner Agent Loop",
+      "live": "实时",
+      "session": "会话 {{id}}…",
+      "waitingSession": "等待会话",
+      "stepCount_one": "{{count}} 步",
+      "stepCount_other": "{{count}} 步",
+      "waitingSteps": "等待 Planner 步骤…",
+      "errorPrefix": "错误",
+      "argsPrefix": "参数"
+    }
   },
   "workspace": {
     "title": "工作区",
@@ -265,6 +390,66 @@
       "grid": "网格",
       "list": "列表",
       "focus": "聚焦"
+    },
+    "filterAllAgents": "全部 Agent",
+    "agentCount_one": "{{count}} 个 Agent",
+    "agentCount_other": "{{count}} 个 Agent",
+    "loadHistory": "加载历史",
+    "back": "返回",
+    "emptyForMission": "此任务暂无 Agent。启动任务后即可在此看到活动。",
+    "emptyAll": "当前没有 Agent 在运行。启动一个任务后即可在此看到活动。",
+    "streamList": {
+      "emptyForMission": "此任务尚无 Agent。"
+    },
+    "card": {
+      "step": "步骤",
+      "tokens": "Tokens",
+      "cost": "费用"
+    },
+    "terminal": {
+      "waitingForOutput": "等待输出…",
+      "noEventsYet": "尚无事件"
+    },
+    "noteBar": {
+      "broadcastPlaceholder": "向所有运行中的 Agent 广播便签…（⌘↵）",
+      "noRunningAgents": "当前没有运行中的 Agent",
+      "broadcast": "广播",
+      "sending": "发送中…",
+      "sentSummary_one": "已发送给 {{count}} 个 Agent",
+      "sentSummary_other": "已发送给 {{count}} 个 Agent"
+    },
+    "costBar": {
+      "agents": "Agent 数",
+      "input": "输入",
+      "output": "输出",
+      "totalCost": "总费用"
+    },
+    "paneMenu": {
+      "actionsTitle": "操作",
+      "sendNote": "发送便签",
+      "pause": "暂停",
+      "killRestart": "终止并重启",
+      "confirmKill": "再次点击确认终止",
+      "noteDialogTitle": "向 {{name}} 发送便签",
+      "notePlaceholder": "输入一段提示给 Agent…",
+      "send": "发送"
+    },
+    "intervention": {
+      "notes": "便签",
+      "missionScope": "任务级",
+      "sendPlaceholder": "向 Agent 发送便签…（⌘↵）",
+      "agentNotRunning": "Agent 未在运行",
+      "send": "发送",
+      "sending": "发送中…"
+    },
+    "timeline": {
+      "back": "返回",
+      "step": "第 {{n}} 步",
+      "stat": {
+        "step": "第 {{n}} 步",
+        "tokens": "{{count}} tokens"
+      },
+      "noEvents": "尚无事件"
     }
   },
   "report": {
@@ -292,18 +477,27 @@
     "metricTotalTasks": "任务",
     "metricTotalCost": "成本",
     "metricDuration": "耗时",
-    "metricQuality": "平均评分",
+    "metricQuality": "质量",
+    "metricAutoFixes": "自动修复",
+    "metricReductionRate": "削减率",
+    "branchOn": "于 {{branch}}",
     "execSummaryFallback": "（LLM 摘要不可用 — 显示模板摘要）",
     "decisionsHeading": "架构决策",
     "decisionsAgree": "同意",
     "decisionsDisagree": "不同意",
     "decisionsAgreed": "{{count}} 同意",
     "decisionsDisagreed": "{{count}} 不同意",
+    "decisionRationale": "理由",
+    "decisionTradeOff": "权衡",
+    "decisionRisk": "风险",
     "evaluatorHeading": "Evaluator 审查",
     "evaluatorRound": "第 {{n}} 轮",
     "evaluatorScore": "评分：{{score}}",
     "evaluatorIssues": "{{count}} 个问题",
     "evaluatorAutoFixed": "{{count}} 个已自动修复",
+    "evaluatorStatReviews": "审查轮数",
+    "evaluatorStatTotalIssues": "总问题数",
+    "evaluatorStatAutoFixed": "自动修复",
     "taskMatrixHeading": "任务矩阵",
     "taskMatrixCol": {
       "task": "任务",
@@ -314,25 +508,35 @@
       "status": "状态"
     },
     "costHeading": "成本明细",
-    "costTotal": "总成本",
+    "costTotal": "总计",
     "costInput": "输入 Tokens",
     "costOutput": "输出 Tokens",
-    "costBudgetUsage": "预算使用率",
+    "costBudgetUsage": "预算",
     "costByModel": "按模型",
     "costByTask": "按任务",
+    "costInShort": "输入",
+    "costOutShort": "输出",
+    "costNoneRecorded": "暂无成本记录。",
+    "costNoTasks": "暂无任务记录。",
     "limitationsHeading": "已知限制",
     "noLimitations": "未检测到限制。",
     "learningHeading": "Learning Flywheel",
     "learningInsight": "洞察",
+    "learningPatternsTitle": "历史决策模式",
     "learningPatternsTbd": "完成更多任务后将积累出决策模式。",
     "contractCompare": {
-      "title": "合同对比",
+      "title": "合同",
+      "noContractBody": "此任务未经过 Pre-flight，没有可对照的已签合同。",
+      "budget": "预算 ${{amount}}",
+      "quality": "质量 ≥{{score}}",
+      "maxHours": "时长 ≤{{hours}}小时",
       "scope": "范围",
       "constraints": "约束",
       "exclusions": "排除",
       "assumptions": "假设",
       "achieved": "已达成",
-      "notAchieved": "未达成"
+      "notAchieved": "未达成",
+      "closeBtnTitle": "关闭合同面板"
     }
   },
   "approval": {
@@ -421,7 +625,76 @@
     "assumptionsHeader": "假设",
     "addItemPlaceholder": "添加一项…",
     "progressLabel": "{{percent}}% 可签",
-    "decisionLogHeader": "决策日志"
+    "decisionLogHeader": "决策日志",
+    "noActiveSession": "当前没有进行中的预演会话。请前往「任务」视图发起一次。",
+    "plannerLabel": "Pre-flight 规划器",
+    "modeLabel": {
+      "scenario_walk": "场景走查",
+      "devils_advocate": "魔鬼代言人",
+      "risk_highlighter": "风险标记"
+    },
+    "modeOpener": {
+      "scenario_walk": "请以场景走查模式继续审视之前的需求讨论，从下一个关键决策点开始提问。",
+      "devils_advocate": "请以魔鬼代言人的角度重新审视当前需求，找出最关键的一个漏洞或隐含假设。",
+      "risk_highlighter": "请以风险分析师的角度审视当前需求，找出最高影响的一个技术或安全风险。"
+    },
+    "modeSwitchedDivider": "── 切换到「{{mode}}」模式 ──",
+    "modeSwitchLabel": "澄清模式",
+    "thinking": "思考中…",
+    "inputPlaceholder": "输入回复，或点击选项…",
+    "sendBtnTitle": "发送",
+    "agentLabel": "Swarm Agent",
+    "userLabel": "你",
+    "missionContract": "任务合同",
+    "contractReadOnly": "已签署 — 只读",
+    "contractLive": "实时构建中 — 随对话更新",
+    "signContractCta": "签署合同并启动 Swarm",
+    "remove": "移除",
+    "section": {
+      "scopeLabel": "用户明确要求的",
+      "scopeEmpty": "等待对话确认…",
+      "constraintsLabel": "Agent 自主决策",
+      "constraintsEmpty": "当你选择「你决定」时填充",
+      "exclusionsLabel": "明确不做的",
+      "exclusionsEmpty": "排除范围待确认…",
+      "assumptionsLabel": "已确认的环境前提",
+      "assumptionsEmpty": "环境信息待确认…"
+    },
+    "moreItems_one": "↑ 还有 {{count}} 项",
+    "moreItems_other": "↑ 还有 {{count}} 项",
+    "moreItemsBelow_one": "↓ 还有 {{count}} 项",
+    "moreItemsBelow_other": "↓ 还有 {{count}} 项",
+    "config": {
+      "budget": "预算上限",
+      "quality": "质量门槛",
+      "maxDuration": "最大时长",
+      "hours": "小时"
+    },
+    "statusBar": {
+      "ready": "Pre-flight 就绪",
+      "inProgress": "Pre-flight 进行中",
+      "phase": {
+        "exploring": "探索",
+        "narrowing": "收窄",
+        "confirming": "确认",
+        "ready_to_sign": "就绪"
+      },
+      "hintReady": "澄清完成，可签署 Contract",
+      "hintAlmost": "即将完成，再确认几个关键点",
+      "hintEmpty": "与 AI 多轮对话，逐步澄清需求边界",
+      "hintGeneric": "5 分钟澄清 → 节省 ~$50 错误方向成本"
+    },
+    "decisionTimeline": {
+      "title": "决策时间线",
+      "empty": "尚无决策记录",
+      "type": {
+        "confirmed": "确认",
+        "rejected": "否决",
+        "revised": "修订",
+        "inferred": "推断",
+        "skipped": "跳过"
+      }
+    }
   },
   "errors": {
     "generic": "出错了：{{detail}}",

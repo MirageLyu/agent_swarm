@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { commands } from "../../ipc";
 import type { Agent } from "../../stores/agent-store";
@@ -9,6 +10,8 @@ interface AgentPaneMenuProps {
 }
 
 export function AgentPaneMenu({ agent }: AgentPaneMenuProps) {
+  const { t } = useTranslation("workspace");
+  const { t: tc } = useTranslation("common");
   const [noteOpen, setNoteOpen] = useState(false);
   const [noteText, setNoteText] = useState("");
   const [confirmKill, setConfirmKill] = useState(false);
@@ -41,7 +44,7 @@ export function AgentPaneMenu({ agent }: AgentPaneMenuProps) {
     <>
       <DropdownMenu.Root onOpenChange={() => setConfirmKill(false)}>
         <DropdownMenu.Trigger asChild>
-          <button className={styles.trigger} type="button" title="Actions">⋮</button>
+          <button className={styles.trigger} type="button" title={t("paneMenu.actionsTitle")}>⋮</button>
         </DropdownMenu.Trigger>
         <DropdownMenu.Portal>
           <DropdownMenu.Content className={styles.content} sideOffset={4} align="end">
@@ -49,14 +52,14 @@ export function AgentPaneMenu({ agent }: AgentPaneMenuProps) {
               className={styles.item}
               onSelect={() => setNoteOpen(true)}
             >
-              Send Note
+              {t("paneMenu.sendNote")}
             </DropdownMenu.Item>
             <DropdownMenu.Item
               className={styles.item}
               disabled={!isRunning}
               onSelect={handlePause}
             >
-              Pause
+              {t("paneMenu.pause")}
             </DropdownMenu.Item>
             <DropdownMenu.Separator className={styles.separator} />
             <DropdownMenu.Item
@@ -64,7 +67,7 @@ export function AgentPaneMenu({ agent }: AgentPaneMenuProps) {
               disabled={!isRunning}
               onSelect={handleKill}
             >
-              {confirmKill ? "Confirm Kill" : "Kill + Restart"}
+              {confirmKill ? t("paneMenu.confirmKill") : t("paneMenu.killRestart")}
             </DropdownMenu.Item>
           </DropdownMenu.Content>
         </DropdownMenu.Portal>
@@ -73,12 +76,14 @@ export function AgentPaneMenu({ agent }: AgentPaneMenuProps) {
       {noteOpen && (
         <div className={styles.noteOverlay} onClick={() => setNoteOpen(false)}>
           <div className={styles.noteDialog} onClick={(e) => e.stopPropagation()}>
-            <div className={styles.noteTitle}>Send Note to {agent.name}</div>
+            <div className={styles.noteTitle}>
+              {t("paneMenu.noteDialogTitle", { name: agent.name })}
+            </div>
             <textarea
               className={styles.noteInput}
               value={noteText}
               onChange={(e) => setNoteText(e.target.value)}
-              placeholder="Type a breadcrumb note…"
+              placeholder={t("paneMenu.notePlaceholder")}
               rows={3}
               autoFocus
               onKeyDown={(e) => {
@@ -87,10 +92,10 @@ export function AgentPaneMenu({ agent }: AgentPaneMenuProps) {
             />
             <div className={styles.noteActions}>
               <button className={styles.noteCancel} onClick={() => setNoteOpen(false)} type="button">
-                Cancel
+                {tc("cancel")}
               </button>
               <button className={styles.noteSend} onClick={handleSendNote} type="button">
-                Send
+                {t("paneMenu.send")}
               </button>
             </div>
           </div>

@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import type { Agent, AgentEvent } from "../../stores/agent-store";
 import styles from "./AgentTerminalPane.module.css";
 
@@ -49,6 +50,7 @@ export const AgentTerminalPane = memo(function AgentTerminalPane({
   menuSlot,
   compact,
 }: AgentTerminalPaneProps) {
+  const { t } = useTranslation("workspace");
   const scrollRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
 
@@ -102,7 +104,7 @@ export const AgentTerminalPane = memo(function AgentTerminalPane({
       >
         {trimmedEvents.length === 0 && !agent.streamBuffer && !agent.shellBuffer ? (
           <div className={styles.empty}>
-            {isRunning ? "Waiting for output…" : "No events yet"}
+            {isRunning ? t("terminal.waitingForOutput") : t("terminal.noEventsYet")}
           </div>
         ) : (
           <>

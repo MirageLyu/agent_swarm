@@ -1,4 +1,5 @@
 import { useRef, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import styles from "./PlannerStreamPanel.module.css";
 
 export interface PlannerStreamState {
@@ -22,6 +23,7 @@ export function PlannerStreamPanel({
   onToggleCollapse,
   fullHeight,
 }: PlannerStreamPanelProps) {
+  const { t } = useTranslation("mission");
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -43,19 +45,19 @@ export function PlannerStreamPanel({
           )}
           <span className={styles.label}>
             {state.status === "streaming"
-              ? "Thinking…"
+              ? t("plannerStream.thinking")
               : state.status === "done"
-                ? "Planning complete"
+                ? t("plannerStream.planningComplete")
                 : state.status === "error"
-                  ? "Error"
-                  : "Cancelled"}
+                  ? t("plannerStream.error")
+                  : t("plannerStream.cancelled")}
           </span>
         </span>
         <span className={styles.stats}>
           {state.tokenCount > 0 && (
-            <span className={styles.stat}>{state.tokenCount} tokens</span>
+            <span className={styles.stat}>{state.tokenCount} {t("plannerStream.tokensSuffix")}</span>
           )}
-          <span className={styles.stat}>{elapsed}s</span>
+          <span className={styles.stat}>{elapsed}{t("plannerStream.secondsSuffix")}</span>
           <span className={styles.chevron}>
             {state.collapsed ? "▸" : "▾"}
           </span>
@@ -71,7 +73,7 @@ export function PlannerStreamPanel({
             {state.text || (state.errorMessage ?? "")}
           </pre>
           {state.status === "streaming" && state.elapsedMs > 30000 && !state.text && (
-            <p className={styles.slowWarning}>Connection may be slow…</p>
+            <p className={styles.slowWarning}>{t("plannerStream.slowWarning")}</p>
           )}
         </div>
       )}

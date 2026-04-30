@@ -52,6 +52,7 @@ You stay in the loop at the **decisions** that matter (signing the Contract, app
 | FM-13 Harness Dashboard | ✅ | Lightweight version: cost trend + anomaly detection. Full dashboard (gantt, live polling, ring progress) post-MVP |
 | FM-14 Approval Queue | ✅ | Tool/budget/escalation/fetch/chat-commit approval queue with policy config |
 | FM-15 Worktree v2.2 | ✅ | Frontier merge + 3-layer conflict resolver + delivery panel |
+| i18n | ✅ | Hot-swappable English / 简体中文 across all views; structured backend `IpcError` codes |
 
 **MVP target audience**: open beta. **Current gap**: see [docs/requirements/00-module-overview.md](docs/requirements/00-module-overview.md).
 
@@ -200,6 +201,40 @@ miragenty/
 │  └─ dts/                    Defect tracking sheets
 └─ design/prototypes/         HTML mockups that informed the UI
 ```
+
+### Internationalisation
+
+Miragenty ships with **English** and **Simplified Chinese**, hot-swappable from
+**Settings → Language**. The system is built on `react-i18next` and follows a
+small set of conventions that contributors should respect:
+
+- **Single source of truth**: the user's language preference lives in the
+  backend (`AppConfig.language`, persisted to `config.json`). The frontend
+  reads it on startup and writes it back on every switch — `localStorage` is
+  intentionally not used to avoid split-brain state between processes.
+- **Namespace by user contact surface**, not by code module
+  (`common` / `nav` / `settings` / `mission` / `workspace` / `report` /
+  `approval` / `insights` / `preflight` / `errors`). Avoid nesting deeper
+  than three levels — if you need more, you usually picked the wrong
+  namespace.
+- **Add a string** by editing both `src/i18n/locales/en-US.json` and
+  `src/i18n/locales/zh-CN.json` (English is the fallback, so add it first),
+  then call `t('key')` from a `useTranslation('namespace')` hook. Use
+  `_one` / `_other` suffixes for pluralisation, and the `<Trans>` component
+  when a translated string contains React elements (e.g. `<strong>`).
+- **Add a language** by appending the BCP 47 tag to the
+  `SUPPORTED` whitelist in `src-tauri/src/commands/config.rs`, copying
+  `en-US.json` to `src/i18n/locales/<tag>.json` and translating in place,
+  and registering it in `src/i18n/index.ts` (`SUPPORTED_LANGUAGES` +
+  `resources`).
+- **Backend errors** are returned as structured JSON `IpcError` envelopes
+  (`{ code, params, detail }`). The frontend's `formatBackendError` helper
+  looks up the `code` in the `errors` namespace and falls back to the raw
+  string for legacy errors. Prefer adding a new code over hand-formatting an
+  English error string in the backend.
+
+The full design rationale lives in the JSDoc at the top of
+[`src/i18n/index.ts`](src/i18n/index.ts).
 
 ### Commit convention
 

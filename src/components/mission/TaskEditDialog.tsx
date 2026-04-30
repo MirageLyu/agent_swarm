@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import * as Dialog from "@radix-ui/react-dialog";
 import type { TaskInfo, Complexity, DependencyInfo } from "../../ipc/commands";
 import { Button } from "../ui";
@@ -21,6 +22,8 @@ export function TaskEditDialog({
   allTasks = [],
   dependencies = [],
 }: TaskEditDialogProps) {
+  const { t } = useTranslation("mission");
+  const { t: tc } = useTranslation("common");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [selectedDeps, setSelectedDeps] = useState<Set<string>>(new Set());
@@ -58,9 +61,9 @@ export function TaskEditDialog({
       <Dialog.Portal>
         <Dialog.Overlay className={styles.overlay} />
         <Dialog.Content className={styles.content}>
-          <Dialog.Title className={styles.title}>Edit Task</Dialog.Title>
+          <Dialog.Title className={styles.title}>{t("taskDialog.editTitle")}</Dialog.Title>
           <div className={styles.field}>
-            <label className={styles.label}>Title</label>
+            <label className={styles.label}>{t("taskDialog.fieldTitle")}</label>
             <input
               className={styles.input}
               value={title}
@@ -69,7 +72,7 @@ export function TaskEditDialog({
             />
           </div>
           <div className={styles.field}>
-            <label className={styles.label}>Description</label>
+            <label className={styles.label}>{t("taskDialog.fieldDescription")}</label>
             <textarea
               className={styles.textarea}
               value={description}
@@ -79,16 +82,16 @@ export function TaskEditDialog({
           </div>
           {otherTasks.length > 0 && (
             <div className={styles.field}>
-              <label className={styles.label}>Depends on</label>
+              <label className={styles.label}>{t("taskDialog.dependsOn")}</label>
               <div className={styles.depList}>
-                {otherTasks.map((t) => (
-                  <label key={t.id} className={styles.depItem}>
+                {otherTasks.map((task) => (
+                  <label key={task.id} className={styles.depItem}>
                     <input
                       type="checkbox"
-                      checked={selectedDeps.has(t.id)}
-                      onChange={() => toggleDep(t.id)}
+                      checked={selectedDeps.has(task.id)}
+                      onChange={() => toggleDep(task.id)}
                     />
-                    <span>{t.title}</span>
+                    <span>{task.title}</span>
                   </label>
                 ))}
               </div>
@@ -96,7 +99,7 @@ export function TaskEditDialog({
           )}
           <div className={styles.actions}>
             <Button variant="ghost" size="sm" onClick={onClose}>
-              Cancel
+              {tc("cancel")}
             </Button>
             <Button
               variant="primary"
@@ -104,7 +107,7 @@ export function TaskEditDialog({
               onClick={handleSave}
               disabled={!title.trim()}
             >
-              Save
+              {t("taskDialog.save")}
             </Button>
           </div>
         </Dialog.Content>
@@ -128,6 +131,8 @@ export function AddTaskDialog({
   onAdd,
   existingTasks,
 }: AddTaskDialogProps) {
+  const { t } = useTranslation("mission");
+  const { t: tc } = useTranslation("common");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [complexity, setComplexity] = useState<Complexity>("medium");
@@ -162,9 +167,9 @@ export function AddTaskDialog({
       <Dialog.Portal>
         <Dialog.Overlay className={styles.overlay} />
         <Dialog.Content className={styles.content}>
-          <Dialog.Title className={styles.title}>Add Task</Dialog.Title>
+          <Dialog.Title className={styles.title}>{t("taskDialog.addTitle")}</Dialog.Title>
           <div className={styles.field}>
-            <label className={styles.label}>Title</label>
+            <label className={styles.label}>{t("taskDialog.fieldTitle")}</label>
             <input
               className={styles.input}
               value={title}
@@ -173,7 +178,7 @@ export function AddTaskDialog({
             />
           </div>
           <div className={styles.field}>
-            <label className={styles.label}>Description</label>
+            <label className={styles.label}>{t("taskDialog.fieldDescription")}</label>
             <textarea
               className={styles.textarea}
               value={description}
@@ -183,10 +188,10 @@ export function AddTaskDialog({
           </div>
           <div className={styles.field}>
             <label className={styles.label}>
-              Complexity
+              {t("taskDialog.fieldComplexity")}
               <span className={styles.hintWrap}>
                 <span className={styles.hint}>?</span>
-                <span className={styles.hintTip}>仅供展示，不影响调度与执行流程</span>
+                <span className={styles.hintTip}>{t("taskDialog.complexityHint")}</span>
               </span>
             </label>
             <div className={styles.complexityGroup}>
@@ -198,23 +203,23 @@ export function AddTaskDialog({
                   onClick={() => setComplexity(c)}
                   type="button"
                 >
-                  {c}
+                  {t(`taskDialog.complexity.${c}`)}
                 </button>
               ))}
             </div>
           </div>
           {existingTasks.length > 0 && (
             <div className={styles.field}>
-              <label className={styles.label}>Depends on</label>
+              <label className={styles.label}>{t("taskDialog.dependsOn")}</label>
               <div className={styles.depList}>
-                {existingTasks.map((t) => (
-                  <label key={t.id} className={styles.depItem}>
+                {existingTasks.map((task) => (
+                  <label key={task.id} className={styles.depItem}>
                     <input
                       type="checkbox"
-                      checked={selectedDeps.has(t.id)}
-                      onChange={() => toggleDep(t.id)}
+                      checked={selectedDeps.has(task.id)}
+                      onChange={() => toggleDep(task.id)}
                     />
-                    <span>{t.title}</span>
+                    <span>{task.title}</span>
                   </label>
                 ))}
               </div>
@@ -222,7 +227,7 @@ export function AddTaskDialog({
           )}
           <div className={styles.actions}>
             <Button variant="ghost" size="sm" onClick={onClose}>
-              Cancel
+              {tc("cancel")}
             </Button>
             <Button
               variant="primary"
@@ -230,7 +235,7 @@ export function AddTaskDialog({
               onClick={handleAdd}
               disabled={!title.trim()}
             >
-              Add
+              {t("taskDialog.add")}
             </Button>
           </div>
         </Dialog.Content>

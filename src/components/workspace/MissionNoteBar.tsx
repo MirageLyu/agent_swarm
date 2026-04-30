@@ -1,6 +1,8 @@
 import { memo, useCallback, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Button } from "../ui/Button";
 import { commands } from "../../ipc";
+import { formatBackendError } from "../../i18n/format-error";
 import styles from "./MissionNoteBar.module.css";
 
 interface MissionNoteBarProps {
@@ -12,6 +14,7 @@ export const MissionNoteBar = memo(function MissionNoteBar({
   missionId,
   hasRunningAgents,
 }: MissionNoteBarProps) {
+  const { t } = useTranslation("workspace");
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
@@ -30,15 +33,15 @@ export const MissionNoteBar = memo(function MissionNoteBar({
         note: text,
       });
       setDraft("");
-      setFeedback(`Sent to ${result.agent_count} agent${result.agent_count !== 1 ? "s" : ""}`);
+      setFeedback(t("noteBar.sentSummary", { count: result.agent_count }));
       inputRef.current?.focus();
       setTimeout(() => setFeedback(null), 3000);
     } catch (e) {
-      setFeedback(String(e));
+      setFeedback(formatBackendError(e));
     } finally {
       setSending(false);
     }
-  }, [draft, missionId]);
+  }, [draft, missionId, t]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -61,8 +64,8 @@ export const MissionNoteBar = memo(function MissionNoteBar({
         onKeyDown={handleKeyDown}
         placeholder={
           hasRunningAgents
-            ? "Broadcast a note to all running agents… (⌘↵)"
-            : "No running agents"
+            ? t("noteBar.broadcastPlaceholder")
+            : t("noteBar.noRunningAgents")
         }
         disabled={!hasRunningAgents || sending}
       />
@@ -72,7 +75,7 @@ export const MissionNoteBar = memo(function MissionNoteBar({
         onClick={handleSend}
         disabled={!hasRunningAgents || sending || !draft.trim()}
       >
-        {sending ? "Sending…" : "Broadcast"}
+        {sending ? t("noteBar.sending") : t("noteBar.broadcast")}
       </Button>
       {feedback && (
         <span className={styles.feedback}>{feedback}</span>

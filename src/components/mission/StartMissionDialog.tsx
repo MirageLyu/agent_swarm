@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback, type WheelEvent } from "react";
+import { useTranslation } from "react-i18next";
 import * as Dialog from "@radix-ui/react-dialog";
 import { open } from "@tauri-apps/plugin-dialog";
 import { commands } from "../../ipc/commands";
+import { formatBackendError } from "../../i18n/format-error";
 import { Button } from "../ui";
 import styles from "./StartMissionDialog.module.css";
 
@@ -18,6 +20,8 @@ export function StartMissionDialog({
   onClose,
   onStart,
 }: StartMissionDialogProps) {
+  const { t } = useTranslation("mission");
+  const { t: tc } = useTranslation("common");
   const [workspacePath, setWorkspacePath] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -36,7 +40,7 @@ export function StartMissionDialog({
   const handleBrowse = async () => {
     const selected = await open({
       directory: true,
-      title: "Select Workspace Directory",
+      title: t("startDialog.browseDialogTitle"),
     });
     if (selected) {
       setWorkspacePath(selected);
@@ -57,7 +61,7 @@ export function StartMissionDialog({
     try {
       onStart(workspacePath.trim());
     } catch (e) {
-      setError(String(e));
+      setError(formatBackendError(e));
       setLoading(false);
     }
   };
@@ -67,13 +71,13 @@ export function StartMissionDialog({
       <Dialog.Portal>
         <Dialog.Overlay className={styles.overlay} />
         <Dialog.Content className={styles.content}>
-          <Dialog.Title className={styles.title}>Start Mission</Dialog.Title>
+          <Dialog.Title className={styles.title}>{t("startDialog.title")}</Dialog.Title>
           <p className={styles.subtitle}>
-            Choose a workspace directory for agent execution. A new Git repo will be initialized automatically if needed.
+            {t("startDialog.subtitle")}
           </p>
 
           <div className={styles.section}>
-            <label className={styles.label}>Workspace Path</label>
+            <label className={styles.label}>{t("startDialog.workspacePath")}</label>
             <div className={styles.pathRow}>
               <input
                 className={styles.pathInput}
@@ -86,11 +90,11 @@ export function StartMissionDialog({
                 placeholder="~/miragenty-workspaces/..."
               />
               <Button variant="secondary" size="sm" onClick={handleBrowse}>
-                Browse
+                {t("startDialog.browse")}
               </Button>
             </div>
             <p className={styles.hint}>
-              Directory will be created automatically. Non-git directories will be initialized with git init.
+              {t("startDialog.hint")}
             </p>
           </div>
 
@@ -98,7 +102,7 @@ export function StartMissionDialog({
 
           <div className={styles.actions}>
             <Button variant="ghost" size="sm" onClick={onClose}>
-              Cancel
+              {tc("cancel")}
             </Button>
             <Button
               variant="primary"
@@ -106,7 +110,7 @@ export function StartMissionDialog({
               onClick={handleStart}
               disabled={!workspacePath.trim() || loading}
             >
-              {loading ? "Starting..." : "Start"}
+              {loading ? t("startDialog.starting") : t("startDialog.start")}
             </Button>
           </div>
         </Dialog.Content>

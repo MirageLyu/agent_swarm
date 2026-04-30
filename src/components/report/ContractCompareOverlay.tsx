@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import type { MissionReportContract } from "../../ipc/commands";
 import styles from "./ContractCompareOverlay.module.css";
 
@@ -14,14 +15,12 @@ interface Props {
  * 未来 FM-11 evaluator 可注入条目级证据。
  */
 export function ContractCompareOverlay({ contract, onClose }: Props) {
+  const { t } = useTranslation("report");
   if (!contract) {
     return (
       <aside className={styles.overlay}>
         <Header onClose={onClose} />
-        <div className={styles.empty}>
-          This mission was created without going through Pre-flight, so there
-          is no signed Contract to compare against.
-        </div>
+        <div className={styles.empty}>{t("contractCompare.noContractBody")}</div>
       </aside>
     );
   }
@@ -42,13 +41,19 @@ export function ContractCompareOverlay({ contract, onClose }: Props) {
       <div className={styles.metaRow}>
         <span className={styles.metaTag}>{contract.status}</span>
         {contract.budget_usd !== null && (
-          <span className={styles.metaItem}>${contract.budget_usd.toFixed(2)} budget</span>
+          <span className={styles.metaItem}>
+            {t("contractCompare.budget", { amount: contract.budget_usd.toFixed(2) })}
+          </span>
         )}
         {contract.quality_threshold !== null && (
-          <span className={styles.metaItem}>≥{contract.quality_threshold.toFixed(1)} quality</span>
+          <span className={styles.metaItem}>
+            {t("contractCompare.quality", { score: contract.quality_threshold.toFixed(1) })}
+          </span>
         )}
         {contract.max_duration_hours !== null && (
-          <span className={styles.metaItem}>≤{contract.max_duration_hours}h</span>
+          <span className={styles.metaItem}>
+            {t("contractCompare.maxHours", { hours: contract.max_duration_hours })}
+          </span>
         )}
       </div>
 
@@ -58,7 +63,7 @@ export function ContractCompareOverlay({ contract, onClose }: Props) {
           if (items.length === 0) return null;
           return (
             <div key={section} className={styles.section}>
-              <h4 className={styles.sectionTitle}>{section}</h4>
+              <h4 className={styles.sectionTitle}>{t(`contractCompare.${section}`)}</h4>
               <ul className={styles.itemList}>
                 {items.map((it, i) => (
                   <li
@@ -83,15 +88,17 @@ export function ContractCompareOverlay({ contract, onClose }: Props) {
 }
 
 function Header({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation("report");
+  const { t: tc } = useTranslation("common");
   return (
     <div className={styles.header}>
-      <h3 className={styles.title}>Contract</h3>
+      <h3 className={styles.title}>{t("contractCompare.title")}</h3>
       <button
         type="button"
         className={styles.closeBtn}
         onClick={onClose}
-        title="Close contract panel"
-        aria-label="Close"
+        title={t("contractCompare.closeBtnTitle")}
+        aria-label={tc("close")}
       >
         ×
       </button>

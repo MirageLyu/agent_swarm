@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import type { MissionReportEvaluatorReview } from "../../ipc/commands";
 import styles from "./EvaluatorReviewSection.module.css";
 
@@ -10,16 +11,14 @@ interface Props {
  * 时间线展示每轮评审：score / issues / auto-fixed + 摘要
  */
 export function EvaluatorReviewSection({ review }: Props) {
+  const { t } = useTranslation("report");
   return (
     <div className={styles.container}>
       <div className={styles.headerStats}>
+        <Stat label={t("evaluatorStatReviews")} value={String(review.rounds.length)} />
+        <Stat label={t("evaluatorStatTotalIssues")} value={String(review.total_issues)} />
         <Stat
-          label="Reviews"
-          value={String(review.rounds.length)}
-        />
-        <Stat label="Total Issues" value={String(review.total_issues)} />
-        <Stat
-          label="Auto-fixed"
+          label={t("evaluatorStatAutoFixed")}
           value={String(review.auto_fixed)}
           tone={review.auto_fixed > 0 ? "ok" : undefined}
         />
@@ -37,10 +36,10 @@ export function EvaluatorReviewSection({ review }: Props) {
                 <span className={styles.agentName}> · {r.agent_name}</span>
               </div>
               <div className={styles.statsLine}>
-                <span>{r.issues} issues</span>
+                <span>{t("evaluatorIssues", { count: r.issues })}</span>
                 {r.auto_fixed > 0 && (
                   <span className={styles.autoFixedTag}>
-                    {r.auto_fixed} auto-fixed
+                    {t("evaluatorAutoFixed", { count: r.auto_fixed })}
                   </span>
                 )}
                 <time className={styles.time}>{r.created_at}</time>

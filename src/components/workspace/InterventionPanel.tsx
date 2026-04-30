@@ -1,7 +1,9 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { commands } from "../../ipc";
+import { formatBackendError } from "../../i18n/format-error";
 import type { AgentNoteRecord, NoteStatus } from "../../ipc/commands";
 import styles from "./InterventionPanel.module.css";
 
@@ -26,6 +28,7 @@ export const InterventionPanel = memo(function InterventionPanel({
   agentId,
   agentStatus,
 }: InterventionPanelProps) {
+  const { t } = useTranslation("workspace");
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -62,7 +65,7 @@ export const InterventionPanel = memo(function InterventionPanel({
       fetchNotes();
       textareaRef.current?.focus();
     } catch (e) {
-      setError(String(e));
+      setError(formatBackendError(e));
     } finally {
       setSending(false);
     }
@@ -82,13 +85,13 @@ export const InterventionPanel = memo(function InterventionPanel({
     <div className={styles.panel}>
       {notes.length > 0 && (
         <>
-          <span className={styles.sectionLabel}>Notes</span>
+          <span className={styles.sectionLabel}>{t("intervention.notes")}</span>
           <div className={styles.noteList}>
             {notes.map((n) => (
               <div key={n.id} className={styles.noteItem}>
                 <Badge variant={STATUS_BADGE[n.status]}>{n.status}</Badge>
                 {n.mission_id && (
-                  <span className={styles.scopeBadge}>mission</span>
+                  <span className={styles.scopeBadge}>{t("intervention.missionScope")}</span>
                 )}
                 <span className={styles.noteContent} title={n.content}>
                   {n.content}
@@ -107,7 +110,7 @@ export const InterventionPanel = memo(function InterventionPanel({
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={isRunning ? "Send a note to the agent… (⌘↵)" : "Agent is not running"}
+          placeholder={isRunning ? t("intervention.sendPlaceholder") : t("intervention.agentNotRunning")}
           disabled={!isRunning || sending}
           rows={1}
         />
@@ -117,7 +120,7 @@ export const InterventionPanel = memo(function InterventionPanel({
           onClick={handleSend}
           disabled={!isRunning || sending || !draft.trim()}
         >
-          {sending ? "Sending…" : "Send"}
+          {sending ? t("intervention.sending") : t("intervention.send")}
         </Button>
       </div>
 

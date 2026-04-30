@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import type { MissionReportMission, MissionReportSummary } from "../../ipc/commands";
 import styles from "./ExecSummarySection.module.css";
 
@@ -11,33 +12,34 @@ interface Props {
  * 顶部 metric 卡片 + LLM/降级摘要文字。
  */
 export function ExecSummarySection({ mission, summary }: Props) {
+  const { t } = useTranslation("report");
   const m = summary.metrics;
 
   const metrics: { label: string; value: string; tone?: "ok" | "warn" | "bad" }[] = [
     {
-      label: "Duration",
+      label: t("metricDuration"),
       value: formatDuration(m.duration_seconds),
     },
     {
-      label: "Cost",
+      label: t("metricTotalCost"),
       value: `$${m.total_cost_usd.toFixed(4)}`,
     },
     {
-      label: "Quality",
+      label: t("metricQuality"),
       value: m.avg_quality_score !== null ? m.avg_quality_score.toFixed(2) : "—",
       tone: scoreTone(m.avg_quality_score),
     },
     {
-      label: "Auto-fixes",
+      label: t("metricAutoFixes"),
       value: String(m.auto_fixes),
     },
     {
-      label: "Tasks",
+      label: t("metricTotalTasks"),
       value: `${m.tasks_completed}/${m.tasks_total}`,
       tone: m.tasks_failed > 0 ? "warn" : undefined,
     },
     {
-      label: "Reduction Rate",
+      label: t("metricReductionRate"),
       value:
         m.review_reduction_rate !== null
           ? `${(m.review_reduction_rate * 100).toFixed(0)}%`
@@ -50,7 +52,7 @@ export function ExecSummarySection({ mission, summary }: Props) {
       <div className={styles.statusRow}>
         <StatusBadge status={mission.status} />
         {mission.main_branch && (
-          <span className={styles.branch}>on {mission.main_branch}</span>
+          <span className={styles.branch}>{t("branchOn", { branch: mission.main_branch })}</span>
         )}
       </div>
 

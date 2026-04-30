@@ -241,7 +241,132 @@
     "followupReject": "Reject",
     "apiKeyBannerTitle": "Set up your LLM provider to start.",
     "apiKeyBannerBody": "You need an Anthropic key or any OpenAI-compatible endpoint to plan and execute missions.",
-    "apiKeyBannerCta": "Open Settings"
+    "apiKeyBannerCta": "Open Settings",
+    "chat": {
+      "disabled": "Chat will become available once the mission has produced output.",
+      "title": "Follow-up Chat",
+      "directMode": "direct mode",
+      "empty": "Ask the agent to refine, fix, or extend the mission output. Small tweaks happen in place; large requests will surface a confirmation to spin off a new follow-up mission.",
+      "streaming": "streaming…",
+      "rolePill": {
+        "user": "user",
+        "assistant": "assistant",
+        "system": "system"
+      },
+      "proposalTitle": "Escalate to a follow-up mission?",
+      "proposalLabel": {
+        "title": "Title",
+        "why": "Why",
+        "estimatedTasks": "Estimated tasks"
+      },
+      "proposalAccept": "Yes, plan it as a new mission",
+      "proposalReject": "No, just do it directly",
+      "placeholder": {
+        "pendingProposal": "Resolve the proposal above first…",
+        "forceDirect": "Force-direct mode. Describe the small change…",
+        "default": "Ask for a small fix, or describe a large request — the agent will decide."
+      },
+      "hintShortcut": "⌘/Ctrl + Enter to send",
+      "send": "Send",
+      "sending": "Sending…",
+      "errorOversize": "Change exceeded chat hard limit."
+    },
+    "dag": {
+      "noTasks": "No tasks yet",
+      "addTask": "+ Add Task",
+      "autoLayout": "Auto Layout"
+    },
+    "taskNode": {
+      "edit": "Edit",
+      "delete": "Delete",
+      "noDescription": "No description",
+      "expected": "Expected:",
+      "produces": "Produces:",
+      "consumes": "Consumes:",
+      "skills": "Skills:",
+      "status": "Status:",
+      "lastError": "Last error:"
+    },
+    "plannerStream": {
+      "thinking": "Thinking…",
+      "planningComplete": "Planning complete",
+      "error": "Error",
+      "cancelled": "Cancelled",
+      "tokensSuffix": "tokens",
+      "secondsSuffix": "s",
+      "slowWarning": "Connection may be slow…"
+    },
+    "planInput": {
+      "placeholder": "Describe your mission... (e.g., Build a user authentication system with login, registration, and password reset)",
+      "planning": "Planning…",
+      "planMission": "Plan Mission"
+    },
+    "dagSummary": {
+      "tasksLabel_one": "{{count}} task:",
+      "tasksLabel_other": "{{count}} tasks:",
+      "status": {
+        "completed": "completed",
+        "running": "running",
+        "pending": "pending",
+        "ready": "ready",
+        "failed": "failed",
+        "cancelled": "cancelled"
+      }
+    },
+    "taskDetail": {
+      "emptyHint": "Click a node to see details",
+      "focusTitle": "Focus in DAG",
+      "failureCause": "Failure Cause",
+      "complexity": "Complexity",
+      "agent": "Agent",
+      "upstream": "Upstream",
+      "downstream": "Downstream",
+      "status": {
+        "completed": "Completed",
+        "running": "Running",
+        "pending": "Pending",
+        "ready": "Ready",
+        "failed": "Failed",
+        "cancelled": "Cancelled"
+      }
+    },
+    "taskDialog": {
+      "editTitle": "Edit Task",
+      "addTitle": "Add Task",
+      "fieldTitle": "Title",
+      "fieldDescription": "Description",
+      "fieldComplexity": "Complexity",
+      "complexityHint": "Display only — does not affect scheduling or execution.",
+      "dependsOn": "Depends on",
+      "save": "Save",
+      "add": "Add",
+      "complexity": {
+        "low": "low",
+        "medium": "medium",
+        "high": "high"
+      }
+    },
+    "startDialog": {
+      "title": "Start Mission",
+      "subtitle": "Choose a workspace directory for agent execution. A new Git repo will be initialized automatically if needed.",
+      "workspacePath": "Workspace Path",
+      "browse": "Browse",
+      "browseDialogTitle": "Select Workspace Directory",
+      "hint": "Directory will be created automatically. Non-git directories will be initialized with git init.",
+      "starting": "Starting...",
+      "start": "Start"
+    },
+    "planner": {
+      "label": "Planner Agent Loop",
+      "live": "live",
+      "session": "session {{id}}…",
+      "waitingSession": "waiting for session",
+      "stepCount_one": "{{count}} step",
+      "stepCount_other": "{{count}} steps",
+      "waitingSteps": "waiting for planner steps…",
+      "errorPrefix": "error",
+      "argsPrefix": "args"
+    }
   },
   "workspace": {
     "title": "Workspace",
@@ -265,6 +390,66 @@
       "grid": "Grid",
       "list": "List",
       "focus": "Focus"
+    },
+    "filterAllAgents": "All Agents",
+    "agentCount_one": "{{count}} agent",
+    "agentCount_other": "{{count}} agents",
+    "loadHistory": "Load History",
+    "back": "Back",
+    "emptyForMission": "No agents for this mission yet. Start the mission to see activity.",
+    "emptyAll": "No agents running. Start a mission to see activity here.",
+    "streamList": {
+      "emptyForMission": "No agents for this mission."
+    },
+    "card": {
+      "step": "Step",
+      "tokens": "Tokens",
+      "cost": "Cost"
+    },
+    "terminal": {
+      "waitingForOutput": "Waiting for output…",
+      "noEventsYet": "No events yet"
+    },
+    "noteBar": {
+      "broadcastPlaceholder": "Broadcast a note to all running agents… (⌘↵)",
+      "noRunningAgents": "No running agents",
+      "broadcast": "Broadcast",
+      "sending": "Sending…",
+      "sentSummary_one": "Sent to {{count}} agent",
+      "sentSummary_other": "Sent to {{count}} agents"
+    },
+    "costBar": {
+      "agents": "Agents",
+      "input": "Input",
+      "output": "Output",
+      "totalCost": "Total Cost"
+    },
+    "paneMenu": {
+      "actionsTitle": "Actions",
+      "sendNote": "Send Note",
+      "pause": "Pause",
+      "killRestart": "Kill + Restart",
+      "confirmKill": "Confirm Kill",
+      "noteDialogTitle": "Send Note to {{name}}",
+      "notePlaceholder": "Type a breadcrumb note…",
+      "send": "Send"
+    },
+    "intervention": {
+      "notes": "Notes",
+      "missionScope": "mission",
+      "sendPlaceholder": "Send a note to the agent… (⌘↵)",
+      "agentNotRunning": "Agent is not running",
+      "send": "Send",
+      "sending": "Sending…"
+    },
+    "timeline": {
+      "back": "Back",
+      "step": "Step {{n}}",
+      "stat": {
+        "step": "Step {{n}}",
+        "tokens": "{{count}} tokens"
+      },
+      "noEvents": "No events yet"
     }
   },
   "report": {
@@ -292,18 +477,27 @@
     "metricTotalTasks": "Tasks",
     "metricTotalCost": "Cost",
     "metricDuration": "Duration",
-    "metricQuality": "Avg Score",
+    "metricQuality": "Quality",
+    "metricAutoFixes": "Auto-fixes",
+    "metricReductionRate": "Reduction Rate",
+    "branchOn": "on {{branch}}",
     "execSummaryFallback": "(LLM summary unavailable — showing template summary)",
     "decisionsHeading": "Architecture Decisions",
     "decisionsAgree": "Agree",
     "decisionsDisagree": "Disagree",
     "decisionsAgreed": "{{count}} agreed",
     "decisionsDisagreed": "{{count}} disagreed",
+    "decisionRationale": "Rationale",
+    "decisionTradeOff": "Trade-off",
+    "decisionRisk": "Risk",
     "evaluatorHeading": "Evaluator Review",
     "evaluatorRound": "Round {{n}}",
     "evaluatorScore": "Score: {{score}}",
     "evaluatorIssues": "{{count}} issues",
     "evaluatorAutoFixed": "{{count}} auto-fixed",
+    "evaluatorStatReviews": "Reviews",
+    "evaluatorStatTotalIssues": "Total Issues",
+    "evaluatorStatAutoFixed": "Auto-fixed",
     "taskMatrixHeading": "Task Matrix",
     "taskMatrixCol": {
       "task": "Task",
@@ -314,25 +508,35 @@
       "status": "Status"
     },
     "costHeading": "Cost Breakdown",
-    "costTotal": "Total Cost",
+    "costTotal": "Total",
     "costInput": "Input Tokens",
     "costOutput": "Output Tokens",
-    "costBudgetUsage": "Budget Usage",
+    "costBudgetUsage": "Budget",
     "costByModel": "By Model",
     "costByTask": "By Task",
+    "costInShort": "in",
+    "costOutShort": "out",
+    "costNoneRecorded": "No cost recorded.",
+    "costNoTasks": "No tasks recorded.",
     "limitationsHeading": "Known Limitations",
     "noLimitations": "No limitations detected.",
     "learningHeading": "Learning Flywheel",
     "learningInsight": "Insight",
+    "learningPatternsTitle": "Past Decision Patterns",
     "learningPatternsTbd": "Decision patterns will accumulate as you complete more missions.",
     "contractCompare": {
-      "title": "Contract Compare",
-      "scope": "Scope",
-      "constraints": "Constraints",
-      "exclusions": "Exclusions",
-      "assumptions": "Assumptions",
+      "title": "Contract",
+      "noContractBody": "This mission was created without going through Pre-flight, so there is no signed Contract to compare against.",
+      "budget": "${{amount}} budget",
+      "quality": "≥{{score}} quality",
+      "maxHours": "≤{{hours}}h",
+      "scope": "scope",
+      "constraints": "constraints",
+      "exclusions": "exclusions",
+      "assumptions": "assumptions",
       "achieved": "Achieved",
-      "notAchieved": "Not achieved"
+      "notAchieved": "Not achieved",
+      "closeBtnTitle": "Close contract panel"
     }
   },
   "approval": {
@@ -421,7 +625,76 @@
     "assumptionsHeader": "Assumptions",
     "addItemPlaceholder": "Add an item…",
     "progressLabel": "{{percent}}% ready to sign",
-    "decisionLogHeader": "Decision Log"
+    "decisionLogHeader": "Decision Log",
+    "noActiveSession": "No active pre-flight session. Please start one from the Missions view.",
+    "plannerLabel": "Pre-flight planner",
+    "modeLabel": {
+      "scenario_walk": "Scenario Walk",
+      "devils_advocate": "Devil's Advocate",
+      "risk_highlighter": "Risk Highlighter"
+    },
+    "modeOpener": {
+      "scenario_walk": "Continue in scenario-walk mode reviewing the previous discussion. Start with the next critical decision point.",
+      "devils_advocate": "As a devil's advocate, point out the single most important blind spot or hidden assumption in the current requirements.",
+      "risk_highlighter": "As a risk analyst, surface the highest-impact technical or security risk in the current requirements."
+    },
+    "modeSwitchedDivider": "── Switched to {{mode}} mode ──",
+    "modeSwitchLabel": "Clarification mode",
+    "thinking": "Thinking…",
+    "inputPlaceholder": "Type a reply, or pick an option…",
+    "sendBtnTitle": "Send",
+    "agentLabel": "Swarm Agent",
+    "userLabel": "You",
+    "missionContract": "Mission Contract",
+    "contractReadOnly": "Signed — read only",
+    "contractLive": "Live build — updates as you talk",
+    "signContractCta": "Sign Contract & Launch Swarm",
+    "remove": "Remove",
+    "section": {
+      "scopeLabel": "What you explicitly asked for",
+      "scopeEmpty": "Waiting for confirmation…",
+      "constraintsLabel": "Agent autonomous decisions",
+      "constraintsEmpty": "Filled when you choose \"You decide\"",
+      "exclusionsLabel": "Explicitly out of scope",
+      "exclusionsEmpty": "Out-of-scope items pending…",
+      "assumptionsLabel": "Confirmed environment assumptions",
+      "assumptionsEmpty": "Environment details pending…"
+    },
+    "moreItems_one": "↑ {{count}} more item",
+    "moreItems_other": "↑ {{count}} more items",
+    "moreItemsBelow_one": "↓ {{count}} more item",
+    "moreItemsBelow_other": "↓ {{count}} more items",
+    "config": {
+      "budget": "Budget cap",
+      "quality": "Quality threshold",
+      "maxDuration": "Max duration",
+      "hours": "hr"
+    },
+    "statusBar": {
+      "ready": "Pre-flight ready",
+      "inProgress": "Pre-flight in progress",
+      "phase": {
+        "exploring": "Exploring",
+        "narrowing": "Narrowing",
+        "confirming": "Confirming",
+        "ready_to_sign": "Ready"
+      },
+      "hintReady": "Clarification complete — ready to sign the Contract",
+      "hintAlmost": "Almost there — confirm a few key points",
+      "hintEmpty": "Have a few rounds with the AI to clarify the requirement scope",
+      "hintGeneric": "5 minutes of clarification → save ~$50 of wrong-direction cost"
+    },
+    "decisionTimeline": {
+      "title": "Decision Timeline",
+      "empty": "No decisions yet",
+      "type": {
+        "confirmed": "Confirmed",
+        "rejected": "Rejected",
+        "revised": "Revised",
+        "inferred": "Inferred",
+        "skipped": "Skipped"
+      }
+    }
   },
   "errors": {
     "generic": "Something went wrong: {{detail}}",

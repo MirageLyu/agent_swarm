@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import styles from "./ContractConfigCards.module.css";
 
 interface ContractConfigCardsProps {
@@ -68,17 +69,18 @@ export function ContractConfigCards({
   onUpdate,
   readOnly,
 }: ContractConfigCardsProps) {
+  const { t } = useTranslation("preflight");
   return (
     <div className={styles.container}>
       <ConfigCard
-        label="预算上限"
+        label={t("config.budget")}
         prefix="$"
         value={budgetUsd}
         onCommit={(v) => onUpdate("budget_usd", v)}
         readOnly={readOnly}
       />
       <ConfigCard
-        label="质量门槛"
+        label={t("config.quality")}
         suffix="/10"
         value={qualityThreshold}
         inputWidth={30}
@@ -86,8 +88,8 @@ export function ContractConfigCards({
         readOnly={readOnly}
       />
       <ConfigCard
-        label="最大时长"
-        suffix="小时"
+        label={t("config.maxDuration")}
+        suffix={t("config.hours")}
         value={maxDurationHours}
         inputWidth={30}
         onCommit={(v) => onUpdate("max_duration_hours", v)}

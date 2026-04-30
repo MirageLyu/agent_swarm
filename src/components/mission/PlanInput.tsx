@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import { Button } from "../ui";
 import styles from "./PlanInput.module.css";
 
@@ -11,6 +12,8 @@ interface PlanInputProps {
 const MAX_CHARS = 2000;
 
 export function PlanInput({ onPlan, onCancel, loading }: PlanInputProps) {
+  const { t } = useTranslation("mission");
+  const { t: tc } = useTranslation("common");
   const [text, setText] = useState("");
 
   const canSubmit = text.trim().length > 0 && !loading;
@@ -38,7 +41,7 @@ export function PlanInput({ onPlan, onCancel, loading }: PlanInputProps) {
         value={text}
         onChange={(e) => setText(e.target.value.slice(0, MAX_CHARS))}
         onKeyDown={handleKeyDown}
-        placeholder="Describe your mission... (e.g., Build a user authentication system with login, registration, and password reset)"
+        placeholder={t("planInput.placeholder")}
         disabled={loading}
         rows={3}
       />
@@ -53,7 +56,7 @@ export function PlanInput({ onPlan, onCancel, loading }: PlanInputProps) {
           </span>
           {loading ? (
             <Button variant="secondary" size="sm" onClick={handleCancel}>
-              Cancel
+              {tc("cancel")}
             </Button>
           ) : null}
           <Button
@@ -62,7 +65,7 @@ export function PlanInput({ onPlan, onCancel, loading }: PlanInputProps) {
             onClick={handleSubmit}
             disabled={!canSubmit}
           >
-            {loading ? "Planning\u2026" : "Plan Mission"}
+            {loading ? t("planInput.planning") : t("planInput.planMission")}
           </Button>
         </div>
       </div>

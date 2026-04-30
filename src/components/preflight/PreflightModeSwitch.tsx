@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import type { PreflightMode } from "../../ipc/commands";
 import styles from "./PreflightModeSwitch.module.css";
 
@@ -6,24 +7,25 @@ interface PreflightModeSwitchProps {
   onModeChange: (mode: PreflightMode) => void;
 }
 
-const MODES: { value: PreflightMode; label: string }[] = [
-  { value: "scenario_walk", label: "场景走查" },
-  { value: "devils_advocate", label: "魔鬼代言人" },
-  { value: "risk_highlighter", label: "风险标记" },
+const MODE_VALUES: PreflightMode[] = [
+  "scenario_walk",
+  "devils_advocate",
+  "risk_highlighter",
 ];
 
 export function PreflightModeSwitch({ mode, onModeChange }: PreflightModeSwitchProps) {
+  const { t } = useTranslation("preflight");
   return (
     <div className={styles.header}>
-      <div className={styles.label}>澄清模式</div>
+      <div className={styles.label}>{t("modeSwitchLabel")}</div>
       <div className={styles.segmented}>
-        {MODES.map((m) => (
+        {MODE_VALUES.map((value) => (
           <button
-            key={m.value}
-            className={`${styles.segBtn} ${mode === m.value ? styles.active : ""}`}
-            onClick={() => onModeChange(m.value)}
+            key={value}
+            className={`${styles.segBtn} ${mode === value ? styles.active : ""}`}
+            onClick={() => onModeChange(value)}
           >
-            {m.label}
+            {t(`modeLabel.${value}`)}
           </button>
         ))}
       </div>

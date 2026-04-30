@@ -360,7 +360,7 @@ export function MissionsView() {
         setError(formatBackendError(e));
       }
     },
-    [missions, setError],
+    [missions, setError, t],
   );
 
   const handleImportMission = useCallback(async () => {
@@ -379,7 +379,7 @@ export function MissionsView() {
     } catch (e) {
       setError(formatBackendError(e));
     }
-  }, [addMission, selectMission, setError]);
+  }, [addMission, selectMission, setError, t]);
 
   // FM-08: Mission action handler
   const handleMissionAction = useCallback(

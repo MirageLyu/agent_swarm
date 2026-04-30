@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Button } from "../components/ui/Button";
 import {
   commands,
@@ -44,6 +45,7 @@ function toAgentStatus(raw: string): AgentStatus {
 type ViewMode = "grid" | "list" | "focus";
 
 export function WorkspaceView() {
+  const { t } = useTranslation("workspace");
   const {
     agents,
     activeAgentId,
@@ -354,11 +356,14 @@ export function WorkspaceView() {
     } catch {}
   }, [filterMissionId, hydrateEvents]);
 
-  const viewModes: { mode: ViewMode; label: string }[] = [
-    { mode: "grid", label: "Grid" },
-    { mode: "list", label: "List" },
-    { mode: "focus", label: "Focus" },
-  ];
+  const viewModes: { mode: ViewMode; label: string }[] = useMemo(
+    () => [
+      { mode: "grid", label: t("viewMode.grid") },
+      { mode: "list", label: t("viewMode.list") },
+      { mode: "focus", label: t("viewMode.focus") },
+    ],
+    [t],
+  );
 
   const [filterOpen, setFilterOpen] = useState(false);
   const filterRef = useRef<HTMLDivElement>(null);
@@ -375,7 +380,7 @@ export function WorkspaceView() {
 
   const selectedMissionLabel = filterMissionId
     ? missions.find((m) => m.id === filterMissionId)?.title ?? "Mission"
-    : "All Agents";
+    : t("filterAllAgents");
 
   return (
     <div className={styles.container}>
@@ -399,7 +404,7 @@ export function WorkspaceView() {
                   onClick={() => { setFilterMissionId(null); setFilterOpen(false); }}
                   type="button"
                 >
-                  All Agents
+                  {t("filterAllAgents")}
                 </button>
                 {missions.map((m) => (
                   <button
@@ -429,14 +434,14 @@ export function WorkspaceView() {
           </div>
 
           <span className={styles.viewLabel}>
-            {filteredAgents.length} agent{filteredAgents.length !== 1 ? "s" : ""}
+            {t("agentCount", { count: filteredAgents.length })}
           </span>
         </div>
 
         <div className={styles.toolbarRight}>
           {filterMissionId && (
             <Button variant="ghost" size="sm" onClick={handleLoadHistory}>
-              Load History
+              {t("loadHistory")}
             </Button>
           )}
         </div>
@@ -461,15 +466,13 @@ export function WorkspaceView() {
       {filteredAgents.length === 0 ? (
         <div className={styles.empty}>
           <p>
-            {filterMissionId
-              ? "No agents for this mission yet. Start the mission to see activity."
-              : "No agents running. Start a mission to see activity here."}
+            {filterMissionId ? t("emptyForMission") : t("emptyAll")}
           </p>
         </div>
       ) : workspaceMode === "focus" && activeAgent ? (
         <div className={styles.focusContainer}>
           <button className={styles.backBtn} onClick={handleBackToGrid}>
-            &larr; Back
+            &larr; {t("back")}
           </button>
           <div className={styles.focusPane}>
             <AgentTerminalPane

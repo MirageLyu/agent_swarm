@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import Markdown from "react-markdown";
+import { useTranslation } from "react-i18next";
 import type { PreflightMode, PreflightChoice, PreflightMessageInfo } from "../../ipc/commands";
 import { PreflightModeSwitch } from "./PreflightModeSwitch";
 import { ChatMessage } from "./ChatMessage";
@@ -29,6 +30,7 @@ export function PreflightChat({
   onModeChange,
   onChoiceSelect,
 }: PreflightChatProps) {
+  const { t } = useTranslation("preflight");
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -58,7 +60,7 @@ export function PreflightChat({
   );
 
   const showTypingIndicator = (streaming && !streamingText) || initialLoading;
-  const typingLabel = statusText || "思考中…";
+  const typingLabel = statusText || t("thinking");
 
   return (
     <div className={styles.panel}>
@@ -104,7 +106,7 @@ export function PreflightChat({
 
         {streaming && streamingText && (
           <div className={styles.streamingText}>
-            <div className={styles.streamingLabel}>Swarm Agent</div>
+            <div className={styles.streamingLabel}>{t("agentLabel")}</div>
             <div className={styles.streamingBubble}>
               <Markdown>{streamingText}</Markdown>
               <span className={styles.streamEllipsis} />
@@ -134,14 +136,14 @@ export function PreflightChat({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="输入回复，或点击选项…"
+            placeholder={t("inputPlaceholder")}
             disabled={streaming}
           />
           <button
             className={styles.sendBtn}
             onClick={handleSend}
             disabled={!input.trim() || streaming}
-            title="发送"
+            title={t("sendBtnTitle")}
           >
             <svg viewBox="0 0 20 20" fill="currentColor">
               <path d="M3.105 2.29a.75.75 0 0 1 .814-.12l13.5 6.5a.75.75 0 0 1 0 1.36l-13.5 6.5a.75.75 0 0 1-1.06-.86L4.87 10.5H10a.5.5 0 0 0 0-1H4.87L2.86 3.17a.75.75 0 0 1 .246-.88Z" />

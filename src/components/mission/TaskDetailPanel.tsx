@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import type { TaskInfo, DependencyInfo } from "../../ipc/commands";
 import styles from "./TaskDetailPanel.module.css";
 
@@ -9,15 +10,6 @@ interface TaskDetailPanelProps {
   onFocusTask?: (taskId: string) => void;
 }
 
-const STATUS_LABELS: Record<string, string> = {
-  completed: "已完成",
-  running: "运行中",
-  pending: "等待中",
-  ready: "就绪",
-  failed: "失败",
-  cancelled: "已取消",
-};
-
 export function TaskDetailPanel({
   task,
   tasks,
@@ -25,6 +17,7 @@ export function TaskDetailPanel({
   onClose,
   onFocusTask,
 }: TaskDetailPanelProps) {
+  const { t } = useTranslation("mission");
   if (!task) {
     return (
       <div className={styles.panel}>
@@ -34,7 +27,7 @@ export function TaskDetailPanel({
             <line x1="10" y1="12" x2="22" y2="12" />
             <line x1="10" y1="17" x2="18" y2="17" />
           </svg>
-          <span className={styles.emptyText}>点击节点查看详情</span>
+          <span className={styles.emptyText}>{t("taskDetail.emptyHint")}</span>
         </div>
       </div>
     );
@@ -61,7 +54,7 @@ export function TaskDetailPanel({
                 className={styles.focusBtn}
                 onClick={() => onFocusTask(task.id)}
                 type="button"
-                title="在 DAG 中定位"
+                title={t("taskDetail.focusTitle")}
               >
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
                   <circle cx="8" cy="8" r="5.5" />
@@ -76,7 +69,7 @@ export function TaskDetailPanel({
           </div>
           <span className={styles.statusBadge} data-status={task.status}>
             <span className={styles.statusDot} />
-            {STATUS_LABELS[task.status] ?? task.status}
+            {t(`taskDetail.status.${task.status}`, { defaultValue: task.status })}
           </span>
         </div>
 
@@ -88,7 +81,7 @@ export function TaskDetailPanel({
 
         {task.last_error && (
           <div className={styles.section}>
-            <div className={styles.sectionTitle}>失败原因</div>
+            <div className={styles.sectionTitle}>{t("taskDetail.failureCause")}</div>
             <pre className={styles.errorBlock}>{task.last_error}</pre>
             {task.last_failed_at && (
               <div className={styles.errorTime}>
@@ -100,12 +93,12 @@ export function TaskDetailPanel({
 
         <div className={styles.section}>
           <div className={styles.detailRow}>
-            <span className={styles.detailLabel}>Complexity</span>
+            <span className={styles.detailLabel}>{t("taskDetail.complexity")}</span>
             <span className={styles.detailValue}>{task.complexity}</span>
           </div>
           {task.assigned_agent_id && (
             <div className={styles.detailRow}>
-              <span className={styles.detailLabel}>Agent</span>
+              <span className={styles.detailLabel}>{t("taskDetail.agent")}</span>
               <span className={styles.detailValue}>{task.assigned_agent_id}</span>
             </div>
           )}
@@ -113,7 +106,7 @@ export function TaskDetailPanel({
 
         {upstream.length > 0 && (
           <div className={styles.section}>
-            <div className={styles.sectionTitle}>上游</div>
+            <div className={styles.sectionTitle}>{t("taskDetail.upstream")}</div>
             <div className={styles.depList}>
               {upstream.map((t) => (
                 <button
@@ -132,7 +125,7 @@ export function TaskDetailPanel({
 
         {downstream.length > 0 && (
           <div className={styles.section}>
-            <div className={styles.sectionTitle}>下游</div>
+            <div className={styles.sectionTitle}>{t("taskDetail.downstream")}</div>
             <div className={styles.depList}>
               {downstream.map((t) => (
                 <button

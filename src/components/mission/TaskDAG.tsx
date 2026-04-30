@@ -1,4 +1,5 @@
 import { useMemo, useState, useCallback, useRef, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import type { TaskInfo, DependencyInfo } from "../../ipc/commands";
 import { useUiStore } from "../../stores/ui-store";
 import { computeDagLayout, NODE_WIDTH, NODE_HEIGHT } from "./dag-layout";
@@ -38,6 +39,7 @@ export function TaskDAG({
   focusNodeId,
   onFocusHandled,
 }: TaskDAGProps) {
+  const { t } = useTranslation("mission");
   const dagSelectedTaskId = useUiStore((s) => s.dagSelectedTaskId);
   const setDagSelectedTaskId = useUiStore((s) => s.setDagSelectedTaskId);
   const [elevatedNodeId, setElevatedNodeId] = useState<string | null>(null);
@@ -152,9 +154,9 @@ export function TaskDAG({
   if (tasks.length === 0) {
     return (
       <div className={styles.empty}>
-        <p className={styles.emptyText}>No tasks yet</p>
+        <p className={styles.emptyText}>{t("dag.noTasks")}</p>
         <button className={styles.addBtn} onClick={onAddTask}>
-          + Add Task
+          {t("dag.addTask")}
         </button>
       </div>
     );
@@ -166,11 +168,11 @@ export function TaskDAG({
     <div className={styles.container}>
       <div className={styles.toolbar}>
         <button className={styles.addBtn} onClick={onAddTask}>
-          + Add Task
+          {t("dag.addTask")}
         </button>
         {hasOverrides && (
           <button className={styles.addBtn} onClick={handleAutoLayout}>
-            Auto Layout
+            {t("dag.autoLayout")}
           </button>
         )}
       </div>

@@ -1,4 +1,5 @@
 import { useMemo, useState, useRef, useEffect, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import type { TaskInfo } from "../../ipc/commands";
 import type { NodeLayout } from "./dag-layout";
 import { NODE_WIDTH, NODE_HEIGHT } from "./dag-layout";
@@ -44,6 +45,7 @@ const STATUS_ICONS: Record<string, string> = {
 };
 
 export function TaskNode({ task, layout, onEdit, onDelete, onSelect, selected, onDrag, viewportScale, onElevate }: TaskNodeProps) {
+  const { t } = useTranslation("mission");
   const [menuOpen, setMenuOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   // tooltip anchor=null 表示关闭；非 null 时持有触发瞬间的 viewport DOMRect，
@@ -250,7 +252,7 @@ export function TaskNode({ task, layout, onEdit, onDelete, onSelect, selected, o
                 onEdit(task);
               }}
             >
-              Edit
+              {t("taskNode.edit")}
             </button>
             <button
               className={`${styles.menuItem} ${styles.menuDanger}`}
@@ -262,7 +264,7 @@ export function TaskNode({ task, layout, onEdit, onDelete, onSelect, selected, o
                 onDelete(task.id);
               }}
             >
-              Delete
+              {t("taskNode.delete")}
             </button>
           </div>
         )}
@@ -274,10 +276,10 @@ export function TaskNode({ task, layout, onEdit, onDelete, onSelect, selected, o
             <RoleBadge role={task.role} />
             <p className={styles.tooltipTitle}>{task.title}</p>
           </div>
-          <p className={styles.tooltipDesc}>{task.description || "No description"}</p>
+          <p className={styles.tooltipDesc}>{task.description || t("taskNode.noDescription")}</p>
           {task.expected_output && (
             <p className={styles.tooltipExpected}>
-              <span className={styles.tooltipLabel}>Expected:</span>{" "}
+              <span className={styles.tooltipLabel}>{t("taskNode.expected")}</span>{" "}
               {task.expected_output}
             </p>
           )}
@@ -285,7 +287,7 @@ export function TaskNode({ task, layout, onEdit, onDelete, onSelect, selected, o
             <div className={styles.tooltipChips}>
               {produced.length > 0 && (
                 <div className={styles.tooltipChipRow}>
-                  <span className={styles.tooltipLabel}>Produces:</span>
+                  <span className={styles.tooltipLabel}>{t("taskNode.produces")}</span>
                   {produced.map((a) => (
                     <span key={a.local_name} className={styles.chip}>
                       {a.local_name}
@@ -296,7 +298,7 @@ export function TaskNode({ task, layout, onEdit, onDelete, onSelect, selected, o
               )}
               {consumed.length > 0 && (
                 <div className={styles.tooltipChipRow}>
-                  <span className={styles.tooltipLabel}>Consumes:</span>
+                  <span className={styles.tooltipLabel}>{t("taskNode.consumes")}</span>
                   {consumed.map((id) => (
                     <span key={id} className={styles.chip}>
                       {id.includes(".") ? id.slice(id.indexOf(".") + 1) : id}
@@ -306,7 +308,7 @@ export function TaskNode({ task, layout, onEdit, onDelete, onSelect, selected, o
               )}
               {skills.length > 0 && (
                 <div className={styles.tooltipChipRow}>
-                  <span className={styles.tooltipLabel}>Skills:</span>
+                  <span className={styles.tooltipLabel}>{t("taskNode.skills")}</span>
                   {skills.map((s) => (
                     <span key={s} className={styles.chip}>
                       {s}
@@ -316,10 +318,10 @@ export function TaskNode({ task, layout, onEdit, onDelete, onSelect, selected, o
               )}
             </div>
           )}
-          <p className={styles.tooltipMeta}>Status: {task.status}</p>
+          <p className={styles.tooltipMeta}>{t("taskNode.status")} {task.status}</p>
           {task.last_error && (
             <div className={styles.tooltipError}>
-              <span className={styles.tooltipLabel}>Last error:</span>
+              <span className={styles.tooltipLabel}>{t("taskNode.lastError")}</span>
               <span className={styles.tooltipErrorText}>{task.last_error}</span>
               {task.last_failed_at && (
                 <span className={styles.tooltipErrorTime}>

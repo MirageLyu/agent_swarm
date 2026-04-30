@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import type { MissionReportTaskRow } from "../../ipc/commands";
 import styles from "./TaskMatrixSection.module.css";
 
@@ -11,6 +12,7 @@ interface Props {
  * 表格按 score 升序排（低分置顶高亮），未评分的排末尾。
  */
 export function TaskMatrixSection({ rows }: Props) {
+  const { t } = useTranslation("report");
   const sorted = useMemo(() => {
     const copy = [...rows];
     copy.sort((a, b) => {
@@ -28,12 +30,12 @@ export function TaskMatrixSection({ rows }: Props) {
       <table className={styles.table}>
         <thead>
           <tr>
-            <th className={styles.colTask}>Task</th>
-            <th className={styles.colAgent}>Agent</th>
-            <th className={styles.colScore}>Score</th>
-            <th className={styles.colCost}>Cost</th>
-            <th className={styles.colDuration}>Duration</th>
-            <th className={styles.colStatus}>Status</th>
+            <th className={styles.colTask}>{t("taskMatrixCol.task")}</th>
+            <th className={styles.colAgent}>{t("taskMatrixCol.agent")}</th>
+            <th className={styles.colScore}>{t("taskMatrixCol.score")}</th>
+            <th className={styles.colCost}>{t("taskMatrixCol.cost")}</th>
+            <th className={styles.colDuration}>{t("taskMatrixCol.duration")}</th>
+            <th className={styles.colStatus}>{t("taskMatrixCol.status")}</th>
           </tr>
         </thead>
         <tbody>
