@@ -79,7 +79,7 @@ export function ApprovalCenter() {
 
 function BellIcon() {
   return (
-    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+    <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
       <path
         d="M9 2v.6M5 7.5a4 4 0 0 1 8 0v3l1.2 2.2H3.8L5 10.5v-3z"
         stroke="currentColor"

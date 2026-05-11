@@ -53,7 +53,13 @@
     "agents_one": "{{count}} 个 Agent",
     "agents_other": "{{count}} 个 Agent",
     "errorPrefix": "错误：{{message}}",
-    "unknownError": "未知错误"
+    "unknownError": "未知错误",
+    "flowRetry": {
+      "retry": "重试",
+      "abandon": "忽略",
+      "attempts_one": "已尝试 {{count}} 次",
+      "attempts_other": "已尝试 {{count}} 次"
+    }
   },
   "nav": {
     "appTitle": "Miragenty 指挥台",
@@ -107,6 +113,14 @@
     "agentTimeoutLabel": "Agent 超时（秒）",
     "stepIdleLabel": "单步空闲超时（秒）",
     "saveConfig": "保存配置",
+    "configDirtyHint": "有未保存的更改",
+    "discardChanges": "放弃更改",
+    "testConnection": "测试连接",
+    "testingConnection": "测试中…",
+    "testConnectionHint": "用当前表单值发一个最小请求验证 provider/URL/模型/密钥四件套。无需先保存。",
+    "testConnectionSuccess": "连接成功 · {{latency}} ms · 输入 {{input}} / 输出 {{output}} tokens",
+    "testConnectionReply": "回复：{{text}}",
+    "testConnectionUnsavedHint": "提示：测试使用了已保存的 API 密钥；如果你刚刚改了 provider，记得先保存密钥。",
     "languageHeader": "语言",
     "languageIntro": "切换 UI 语言。即时生效，重启后保留。",
     "languageLabel": "显示语言",
@@ -365,7 +379,9 @@
       "stepCount_other": "{{count}} 步",
       "waitingSteps": "等待 Planner 步骤…",
       "errorPrefix": "错误",
-      "argsPrefix": "参数"
+      "argsPrefix": "参数",
+      "expand": "展开",
+      "collapse": "收起"
     }
   },
   "workspace": {
@@ -645,6 +661,9 @@
     "sendBtnTitle": "发送",
     "agentLabel": "Swarm Agent",
     "userLabel": "你",
+    "messageFailed": "上一条消息发送失败",
+    "retryMessage": "重试",
+    "retrying": "重试中…",
     "missionContract": "任务合同",
     "contractReadOnly": "已签署 — 只读",
     "contractLive": "实时构建中 — 随对话更新",

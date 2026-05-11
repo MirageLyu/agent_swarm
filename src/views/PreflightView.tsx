@@ -17,6 +17,7 @@ import { PreflightChat } from "../components/preflight/PreflightChat";
 import { ContractPanel } from "../components/preflight/ContractPanel";
 import { PreflightStatusBar } from "../components/preflight/PreflightStatusBar";
 import { PlannerLoopPanel } from "../components/mission";
+import { useRetryableFlow } from "../hooks/useRetryableFlow";
 import styles from "./PreflightView.module.css";
 
 export function PreflightView() {
@@ -33,7 +34,6 @@ export function PreflightView() {
   const [streaming, setStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState("");
   const [contract, setContract] = useState<ContractInfo | null>(null);
-  const [signing, setSigning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [initialLoading, setInitialLoading] = useState(true);
   const [convergenceScore, setConvergenceScore] = useState(0);
@@ -133,6 +133,14 @@ export function PreflightView() {
         setStreamingText("");
         setInitialLoading(false);
         setError(content);
+        // 后端 Fix A：错误退出前已经把 failed 标记写进 stored_msgs。
+        // 这里同步刷新一下 messages，让最后一条 user 气泡立刻出现"重试"按钮，
+        // 不依赖用户切换页面再回来才看到。
+        if (missionId) {
+          commands.getPreflightSession(missionId).then((session) => {
+            if (session) setMessages(session.messages);
+          }).catch(console.error);
+        }
       }
     });
 
@@ -144,7 +152,9 @@ export function PreflightView() {
       if (!sessionId || !missionId) return;
 
       setError(null);
-      setMessages((prev) => [...prev, { role: "user", content: text, choices: [] }]);
+      // optimistic insert：立刻显示用户消息（带 mode 让 ChatMessage 一致渲染）；
+      // 后端 send_preflight_message 会以同样字段持久化，刷新后不漂移。
+      setMessages((prev) => [...prev, { role: "user", content: text, choices: [], mode }]);
       setStreaming(true);
       setStreamingText("");
 
@@ -161,6 +171,34 @@ export function PreflightView() {
     },
     [sessionId, missionId, mode],
   );
+
+  // 重试最后一条失败的输入：复用 stored_msgs，无需前端重发文本，
+  // 也不再 push 新的 user 气泡。后端 retry_preflight_message 会清掉
+  // failed 标记并重投同一条消息给 LLM。
+  const handleRetry = useCallback(() => {
+    if (!sessionId || !missionId) return;
+    setError(null);
+    setStreaming(true);
+    setStreamingText("");
+
+    // 同步把 messages 里最后一条 user 上的 failed 标记去掉，
+    // 否则要等 done 事件 + getPreflightSession 才会重置，UI 短暂闪一下。
+    setMessages((prev) => {
+      const idx = [...prev].reverse().findIndex((m) => m.role === "user");
+      if (idx < 0) return prev;
+      const realIdx = prev.length - 1 - idx;
+      const next = [...prev];
+      next[realIdx] = { ...next[realIdx], failed: false, error: undefined };
+      return next;
+    });
+
+    commands
+      .retryPreflightMessage({ session_id: sessionId, mode })
+      .catch((e) => {
+        setError(formatBackendError(e));
+        setStreaming(false);
+      });
+  }, [sessionId, missionId, mode]);
 
   const MODE_LABELS = useMemo<Record<PreflightMode, string>>(
     () => ({
@@ -268,25 +306,33 @@ export function PreflightView() {
     [missionId],
   );
 
-  const handleSign = useCallback(async () => {
-    if (!missionId) return;
-    setSigning(true);
-    setError(null);
-
-    try {
+  // 流程型操作：sign_contract 内部跑 PlannerEngine（可能超时 / LLM 失败）。
+  // 走 useRetryableFlow，失败时统一渲染 banner + 重试按钮，避免用户"会话作废"。
+  // 详见 .cursor/rules/retryable-flow.mdc。
+  const signFlow = useRetryableFlow({
+    operation: "sign_contract",
+    invoke: useCallback(async () => {
+      if (!missionId) throw new Error("noActiveSession");
       const result = await commands.signContract(missionId);
       const detail = await commands.getMissionDetail(result.mission_id);
-      addMission(detail.mission);
-      selectMission(result.mission_id);
-      setDetail(detail.tasks, detail.dependencies);
-      setActivePreflight(null, null);
-      setActiveView("missions");
-    } catch (e) {
-      setError(formatBackendError(e));
-    } finally {
-      setSigning(false);
-    }
-  }, [missionId, addMission, selectMission, setDetail, setActivePreflight, setActiveView]);
+      return { result, detail };
+    }, [missionId]),
+    onSuccess: useCallback(
+      ({ result, detail }: {
+        result: Awaited<ReturnType<typeof commands.signContract>>;
+        detail: Awaited<ReturnType<typeof commands.getMissionDetail>>;
+      }) => {
+        addMission(detail.mission);
+        selectMission(result.mission_id);
+        setDetail(detail.tasks, detail.dependencies);
+        setActivePreflight(null, null);
+        setActiveView("missions");
+      },
+      [addMission, selectMission, setDetail, setActivePreflight, setActiveView],
+    ),
+  });
+  const signing = signFlow.state === "running";
+  const handleSign = signFlow.run;
 
   if (!missionId || !contract) {
     return (
@@ -306,6 +352,7 @@ export function PreflightView() {
           <button className={styles.errorClose} onClick={() => setError(null)} title={tc("close")}>×</button>
         </div>
       )}
+      {signFlow.failureBanner}
       <div className={styles.main}>
         <PreflightChat
           messages={messages}
@@ -317,6 +364,7 @@ export function PreflightView() {
           onSend={handleSend}
           onModeChange={handleModeChange}
           onChoiceSelect={handleChoiceSelect}
+          onRetry={handleRetry}
         />
         <ContractPanel
           contract={contract}
@@ -328,7 +376,9 @@ export function PreflightView() {
         />
       </div>
       {signing && (
-        <PlannerLoopPanel label={t("plannerLabel")} isLive />
+        // Issue 4: 用 floating 模式，避免下方 PlannerLoopPanel 把上面的对话/合同
+        // 面板挤成滚动条。Portal 到 body，固定右下角，可折叠。
+        <PlannerLoopPanel label={t("plannerLabel")} isLive floating />
       )}
       <PreflightStatusBar
         convergenceScore={convergenceScore}

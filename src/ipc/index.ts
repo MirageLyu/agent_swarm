@@ -6,6 +6,8 @@ export type {
   ConfigResponse,
   SetApiKeyRequest,
   UpdateConfigRequest,
+  TestLlmConnectionRequest,
+  TestLlmConnectionResponse,
   AgentEventRecord,
   AgentDetail,
   StartMissionRequest,

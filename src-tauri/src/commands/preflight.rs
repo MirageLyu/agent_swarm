@@ -78,6 +78,18 @@ pub struct PreflightMessageInfo {
     pub role: String,
     pub content: String,
     pub choices: Vec<PreflightChoice>,
+    /// 该消息所处的对话模式（scenario_walk / devils_advocate / risk_highlighter）。
+    /// 用户消息记录"发出时的模式"，assistant 消息记录"产出时的模式"。
+    /// 前端用它给 assistant 气泡加 mode badge，刷新后不丢失。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// LLM 调用失败时由 Fix A 写入；前端据此把对应 user 气泡渲染成"已失败"
+    /// 并提供重试按钮（调用 retry_preflight_message）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed: Option<bool>,
+    /// 失败时的可读错误（已经过 friendlify_error 处理）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 // ---------- helpers ----------
@@ -427,6 +439,15 @@ fn reconstruct_history(stored_msgs: &[serde_json::Value]) -> Vec<Message> {
         match m["role"].as_str().unwrap_or("user") {
             "assistant" => {
                 let mut content = Vec::new();
+                // Reasoning 必须在 Text 之前（与 stream/parse 一致），
+                // 这样 convert_messages 看到的 assistant 块顺序稳定。
+                if let Some(reasoning) = m["reasoning_content"].as_str() {
+                    if !reasoning.is_empty() {
+                        content.push(ContentBlock::Reasoning {
+                            text: reasoning.to_string(),
+                        });
+                    }
+                }
                 if let Some(text) = m["content"].as_str() {
                     if !text.is_empty() {
                         content.push(ContentBlock::Text {
@@ -466,6 +487,10 @@ fn reconstruct_history(stored_msgs: &[serde_json::Value]) -> Vec<Message> {
                     cache_control: None,
                 });
             }
+            // 默认分支同时覆盖 "user" 和 "system_seed"（start_preflight 注入的初始
+            // prompt）。system_seed 必须以 User 身份进入 LLM 上下文（OpenAI / Anthropic
+            // 一般要求 user 起头），但 get_preflight_session 会把它从展示列表过滤掉，
+            // 避免出现"用户没说过的话"。其它未知 role 也兜底成 user，保留语料。
             _ => {
                 let text = m["content"].as_str().unwrap_or("").to_string();
                 history.push(Message {
@@ -481,14 +506,26 @@ fn reconstruct_history(stored_msgs: &[serde_json::Value]) -> Vec<Message> {
 }
 
 /// Build an assistant stored message with optional tool_calls.
+///
+/// `mode` 是产出该回复时的对话模式（scenario_walk / devils_advocate / risk_highlighter）。
+/// 写进 stored_msgs 让前端在重新加载会话后仍能给气泡渲染对应的 mode badge。
 fn build_assistant_stored_msg(
     response: &planner::PreflightResponse,
+    mode: &str,
 ) -> serde_json::Value {
     let mut msg = json!({
         "role": "assistant",
         "content": response.text,
         "choices": response.choices,
+        "mode": mode,
     });
+
+    // OpenAI-compat 推理模型协议要求 round-trip：上一轮 assistant 的
+    // reasoning_content 必须在下一轮 messages 里原样回传。所以这里持久化，
+    // reconstruct_history 重建时插回成 ContentBlock::Reasoning。
+    if !response.reasoning.is_empty() {
+        msg["reasoning_content"] = json!(response.reasoning);
+    }
 
     if !response.tool_calls.is_empty() {
         let tool_calls: Vec<serde_json::Value> = response
@@ -670,10 +707,17 @@ async fn preflight_with_continuation(
                     max_tokens: 1500,
                 };
 
+                // Compaction 是非流式 chat（要等完整 summary 一次性返回，没法用 idle watchdog），
+                // 所以只能给一个 wall-clock 兜底。30s 太短：长上下文 + 推理模型（DeepSeek-R1 等）
+                // 单次能跑 60~90s，30s 超时直接掉到 truncation fallback，损失对话上下文。
+                // 120s 覆盖 99% 的 normal compaction，即便偶尔超时也只是 truncation 兜底，没数据丢失。
+                const COMPACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+                let compact_started = std::time::Instant::now();
                 let compact_result = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
+                    COMPACTION_TIMEOUT,
                     provider.chat(&compact_request),
                 ).await;
+                let compact_elapsed = compact_started.elapsed();
 
                 match compact_result {
                     Ok(Ok(resp)) => {
@@ -699,6 +743,7 @@ async fn preflight_with_continuation(
                             tracing::info!(
                                 round = belief_state_snapshot.round,
                                 summary_len = summary.len(),
+                                elapsed_ms = compact_elapsed.as_millis(),
                                 "full compaction succeeded"
                             );
                         } else {
@@ -725,7 +770,10 @@ async fn preflight_with_continuation(
                         });
                     }
                     Err(_) => {
-                        tracing::error!("compaction timed out (>30s), using truncation fallback");
+                        tracing::error!(
+                            timeout_secs = COMPACTION_TIMEOUT.as_secs(),
+                            "compaction timed out, using truncation fallback"
+                        );
                         history = planner::truncate_messages(&history);
                         let _ = db.with_conn(|conn| {
                             conn.execute(
@@ -748,6 +796,34 @@ async fn preflight_with_continuation(
             Err(e) => {
                 tracing::error!("Preflight chat failed (iteration {iteration}): {e}");
                 let user_msg = friendlify_error(&e.to_string());
+
+                // 关键修复：错误退出前必须把 stored_msgs 落盘。
+                // 否则用户刚发的最后一条 user message 只在 in-memory，关闭重开就丢；
+                // 即使不重开，下一次 send 时后端读到的是错误前的状态，新消息追加在
+                // 错误那条之上 → LLM 上下文断裂。
+                //
+                // 同时给最后一条 user message 加 `failed: true` 标记，前端可以高亮
+                // 并提供"重试"按钮（见 retry_preflight_message）。
+                // 标记最后一条"待回复"的输入。包含 system_seed —— 初次进入
+                // preflight 时 LLM 调用就失败，那条 system_seed 即是要重试的目标。
+                if let Some(last) = stored_msgs
+                    .iter_mut()
+                    .rev()
+                    .find(|m| matches!(m["role"].as_str(), Some("user") | Some("system_seed")))
+                {
+                    if let Some(obj) = last.as_object_mut() {
+                        obj.insert("failed".into(), json!(true));
+                        obj.insert("error".into(), json!(user_msg));
+                    }
+                }
+                let _ = db.with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE preflight_sessions SET messages = ?, updated_at = datetime('now') WHERE id = ?",
+                        rusqlite::params![serde_json::to_string(stored_msgs).unwrap_or_default(), session_id],
+                    )?;
+                    Ok::<(), anyhow::Error>(())
+                });
+
                 planner::emit_preflight_event_pub(app, session_id, "error", &user_msg);
                 return;
             }
@@ -819,7 +895,7 @@ async fn preflight_with_continuation(
         };
 
         // Store assistant message + tool results in conversation history
-        let assistant_msg = build_assistant_stored_msg(&response);
+        let assistant_msg = build_assistant_stored_msg(&response, mode);
         stored_msgs.push(assistant_msg);
         stored_msgs.extend(tool_result_msgs.clone());
 
@@ -827,8 +903,15 @@ async fn preflight_with_continuation(
         let needs_continuation = has_tool_calls && !has_choices && !has_suggest_sign;
 
         if needs_continuation {
-            // Append assistant message (with tool_calls) to LLM history
+            // Append assistant message (with tool_calls) to LLM history.
+            // Reasoning 必须放在最前，convert_messages 从 ContentBlock::Reasoning
+            // 拼出 reasoning_content 字段；缺了它推理模型下一轮直接 400。
             let mut assistant_content = Vec::new();
+            if !response.reasoning.is_empty() {
+                assistant_content.push(ContentBlock::Reasoning {
+                    text: response.reasoning.clone(),
+                });
+            }
             if !response.text.is_empty() {
                 assistant_content.push(ContentBlock::Text {
                     text: response.text,
@@ -884,6 +967,7 @@ async fn preflight_with_continuation(
             choices: response.choices,
             tool_calls: response.tool_calls.clone(),
             fallback_used: response.fallback_used.clone(),
+            reasoning: response.reasoning.clone(),
         };
         emit_done_with_belief_state(app, session_id, &final_response, &belief_state, mode);
 
@@ -920,6 +1004,7 @@ async fn preflight_with_continuation(
         choices: vec![],
         tool_calls: vec![],
         fallback_used: "none".into(),
+        reasoning: String::new(),
     };
     emit_done_with_belief_state(app, session_id, &final_response, &belief_state, mode);
 }
@@ -997,8 +1082,12 @@ pub async fn start_preflight(
             ContentBlock::Text { text } => Some(text.as_str()),
             _ => None,
         }).collect();
+        // role=system_seed：这是后端注入的"包装提示"（"The user wants to build...
+        // Start the requirements clarification process."），不是用户真实输入。
+        // 用专属 role 区分：reconstruct_history 仍以 user 投喂 LLM；
+        // get_preflight_session 渲染时整条丢弃，避免历史顶部出现一段"用户消息"。
         let mut stored_msgs = vec![json!({
-            "role": "user",
+            "role": "system_seed",
             "content": user_text,
             "choices": []
         })];
@@ -1017,6 +1106,90 @@ pub async fn start_preflight(
         mission_id,
         session_id,
     })
+}
+
+/// 重试 session 里最后一条失败的 user message。
+///
+/// 跟 `send_preflight_message` 的区别：**不 push 新消息**，而是复用 stored_msgs
+/// 里已有的最后一条 user message（被 Fix A 标记 `failed: true`）。
+/// 调度同一套 `preflight_with_continuation`，成功后 `failed` 标记自然被新的
+/// assistant 回复覆盖；失败则继续标 `failed`。
+///
+/// 设计理由：避免 send_preflight_message 重发导致同一条 user 消息在 stored_msgs
+/// 里出现两次（破坏 LLM 上下文连贯性）。
+#[derive(Debug, Deserialize)]
+pub struct RetryPreflightMessageRequest {
+    pub session_id: String,
+    pub mode: String,
+}
+
+#[tauri::command]
+pub async fn retry_preflight_message(
+    app: tauri::AppHandle,
+    request: RetryPreflightMessageRequest,
+) -> Result<(), String> {
+    let (provider, model) = build_provider(&app)?;
+    let db = app.state::<crate::db::Database>();
+
+    let (messages_json, mission_id): (String, String) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "UPDATE preflight_sessions SET mode = ?, updated_at = datetime('now') WHERE id = ?",
+                rusqlite::params![request.mode, request.session_id],
+            )?;
+            conn.query_row(
+                "SELECT messages, mission_id FROM preflight_sessions WHERE id = ?",
+                [&request.session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| anyhow::anyhow!("Session not found"))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut stored_msgs: Vec<serde_json::Value> =
+        serde_json::from_str(&messages_json).unwrap_or_default();
+
+    // 清掉最后一条用户输入（user 或 system_seed）上的 failed 标记，让它再次"未决"；
+    // 失败时 Fix A 的错误路径会重新写回。
+    if let Some(last) = stored_msgs
+        .iter_mut()
+        .rev()
+        .find(|m| matches!(m["role"].as_str(), Some("user") | Some("system_seed")))
+    {
+        if let Some(obj) = last.as_object_mut() {
+            obj.remove("failed");
+            obj.remove("error");
+        }
+    } else {
+        return Err("No message to retry".into());
+    }
+
+    // 立刻写回去除 failed 标记后的 stored_msgs，让前端在 LLM 回应前
+    // 通过 getPreflightSession 看到"重试中"的状态（无 failed flag）。
+    let serialized = serde_json::to_string(&stored_msgs).unwrap_or_default();
+    db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE preflight_sessions SET messages = ?, updated_at = datetime('now') WHERE id = ?",
+            rusqlite::params![serialized, request.session_id],
+        )?;
+        Ok::<(), anyhow::Error>(())
+    })
+    .map_err(|e| e.to_string())?;
+
+    let history = reconstruct_history(&stored_msgs);
+    let sid = request.session_id.clone();
+    let mode = request.mode.clone();
+    let mid = mission_id.clone();
+    let app_clone = app.clone();
+    tokio::spawn(async move {
+        planner::emit_preflight_event_pub(&app_clone, &sid, "start", "");
+        preflight_with_continuation(
+            provider, &model, &mode, history,
+            &mut stored_msgs, &sid, &mid, &app_clone,
+        ).await;
+    });
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -1051,10 +1224,14 @@ pub async fn send_preflight_message(
         return Err("Conversation limit reached (50 rounds). Please sign the contract.".into());
     }
 
+    // 持久化"发送时所处的 mode"。Fix D：刷新或重开页面后，前端需要恢复
+    // assistant 气泡上的 mode badge；assistant 的 mode 由 build_assistant_stored_msg
+    // 写入，user 的 mode 写在这里，二者配对。
     stored_msgs.push(json!({
         "role": "user",
         "content": request.message,
-        "choices": []
+        "choices": [],
+        "mode": request.mode,
     }));
 
     let history = reconstruct_history(&stored_msgs);
@@ -1258,9 +1435,20 @@ pub fn get_preflight_session(
                 let stored: Vec<serde_json::Value> =
                     serde_json::from_str(&messages_json).unwrap_or_default();
 
+                // Fix B2：从 stored_msgs 投影到前端展示前，剔除三类后端内部消息：
+                //   1. role=tool —— 工具回执，纯协议噪音
+                //   2. role=system_seed —— start_preflight 的初始 prompt 包装，
+                //      用户视角应该看到的第一句是 LLM 的开场白
+                //   3. role=assistant 但 content 为空且没有 choices —— tool_call 中间帧，
+                //      LLM 只是在调用 add_contract_item / present_choices，没产出文本
                 let messages: Vec<PreflightMessageInfo> = stored
                     .iter()
-                    .map(|m| {
+                    .filter_map(|m| {
+                        let role = m["role"].as_str().unwrap_or("user");
+                        if role == "tool" || role == "system_seed" {
+                            return None;
+                        }
+
                         let choices: Vec<PreflightChoice> = m["choices"]
                             .as_array()
                             .map(|arr| {
@@ -1270,11 +1458,19 @@ pub fn get_preflight_session(
                             })
                             .unwrap_or_default();
 
-                        PreflightMessageInfo {
-                            role: m["role"].as_str().unwrap_or("user").to_string(),
-                            content: m["content"].as_str().unwrap_or("").to_string(),
-                            choices,
+                        let content = m["content"].as_str().unwrap_or("").to_string();
+                        if role == "assistant" && content.trim().is_empty() && choices.is_empty() {
+                            return None;
                         }
+
+                        Some(PreflightMessageInfo {
+                            role: role.to_string(),
+                            content,
+                            choices,
+                            mode: m["mode"].as_str().map(|s| s.to_string()),
+                            failed: m["failed"].as_bool(),
+                            error: m["error"].as_str().map(|s| s.to_string()),
+                        })
                     })
                     .collect();
 
@@ -1364,7 +1560,16 @@ pub async fn sign_contract(
     let (provider, model) = build_provider(&app)?;
     let db = app.state::<crate::db::Database>();
 
-    // FM-15 v2.2 (S2 / FR-PF-02): 第 1 步 —— 把合同签字 + 校验 + 拿元数据
+    // FM-15 v2.2 (S2 / FR-PF-02): 第 1 步 —— **只读校验 + 拿元数据**。
+    //
+    // 关键修复：之前这里同时执行 `UPDATE mission_contracts SET status = 'signed'`，
+    // 但第 2 步 PlannerEngine 失败（超时 / LLM 错误）时不会回滚，导致 contract
+    // 永久卡在 signed 状态：前端 ContractPanel 的 `readOnly = status === 'signed'`
+    // 直接把整个签署区块隐藏 → 用户"会话作废，签署按钮没了"。
+    //
+    // 现在的契约：contract 的 signed 标记延后到第 3 步与 tasks 一起原子提交。
+    // planner 失败 → contract 保持 drafting → 签署按钮自然可见 → 用户直接重签
+    // （第 3 步本来就有"重 sign 时清掉旧 tasks"的 idempotent 处理）。
     let (contract_id, description, repo_path): (String, String, String) = db
         .with_conn(|conn| {
             let cid = get_or_create_contract(conn, &mission_id)?;
@@ -1377,12 +1582,6 @@ pub async fn sign_contract(
             if scope_count == 0 {
                 anyhow::bail!("Cannot sign contract: at least one Scope item is required");
             }
-
-            conn.execute(
-                "UPDATE mission_contracts SET status = 'signed', signed_at = datetime('now'),
-                 updated_at = datetime('now') WHERE id = ?",
-                [&cid],
-            )?;
 
             let (description, repo_path): (String, Option<String>) = conn.query_row(
                 "SELECT description, repo_path FROM missions WHERE id = ?",
@@ -1421,22 +1620,37 @@ pub async fn sign_contract(
     let planner_output = outcome.output;
     let planner_session_id = outcome.session_id.clone();
 
-    // 第 3 步 —— 落库 tasks + 升 mission 到 planned + 根任务 ready
+    // 第 3 步 —— 一个事务原子完成：标 contract signed + 升 mission planned + 写 tasks。
+    // 任意一步失败回滚整个事务，contract 不会卡在"半签"状态。
+    //
+    // FM-15 v2.2 (retryable-flow rule 2)：with_conn 不是事务包装，多条裸 execute() 之间
+    // 没有原子性。这里显式 unchecked_transaction()，任意一条 INSERT 失败时之前的
+    // contract.signed / mission.planned / tasks 全部回滚 —— 用户可以直接重新 sign。
     let tasks = db
         .with_conn(|conn| {
-            conn.execute(
+            let tx = conn.unchecked_transaction()?;
+
+            // 关键修复：contract signed 移到这里，与 tasks 一起原子提交。
+            // 见第 1 步的注释。
+            tx.execute(
+                "UPDATE mission_contracts SET status = 'signed', signed_at = datetime('now'),
+                 updated_at = datetime('now') WHERE id = ?",
+                [&contract_id],
+            )?;
+
+            tx.execute(
                 "UPDATE missions SET title = ?, status = 'planned', updated_at = datetime('now')
                  WHERE id = ?",
                 rusqlite::params![planner_output.mission_title, mission_id],
             )?;
 
             // 重 sign 时清掉旧 tasks（防止重复 sign 出现脏数据）
-            conn.execute(
+            tx.execute(
                 "DELETE FROM task_dependencies WHERE task_id IN
                     (SELECT id FROM tasks WHERE mission_id = ?)",
                 [&mission_id],
             )?;
-            conn.execute("DELETE FROM tasks WHERE mission_id = ?", [&mission_id])?;
+            tx.execute("DELETE FROM tasks WHERE mission_id = ?", [&mission_id])?;
 
             let mut task_infos = Vec::new();
             let mut planner_id_to_db_id: std::collections::HashMap<String, String> =
@@ -1468,7 +1682,7 @@ pub async fn sign_contract(
                 let file_scope_json = serde_json::to_string(&pt.file_scope_hints)
                     .unwrap_or_else(|_| "{\"definite\":[],\"possible\":[]}".into());
 
-                conn.execute(
+                tx.execute(
                     "INSERT INTO tasks (id, mission_id, title, description, complexity, status, role, expected_output,
                         additional_skills, consumes_artifacts, produces_artifacts, file_scope_hints)
                      VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
@@ -1489,7 +1703,7 @@ pub async fn sign_contract(
 
                 for decl in &pt.produces_artifacts {
                     crate::agent::artifacts::record_declaration(
-                        conn,
+                        &tx,
                         &mission_id,
                         &task_id,
                         decl,
@@ -1541,7 +1755,7 @@ pub async fn sign_contract(
                             .collect();
                         let refs_json =
                             serde_json::to_string(&refs).unwrap_or_else(|_| "[]".into());
-                        conn.execute(
+                        tx.execute(
                             "INSERT INTO task_dependencies (task_id, depends_on, artifact_refs)
                              VALUES (?, ?, ?)",
                             rusqlite::params![task_db_id, dep_db_id, refs_json],
@@ -1551,7 +1765,7 @@ pub async fn sign_contract(
             }
 
             // 根任务（无依赖）直接 promote 到 ready —— sign_contract 视为隐式 confirm
-            conn.execute(
+            tx.execute(
                 "UPDATE tasks SET status = 'ready'
                  WHERE mission_id = ?1 AND status = 'pending'
                    AND id NOT IN (SELECT task_id FROM task_dependencies)",
@@ -1559,18 +1773,19 @@ pub async fn sign_contract(
             )?;
 
             for ti in &mut task_infos {
-                ti.status = conn.query_row(
+                ti.status = tx.query_row(
                     "SELECT status FROM tasks WHERE id = ?",
                     [&ti.id],
                     |row| row.get(0),
                 )?;
-                ti.created_at = conn.query_row(
+                ti.created_at = tx.query_row(
                     "SELECT created_at FROM tasks WHERE id = ?",
                     [&ti.id],
                     |row| row.get(0),
                 )?;
             }
 
+            tx.commit()?;
             Ok(task_infos)
         })
         .map_err(|e| e.to_string())?;
@@ -1590,3 +1805,445 @@ pub async fn sign_contract(
 // FM-15 v2.2 (S2 / FR-PF-02): `stream_planner_call_for_contract` 已删除。
 // 旧 sign_contract 的单次 LLM 调用被 PlannerEngine 替代；text_delta 透传由 PlannerEngine
 // 内部走 `planner-stream` 事件实现，前端 `PlannerStreamPanel` 不变。
+
+#[cfg(test)]
+mod reasoning_round_trip_tests {
+    //! 回归测试：DeepSeek-R1 / V4-Pro / QwQ / Qwen3-thinking 等推理模型的
+    //! reasoning_content **必须** round-trip 回下一轮请求，否则第二轮 400。
+    //!
+    //! 之前的单测只覆盖了 `convert_messages` 单元，**没覆盖** preflight 的
+    //! "存盘 → 重读 → 下一轮序列化"完整路径，结果引入了 bug 还误以为修好了。
+    //! 这组测试模拟完整链路，是必须长期驻守的护栏。
+    use super::*;
+    use crate::llm::OpenAICompatProvider;
+
+    /// 模拟第一轮 LLM 返回带 reasoning，preflight 把它存到 stored_msgs。
+    fn build_first_turn_stored_msgs() -> Vec<serde_json::Value> {
+        let response = planner::PreflightResponse {
+            text: "What's your target deployment platform?".into(),
+            choices: vec![],
+            tool_calls: vec![],
+            fallback_used: "none".into(),
+            reasoning: "User wants a CLI tool. Let me ask about platform.".into(),
+        };
+        vec![
+            json!({ "role": "user", "content": "I want to build a tool", "choices": [] }),
+            build_assistant_stored_msg(&response, "scenario_walk"),
+        ]
+    }
+
+    #[test]
+    fn assistant_stored_msg_persists_reasoning() {
+        let stored = build_first_turn_stored_msgs();
+        let assistant = &stored[1];
+        assert_eq!(
+            assistant["reasoning_content"],
+            "User wants a CLI tool. Let me ask about platform.",
+            "assistant 的 reasoning_content 必须落盘，否则下一轮 reconstruct 拿不到"
+        );
+    }
+
+    #[test]
+    fn reconstruct_history_restores_reasoning_block() {
+        let stored = build_first_turn_stored_msgs();
+        let history = reconstruct_history(&stored);
+
+        let assistant_msg = history
+            .iter()
+            .find(|m| m.role == MessageRole::Assistant)
+            .expect("history must contain an assistant turn");
+
+        let has_reasoning = assistant_msg
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Reasoning { text } if text.contains("CLI tool")));
+        assert!(
+            has_reasoning,
+            "reconstruct_history 必须把 reasoning_content 还原成 ContentBlock::Reasoning，否则第二轮 convert_messages 看不见"
+        );
+    }
+
+    /// 完整端到端：第一轮 reasoning 存盘 → 第二轮重建 history → openai_compat
+    /// 序列化时必须出现 reasoning_content 字段。这是用户报告 bug 的真正场景。
+    #[test]
+    fn second_turn_request_includes_reasoning_content() {
+        // 第一轮已结束，stored_msgs 里有 user + 带 reasoning 的 assistant
+        let mut stored = build_first_turn_stored_msgs();
+
+        // 第二轮：用户发新消息（模拟 send_preflight_message 的 push）
+        stored.push(json!({
+            "role": "user",
+            "content": "I want it for macOS",
+            "choices": []
+        }));
+
+        // 第二轮 history 由 reconstruct_history 重建（preflight_with_continuation 的真实路径）
+        let history = reconstruct_history(&stored);
+
+        // 模拟 OpenAI-compat provider 序列化这个 history 给 API
+        let provider = OpenAICompatProvider::new("k".into(), "https://example.com".into());
+        let req = crate::llm::LlmRequest {
+            model: "deepseek-r1".into(),
+            system: None,
+            messages: history,
+            tools: vec![],
+            max_tokens: 100,
+        };
+        let oai_messages = provider.convert_messages(&req);
+
+        let assistant = oai_messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("第二轮请求必须包含上一轮的 assistant turn");
+
+        assert_eq!(
+            assistant["reasoning_content"], "User wants a CLI tool. Let me ask about platform.",
+            "第二轮 API 请求里 assistant.reasoning_content 必须存在，否则 DeepSeek-R1/V4-Pro 立刻 400"
+        );
+    }
+
+    /// 没有 reasoning 的普通模型不能莫名出现 reasoning_content（避免给非推理 provider 噪音）。
+    #[test]
+    fn second_turn_omits_reasoning_when_first_turn_had_none() {
+        let response_no_reasoning = planner::PreflightResponse {
+            text: "ok".into(),
+            choices: vec![],
+            tool_calls: vec![],
+            fallback_used: "none".into(),
+            reasoning: String::new(),
+        };
+        let stored = vec![
+            json!({ "role": "user", "content": "hi", "choices": [] }),
+            build_assistant_stored_msg(&response_no_reasoning, "scenario_walk"),
+        ];
+
+        // 持久化阶段不应出现 reasoning_content key
+        assert!(
+            stored[1].get("reasoning_content").is_none(),
+            "无 reasoning 时不应写 reasoning_content 字段"
+        );
+
+        // 序列化阶段同样
+        let history = reconstruct_history(&stored);
+        let provider = OpenAICompatProvider::new("k".into(), "https://example.com".into());
+        let req = crate::llm::LlmRequest {
+            model: "gpt-4o".into(),
+            system: None,
+            messages: history,
+            tools: vec![],
+            max_tokens: 100,
+        };
+        let oai_messages = provider.convert_messages(&req);
+        let assistant = oai_messages.iter().find(|m| m["role"] == "assistant").unwrap();
+        assert!(assistant.get("reasoning_content").is_none());
+    }
+}
+
+#[cfg(test)]
+mod preflight_session_projection_tests {
+    //! 回归测试：Fix B1 / B2 / D 的全部不变量。
+    //!
+    //! 这些 bug 都属于"前端展示与后端 stored_msgs 含义不一致"——LLM 协议
+    //! 需要 system_seed / tool / 中间 assistant 一起 round-trip，但用户不应
+    //! 看到它们。这组测试锁定 stored_msgs → PreflightMessageInfo 的投影规则，
+    //! 防止以后某次重构再"误为照顾 LLM 而把内部消息暴露给用户"。
+    use super::*;
+    use serde_json::json;
+
+    /// 把原始 stored_msgs 经过 get_preflight_session 同款过滤后投影成
+    /// 前端可见的 PreflightMessageInfo 列表。直接复刻 IPC handler 内 closure，
+    /// 保证测试和真实路径不漂移。
+    fn project_to_visible(stored: &[serde_json::Value]) -> Vec<PreflightMessageInfo> {
+        stored
+            .iter()
+            .filter_map(|m| {
+                let role = m["role"].as_str().unwrap_or("user");
+                if role == "tool" || role == "system_seed" {
+                    return None;
+                }
+                let choices: Vec<PreflightChoice> = m["choices"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let content = m["content"].as_str().unwrap_or("").to_string();
+                if role == "assistant" && content.trim().is_empty() && choices.is_empty() {
+                    return None;
+                }
+                Some(PreflightMessageInfo {
+                    role: role.to_string(),
+                    content,
+                    choices,
+                    mode: m["mode"].as_str().map(|s| s.to_string()),
+                    failed: m["failed"].as_bool(),
+                    error: m["error"].as_str().map(|s| s.to_string()),
+                })
+            })
+            .collect()
+    }
+
+    /// Fix B1：start_preflight 注入的 system_seed 不能在前端可见列表里出现，
+    /// 但必须仍以 user 身份进入 LLM history（否则 LLM 看不到任务背景）。
+    #[test]
+    fn system_seed_hidden_from_user_but_visible_to_llm() {
+        let stored = vec![
+            json!({
+                "role": "system_seed",
+                "content": "The user wants to build X. Start clarification.",
+                "choices": []
+            }),
+            json!({
+                "role": "assistant",
+                "content": "What's the target platform?",
+                "choices": [],
+                "mode": "scenario_walk"
+            }),
+        ];
+
+        let visible = project_to_visible(&stored);
+        assert_eq!(visible.len(), 1, "system_seed 必须从前端展示中剔除");
+        assert_eq!(visible[0].role, "assistant");
+
+        let history = reconstruct_history(&stored);
+        let user_count = history.iter().filter(|m| m.role == MessageRole::User).count();
+        assert_eq!(
+            user_count, 1,
+            "system_seed 必须以 user 身份进入 LLM history（否则 LLM 拿不到任务描述）"
+        );
+    }
+
+    /// Fix B2：tool 回执是协议噪音，前端必须看不见。
+    #[test]
+    fn tool_messages_hidden_from_user() {
+        let stored = vec![
+            json!({ "role": "user", "content": "ok", "choices": [] }),
+            json!({
+                "role": "assistant",
+                "content": "",
+                "choices": [],
+                "tool_calls": [{ "id": "t1", "name": "add_contract_item", "arguments": "{}" }]
+            }),
+            json!({
+                "role": "tool",
+                "tool_call_id": "t1",
+                "content": "{\"success\": true}"
+            }),
+            json!({
+                "role": "assistant",
+                "content": "Done. Next question?",
+                "choices": []
+            }),
+        ];
+
+        let visible = project_to_visible(&stored);
+        assert_eq!(visible.len(), 2, "tool 帧 + 空内容的 assistant 帧都要剔除");
+        assert_eq!(visible[0].role, "user");
+        assert_eq!(visible[1].role, "assistant");
+        assert_eq!(visible[1].content, "Done. Next question?");
+    }
+
+    /// Fix B2 边界：assistant 没有 text 但带 choices（present_choices 工具）
+    /// 必须保留——choices 本身就是用户可见的交互。
+    #[test]
+    fn assistant_with_only_choices_is_kept() {
+        let stored = vec![
+            json!({
+                "role": "assistant",
+                "content": "",
+                "choices": [
+                    { "id": "c1", "label": "Option A", "contract_impact": null }
+                ]
+            }),
+        ];
+        let visible = project_to_visible(&stored);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].choices.len(), 1);
+    }
+
+    /// Fix D：mode 必须持久化在 assistant 上，刷新后依旧能渲染 mode badge。
+    #[test]
+    fn assistant_mode_round_trips() {
+        let resp = planner::PreflightResponse {
+            text: "Risk-focused question?".into(),
+            choices: vec![],
+            tool_calls: vec![],
+            fallback_used: "none".into(),
+            reasoning: String::new(),
+        };
+        let stored = build_assistant_stored_msg(&resp, "risk_highlighter");
+        assert_eq!(stored["mode"], "risk_highlighter");
+
+        let visible = project_to_visible(std::slice::from_ref(&stored));
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].mode.as_deref(), Some("risk_highlighter"));
+    }
+
+    /// Fix A：错误路径必须给最后一条 user 写 failed/error；retry 必须能找到它。
+    #[test]
+    fn failed_flag_round_trips_for_retry() {
+        let mut stored = vec![
+            json!({ "role": "user", "content": "what about CI?", "choices": [], "mode": "scenario_walk" }),
+        ];
+
+        // 模拟 Fix A 在错误路径里写 failed
+        if let Some(last) = stored
+            .iter_mut()
+            .rev()
+            .find(|m| matches!(m["role"].as_str(), Some("user") | Some("system_seed")))
+        {
+            let obj = last.as_object_mut().unwrap();
+            obj.insert("failed".into(), json!(true));
+            obj.insert("error".into(), json!("网络连接中断，请检查网络后重试"));
+        }
+
+        let visible = project_to_visible(&stored);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].failed, Some(true));
+        assert_eq!(visible[0].error.as_deref(), Some("网络连接中断，请检查网络后重试"));
+
+        // 模拟 retry：清掉 failed/error
+        if let Some(last) = stored
+            .iter_mut()
+            .rev()
+            .find(|m| matches!(m["role"].as_str(), Some("user") | Some("system_seed")))
+        {
+            let obj = last.as_object_mut().unwrap();
+            obj.remove("failed");
+            obj.remove("error");
+        }
+        let visible = project_to_visible(&stored);
+        assert_eq!(visible[0].failed, None, "retry 必须移除 failed 标记");
+        assert_eq!(visible[0].error, None);
+    }
+
+    /// Fix A 边界：只有 system_seed（初次进入 preflight 即失败）也要可重试。
+    #[test]
+    fn initial_seed_failure_is_retryable() {
+        let mut stored = vec![
+            json!({ "role": "system_seed", "content": "Bootstrap prompt", "choices": [] }),
+        ];
+
+        let target = stored
+            .iter_mut()
+            .rev()
+            .find(|m| matches!(m["role"].as_str(), Some("user") | Some("system_seed")));
+        assert!(
+            target.is_some(),
+            "首次失败时唯一的 system_seed 必须能被识别为重试目标，否则用户卡死"
+        );
+    }
+}
+
+#[cfg(test)]
+mod sign_contract_transaction_tests {
+    //! 回归测试：retryable-flow rule 1 + 2 在 sign_contract 上的不变量。
+    //!
+    //! 真实 bug 路径："sign 按钮消失"是因为之前
+    //! ① 把 `UPDATE contract SET status = 'signed'` 放到了 PlannerEngine **之前**；
+    //! ② 第 3 步多条 `conn.execute()` 没有事务包裹，中途失败也不会回滚。
+    //!
+    //! 这里用真实 DB 锁定两条不变量，防止以后某次重构再回到坏状态。
+    use crate::db::Database;
+
+    /// 准备一条 mission（status='preflight'）+ 一份 drafting 的 contract，
+    /// 模拟 sign_contract 前的快照。
+    fn setup_mission_and_contract(db: &Database) -> (String, String) {
+        let mission_id = "m-test".to_string();
+        let contract_id = "c-test".to_string();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO missions (id, title, description, status) VALUES (?, ?, ?, 'preflight')",
+                rusqlite::params![mission_id, "T", "D"],
+            )?;
+            conn.execute(
+                "INSERT INTO mission_contracts (id, mission_id, status) VALUES (?, ?, 'drafting')",
+                rusqlite::params![contract_id, mission_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        (mission_id, contract_id)
+    }
+
+    fn read_status(db: &Database, sql: &str, id: &str) -> String {
+        db.with_conn(|conn| {
+            conn.query_row(sql, [id], |row| row.get::<_, String>(0))
+                .map_err(Into::into)
+        })
+        .unwrap()
+    }
+
+    /// **核心不变量**：sign_contract 第 3 步事务里任意一步失败时，
+    /// contract 不能停在 'signed' —— 必须连同 mission/tasks 一起回滚。
+    /// 否则前端 ContractPanel 会把签约区块永久隐藏，用户进入"会话作废"死锁。
+    #[test]
+    fn third_step_failure_rolls_back_contract_signed() {
+        let db = Database::open_in_memory().unwrap();
+        let (mission_id, contract_id) = setup_mission_and_contract(&db);
+
+        // 模拟第 3 步事务体的真实顺序：sign contract → 升 mission → 写 task。
+        // 故意让"写 task"失败（违反 NOT NULL，因为没传 title），断言事务回滚。
+        let result: anyhow::Result<()> = db.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "UPDATE mission_contracts SET status = 'signed', signed_at = datetime('now')
+                 WHERE id = ?",
+                [&contract_id],
+            )?;
+            tx.execute(
+                "UPDATE missions SET status = 'planned', updated_at = datetime('now')
+                 WHERE id = ?",
+                [&mission_id],
+            )?;
+            // 故意失败：title 是 NOT NULL，传 NULL 会触发约束失败。
+            tx.execute(
+                "INSERT INTO tasks (id, mission_id, title, description, complexity, status)
+                 VALUES (?, ?, NULL, ?, ?, 'pending')",
+                rusqlite::params!["task-x", mission_id, "desc", "low"],
+            )?;
+            tx.commit()?;
+            Ok(())
+        });
+
+        assert!(result.is_err(), "失败步骤必须把 anyhow::Result 抛上去");
+        assert_eq!(
+            read_status(&db, "SELECT status FROM mission_contracts WHERE id = ?", &contract_id),
+            "drafting",
+            "事务回滚后 contract 必须回到 drafting，否则签约按钮会永久消失"
+        );
+        assert_eq!(
+            read_status(&db, "SELECT status FROM missions WHERE id = ?", &mission_id),
+            "preflight",
+            "mission 也必须回到 preflight，避免主界面把它误归类成 planned"
+        );
+    }
+
+    /// 反例守卫：如果哪天有人不小心把多条 execute 写回裸 with_conn（无 transaction），
+    /// 这条测试会失败 —— 提醒"忘了用 unchecked_transaction"。
+    #[test]
+    fn naked_with_conn_does_not_roll_back_partial_writes() {
+        let db = Database::open_in_memory().unwrap();
+        let (_mission_id, contract_id) = setup_mission_and_contract(&db);
+
+        let res: anyhow::Result<()> = db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE mission_contracts SET status = 'signed' WHERE id = ?",
+                [&contract_id],
+            )?;
+            // 模拟中途失败
+            anyhow::bail!("simulated mid-flight failure");
+        });
+        assert!(res.is_err());
+
+        assert_eq!(
+            read_status(&db, "SELECT status FROM mission_contracts WHERE id = ?", &contract_id),
+            "signed",
+            "without explicit transaction, 之前的 UPDATE 不会回滚 —— \
+             这正是 retryable-flow rule 2 要求所有多步 SQL 必须包 unchecked_transaction 的原因。\
+             这条测试故意守住反例语义：如果 rusqlite 改了默认行为，我们要立刻知道。"
+        );
+    }
+}

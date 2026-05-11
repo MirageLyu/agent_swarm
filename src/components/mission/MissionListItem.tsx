@@ -40,6 +40,8 @@ function getAvailableActions(status: MissionStatus): MissionAction[] {
     case "draft":
     case "planned":
       return ["export", "delete"];
+    case "preflight":
+      return ["delete"];
     default:
       return [];
   }
@@ -107,13 +109,18 @@ export function MissionListItem({
               </button>
             </DropdownMenu.Trigger>
             <DropdownMenu.Portal>
-              <DropdownMenu.Content className={styles.menuContent} sideOffset={4} align="end">
+              {/* React 合成事件沿组件树冒泡，会穿过 Portal 抵达父 onClick={onSelect}。
+                  必须在 Content 上 stopPropagation，否则点菜单项会同时触发 row 选中
+                  （preflight 状态尤其明显——会跳转到 Preflight 视图）。 */}
+              <DropdownMenu.Content
+                className={styles.menuContent}
+                sideOffset={4}
+                align="end"
+                onClick={(e) => e.stopPropagation()}
+              >
                 <DropdownMenu.Item
                   className={styles.menuItem}
-                  onSelect={(e) => {
-                    e.stopPropagation();
-                    setPromptOpen(true);
-                  }}
+                  onSelect={() => setPromptOpen(true)}
                 >
                   {t("showPrompt")}
                 </DropdownMenu.Item>
@@ -126,10 +133,7 @@ export function MissionListItem({
                   <DropdownMenu.Item
                     key={action}
                     className={`${styles.menuItem} ${action === "delete" ? styles.menuDanger : ""}`}
-                    onSelect={(e) => {
-                      e.stopPropagation();
-                      onAction(action);
-                    }}
+                    onSelect={() => onAction(action)}
                   >
                     {t(ACTION_LABEL_KEYS[action])}
                   </DropdownMenu.Item>
@@ -142,7 +146,9 @@ export function MissionListItem({
 
       <Dialog.Root open={promptOpen} onOpenChange={setPromptOpen}>
         <Dialog.Portal>
-          <Dialog.Overlay className={styles.promptOverlay} />
+          {/* 同 DropdownMenu.Portal：React 合成事件会穿 Portal 冒泡，
+              overlay/content 都要拦截 onClick 防止误触发 row 选中。 */}
+          <Dialog.Overlay className={styles.promptOverlay} onClick={(e) => e.stopPropagation()} />
           <Dialog.Content className={styles.promptContent} onClick={(e) => e.stopPropagation()}>
             <Dialog.Title className={styles.promptTitle}>{t("missionPrompt")}</Dialog.Title>
             <pre className={styles.promptText}>

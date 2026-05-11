@@ -346,22 +346,26 @@ pub async fn plan_mission(
     let planner_output = outcome.output;
     let planner_session_id = Some(outcome.session_id);
 
+    // FM-15 v2.2 (retryable-flow rule 2)：第 3 步多条 SQL 必须包事务，
+    // 否则 INSERT 中途失败会留下"title 已更新但 tasks 全空 / 半空"的脏 mission。
     let tasks = db
         .with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+
             // 更新 mission 标题（plan 出的 title 通常比用户原始描述更准确）+ 状态
-            conn.execute(
+            tx.execute(
                 "UPDATE missions SET title = ?, status = 'draft', updated_at = datetime('now')
                  WHERE id = ?",
                 rusqlite::params![planner_output.mission_title, mission_id],
             )?;
 
             // 重 plan 时清掉旧 tasks（plan 阶段保证只有 draft/preflight 状态，无 running agent）
-            conn.execute(
+            tx.execute(
                 "DELETE FROM task_dependencies WHERE task_id IN
                     (SELECT id FROM tasks WHERE mission_id = ?)",
                 [&mission_id],
             )?;
-            conn.execute("DELETE FROM tasks WHERE mission_id = ?", [&mission_id])?;
+            tx.execute("DELETE FROM tasks WHERE mission_id = ?", [&mission_id])?;
 
             let mut task_infos = Vec::new();
             let mut planner_id_to_db_id: std::collections::HashMap<String, String> =
@@ -399,7 +403,7 @@ pub async fn plan_mission(
                         "{\"definite\":[],\"possible\":[]}".into()
                     });
 
-                conn.execute(
+                tx.execute(
                     "INSERT INTO tasks (id, mission_id, title, description, complexity, status, role, expected_output,
                         additional_skills, consumes_artifacts, produces_artifacts, file_scope_hints)
                      VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
@@ -421,7 +425,7 @@ pub async fn plan_mission(
                 // 把每个声明 artifact 落入 artifacts 表（published=0）。
                 for decl in &pt.produces_artifacts {
                     crate::agent::artifacts::record_declaration(
-                        conn,
+                        &tx,
                         &mission_id,
                         &task_id,
                         decl,
@@ -476,7 +480,7 @@ pub async fn plan_mission(
                             .collect();
                         let refs_json =
                             serde_json::to_string(&refs).unwrap_or_else(|_| "[]".into());
-                        conn.execute(
+                        tx.execute(
                             "INSERT INTO task_dependencies (task_id, depends_on, artifact_refs)
                              VALUES (?, ?, ?)",
                             rusqlite::params![task_db_id, dep_db_id, refs_json],
@@ -486,13 +490,14 @@ pub async fn plan_mission(
             }
 
             for ti in &mut task_infos {
-                ti.created_at = conn.query_row(
+                ti.created_at = tx.query_row(
                     "SELECT created_at FROM tasks WHERE id = ?",
                     [&ti.id],
                     |row| row.get(0),
                 )?;
             }
 
+            tx.commit()?;
             Ok(task_infos)
         })
         .map_err(|e| e.to_string())?;
@@ -909,47 +914,54 @@ pub async fn restart_mission(
         ));
     }
 
+    // FM-15 v2.2 (retryable-flow rule 2)：restart 是流程型操作，多步 SQL 必须包事务。
+    // 否则"清掉 agents 后 reset_tasks 失败"会留下"任务还在 failed 但 agent 没了"的孤儿状态。
     let reset_count = db
         .with_conn(|conn| {
-            match request.mode.as_str() {
+            let tx = conn.unchecked_transaction()?;
+            let count = match request.mode.as_str() {
                 "full" => {
-                    queries::delete_agents_for_mission(conn, &request.mission_id)?;
-                    let count = queries::reset_all_tasks(conn, &request.mission_id)?;
+                    queries::delete_agents_for_mission(&tx, &request.mission_id)?;
+                    let count = queries::reset_all_tasks(&tx, &request.mission_id)?;
 
-                    conn.execute(
+                    tx.execute(
                         "UPDATE missions SET status = 'planned', updated_at = datetime('now') WHERE id = ?1",
                         [&request.mission_id],
                     )?;
 
-                    Ok(count)
+                    count
                 }
                 "failed_only" => {
                     let failed_count =
-                        queries::count_failed_tasks(conn, &request.mission_id)?;
+                        queries::count_failed_tasks(&tx, &request.mission_id)?;
                     if failed_count == 0 {
                         anyhow::bail!("No failed or cancelled tasks to restart");
                     }
 
-                    // Get failed task ids for selective agent cleanup
-                    let mut stmt = conn.prepare(
-                        "SELECT id FROM tasks WHERE mission_id = ?1 AND status IN ('failed', 'cancelled')",
-                    )?;
-                    let failed_ids: Vec<String> = stmt
-                        .query_map(rusqlite::params![request.mission_id], |row| row.get(0))?
-                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    let failed_ids: Vec<String> = {
+                        let mut stmt = tx.prepare(
+                            "SELECT id FROM tasks WHERE mission_id = ?1 AND status IN ('failed', 'cancelled')",
+                        )?;
+                        let collected = stmt
+                            .query_map(rusqlite::params![request.mission_id], |row| row.get(0))?
+                            .collect::<std::result::Result<Vec<_>, _>>()?;
+                        collected
+                    };
 
-                    queries::delete_agents_for_tasks(conn, &failed_ids)?;
-                    let count = queries::reset_failed_tasks(conn, &request.mission_id)?;
+                    queries::delete_agents_for_tasks(&tx, &failed_ids)?;
+                    let count = queries::reset_failed_tasks(&tx, &request.mission_id)?;
 
-                    conn.execute(
+                    tx.execute(
                         "UPDATE missions SET status = 'planned', updated_at = datetime('now') WHERE id = ?1",
                         [&request.mission_id],
                     )?;
 
-                    Ok(count)
+                    count
                 }
                 _ => anyhow::bail!("Invalid restart mode: {}", request.mode),
-            }
+            };
+            tx.commit()?;
+            Ok(count)
         })
         .map_err(|e| e.to_string())?;
 
@@ -1484,5 +1496,149 @@ mod tests {
             .query_row("SELECT status FROM missions WHERE id = 'm1'", [], |r| r.get(0))
             .unwrap();
         assert_ne!(status, "draft");
+    }
+}
+
+#[cfg(test)]
+mod plan_mission_transaction_tests {
+    //! 回归测试：retryable-flow rule 1 + 2 在 plan_mission 上的不变量。
+    //!
+    //! plan_mission 第 3 步会先 UPDATE missions（标题 + status='draft'），
+    //! 再批量 INSERT tasks / task_dependencies。如果中途任意一步失败而不回滚，
+    //! 用户会看到"title 改了但任务为空"的脏 mission，重试更困难。
+    use crate::db::Database;
+
+    fn read_title(db: &Database, id: &str) -> String {
+        db.with_conn(|conn| {
+            conn.query_row(
+                "SELECT title FROM missions WHERE id = ?",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .map_err(Into::into)
+        })
+        .unwrap()
+    }
+
+    fn count_tasks(db: &Database, mission_id: &str) -> i64 {
+        db.with_conn(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM tasks WHERE mission_id = ?",
+                [mission_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(Into::into)
+        })
+        .unwrap()
+    }
+
+    /// 第 3 步事务里 INSERT tasks 失败时，title 不能被局部更新。
+    /// （保证用户看到的 mission 列表与已规划的 tasks 始终自洽。）
+    #[test]
+    fn third_step_failure_rolls_back_title_update() {
+        let db = Database::open_in_memory().unwrap();
+        let mission_id = "m1".to_string();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO missions (id, title, description, status)
+                 VALUES (?, 'Original Title', 'd', 'draft')",
+                [&mission_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let result: anyhow::Result<()> = db.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "UPDATE missions SET title = ?, status = 'draft' WHERE id = ?",
+                rusqlite::params!["Planner-Generated Title", mission_id],
+            )?;
+            // 故意制造失败：title NOT NULL
+            tx.execute(
+                "INSERT INTO tasks (id, mission_id, title, description, complexity, status)
+                 VALUES (?, ?, NULL, ?, ?, 'pending')",
+                rusqlite::params!["t1", mission_id, "d", "low"],
+            )?;
+            tx.commit()?;
+            Ok(())
+        });
+
+        assert!(result.is_err());
+        assert_eq!(
+            read_title(&db, &mission_id),
+            "Original Title",
+            "事务回滚后 title 必须保持 plan 前的值，否则用户列表/任务会出现不一致"
+        );
+        assert_eq!(
+            count_tasks(&db, &mission_id),
+            0,
+            "失败时不能留下半套 tasks"
+        );
+    }
+
+    /// 重 plan 的 idempotent：连跑两次成功事务，最终 tasks 数量等于第二次的内容
+    /// （不会累积）。这条用例保证 DELETE+INSERT 的"清空旧 tasks"逻辑是正确的。
+    #[test]
+    fn replan_replaces_tasks_idempotently() {
+        let db = Database::open_in_memory().unwrap();
+        let mission_id = "m1".to_string();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO missions (id, title, description, status)
+                 VALUES (?, 'T', 'd', 'draft')",
+                [&mission_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        // 模拟第 1 次 plan：3 个 tasks
+        db.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "DELETE FROM task_dependencies WHERE task_id IN
+                    (SELECT id FROM tasks WHERE mission_id = ?)",
+                [&mission_id],
+            )?;
+            tx.execute("DELETE FROM tasks WHERE mission_id = ?", [&mission_id])?;
+            for i in 0..3 {
+                tx.execute(
+                    "INSERT INTO tasks (id, mission_id, title, description, complexity, status)
+                     VALUES (?, ?, ?, 'd', 'low', 'pending')",
+                    rusqlite::params![format!("t1-{i}"), mission_id, format!("Task {i}")],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count_tasks(&db, &mission_id), 3);
+
+        // 第 2 次 plan：5 个 tasks。期望最终只有 5 个，旧的清干净。
+        db.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "DELETE FROM task_dependencies WHERE task_id IN
+                    (SELECT id FROM tasks WHERE mission_id = ?)",
+                [&mission_id],
+            )?;
+            tx.execute("DELETE FROM tasks WHERE mission_id = ?", [&mission_id])?;
+            for i in 0..5 {
+                tx.execute(
+                    "INSERT INTO tasks (id, mission_id, title, description, complexity, status)
+                     VALUES (?, ?, ?, 'd', 'low', 'pending')",
+                    rusqlite::params![format!("t2-{i}"), mission_id, format!("Task {i}")],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            count_tasks(&db, &mission_id),
+            5,
+            "重 plan 必须替换而非追加，否则用户会看到指数膨胀的 task 列表"
+        );
     }
 }

@@ -64,3 +64,84 @@
   display: flex;
   justify-content: flex-end;
 }
+
+/* 底部 sticky 保存栏：dirty 时浮现。
+   - position: sticky 到 .container 的滚动容器底；
+   - 半透明 + backdrop-filter 配合 Apple 设计语言，与 sidebar/topbar 一致；
+   - 不挡住下方任何元素：本身只在 dirty 时渲染，且自带阴影分隔。 */
+.stickySaveBar {
+  position: sticky;
+  bottom: 0;
+  margin: 0 calc(-1 * var(--space-6));
+  padding: var(--space-3) var(--space-6);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  background: var(--color-bg-elevated, var(--color-bg-primary));
+  border-top: 0.5px solid var(--color-separator);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.06);
+  z-index: 10;
+}
+
+.stickyHint {
+  font-size: var(--text-xs);
+  color: var(--color-warning, #ff9500);
+  font-weight: 500;
+}
+
+.stickyActions {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+/* 测试连接：按钮 + 提示并排，结果框走 success/error variant */
+.testRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.testRow > .hint {
+  flex: 1;
+  min-width: 200px;
+}
+
+.testResult {
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 0.5px solid transparent;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.testResultOk {
+  background: rgba(52, 199, 89, 0.08);
+  border-color: rgba(52, 199, 89, 0.25);
+  color: var(--color-success, #1f8a3b);
+}
+
+.testResultErr {
+  background: rgba(220, 38, 38, 0.08);
+  border-color: rgba(220, 38, 38, 0.25);
+  color: var(--color-error, #dc2626);
+}
+
+.testResultLine {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.testResultReply {
+  margin: 0;
+  font-size: var(--text-xs);
+  opacity: 0.85;
+  font-family: var(--font-mono);
+  word-break: break-word;
+}

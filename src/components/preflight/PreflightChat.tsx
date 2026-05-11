@@ -17,6 +17,8 @@ interface PreflightChatProps {
   onSend: (text: string) => void;
   onModeChange: (mode: PreflightMode) => void;
   onChoiceSelect: (choice: PreflightChoice) => void;
+  /** 用户点击"重试"时调用，复用 stored_msgs 里最后一条失败的 user 消息。 */
+  onRetry?: () => void;
 }
 
 export function PreflightChat({
@@ -29,6 +31,7 @@ export function PreflightChat({
   onSend,
   onModeChange,
   onChoiceSelect,
+  onRetry,
 }: PreflightChatProps) {
   const { t } = useTranslation("preflight");
   const [input, setInput] = useState("");
@@ -84,6 +87,14 @@ export function PreflightChat({
             return null;
           }
 
+          // 失败 + 重试 UI 只挂在"最后一条 user 消息"上：
+          // 旧的失败消息可能因为后续重试被覆盖语义，但 stored_msgs 不会回卷
+          // failed 标记。所以约定：能点击重试的只有最新的失败消息。
+          const isLastUserMessage =
+            msg.role === "user" &&
+            i === messages.length - 1 &&
+            !!msg.failed;
+
           return (
             <div key={i}>
               {msg.content.trim() && (
@@ -99,6 +110,22 @@ export function PreflightChat({
                   onSelect={onChoiceSelect}
                   disabled={i < messages.length - 1}
                 />
+              )}
+              {isLastUserMessage && (
+                <div className={styles.failedRow}>
+                  <span className={styles.failedHint}>
+                    {msg.error || t("messageFailed")}
+                  </span>
+                  {onRetry && (
+                    <button
+                      className={styles.retryBtn}
+                      onClick={onRetry}
+                      disabled={streaming}
+                    >
+                      {streaming ? t("retrying") : t("retryMessage")}
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           );

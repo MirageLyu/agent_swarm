@@ -6,11 +6,18 @@
  *
  * 用法：当 `planMission` 返回 `planner_session_id` 时挂载，
  * 内部订阅 `onPlannerStep` 并按 step_no 增量追加。
+ *
+ * 两种渲染模式：
+ * - **inline** (默认)：直接占位，被父容器布局约束。MissionsView 用这种。
+ * - **floating** (Issue 4)：通过 React Portal 挂到 body，固定右下角，可折叠。
+ *   PreflightView 签约时用，避免挤压主对话/合同面板。
  */
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { onPlannerStep, type PlannerStepPayload } from "../../ipc/events";
 import { commands, type PlannerStepRow } from "../../ipc/commands";
+import styles from "./PlannerLoopPanel.module.css";
 
 interface PlannerLoopPanelProps {
   /**
@@ -23,6 +30,8 @@ interface PlannerLoopPanelProps {
   isLive?: boolean;
   /** 标题里的可选前缀（"Planner Agent Loop" 默认；Pre-flight 用 "Pre-flight planner"）。 */
   label?: string;
+  /** Issue 4：true 时悬浮在右下角（Portal），不挤压父布局。 */
+  floating?: boolean;
 }
 
 interface DisplayStep {
@@ -72,6 +81,7 @@ export function PlannerLoopPanel({
   sessionId,
   isLive = true,
   label,
+  floating = false,
 }: PlannerLoopPanelProps) {
   const { t } = useTranslation("mission");
   const resolvedLabel = label ?? t("planner.label");
@@ -79,6 +89,7 @@ export function PlannerLoopPanel({
   const [discoveredSessionId, setDiscoveredSessionId] = useState<string | null>(
     sessionId ?? null,
   );
+  const [collapsed, setCollapsed] = useState(false);
   const seenRef = useRef<Set<number>>(new Set());
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -92,7 +103,6 @@ export function PlannerLoopPanel({
     setSteps([]);
     let cancelled = false;
 
-    // 已知 sessionId：先拉历史
     if (sessionId) {
       commands
         .listPlannerSteps(sessionId)
@@ -105,9 +115,7 @@ export function PlannerLoopPanel({
         .catch((e) => console.warn("listPlannerSteps failed:", e));
     }
 
-    // 订阅实时 step 事件
     const unsubP = onPlannerStep((p) => {
-      // sessionId 已知 → 严格过滤；未知 → 锁定第一个看到的 session
       if (sessionId) {
         if (p.session_id !== sessionId) return;
       } else {
@@ -135,28 +143,8 @@ export function PlannerLoopPanel({
     }
   }, [steps, isLive]);
 
-  return (
-    <div
-      style={{
-        border: "1px solid var(--color-border)",
-        borderRadius: 8,
-        background: "var(--color-bg-elevated)",
-        padding: 12,
-        marginTop: 12,
-        maxHeight: 360,
-        overflow: "auto",
-        fontSize: 12,
-      }}
-      ref={containerRef}
-    >
-      <div style={{ fontWeight: 600, marginBottom: 8, color: "var(--color-text-muted)" }}>
-        {resolvedLabel}
-        {discoveredSessionId
-          ? ` · ${t("planner.session", { id: discoveredSessionId.slice(0, 8) })}`
-          : ` · ${t("planner.waitingSession")}`}
-        {" · "}
-        {t("planner.stepCount", { count: steps.length })}
-      </div>
+  const stepsBody = (
+    <>
       {steps.length === 0 && (
         <div style={{ color: "var(--color-text-muted)", fontStyle: "italic" }}>
           {t("planner.waitingSteps")}
@@ -229,6 +217,74 @@ export function PlannerLoopPanel({
           </div>
         );
       })}
-    </div>
+    </>
+  );
+
+  // ===== Inline 模式 =====
+  // 保留原来的 inline 视觉，MissionsView 不受 floating 引入影响。
+  if (!floating) {
+    return (
+      <div
+        style={{
+          border: "1px solid var(--color-border)",
+          borderRadius: 8,
+          background: "var(--color-bg-elevated)",
+          padding: 12,
+          marginTop: 12,
+          maxHeight: 360,
+          overflow: "auto",
+          fontSize: 12,
+        }}
+        ref={containerRef}
+      >
+        <div style={{ fontWeight: 600, marginBottom: 8, color: "var(--color-text-muted)" }}>
+          {resolvedLabel}
+          {discoveredSessionId
+            ? ` · ${t("planner.session", { id: discoveredSessionId.slice(0, 8) })}`
+            : ` · ${t("planner.waitingSession")}`}
+          {" · "}
+          {t("planner.stepCount", { count: steps.length })}
+        </div>
+        {stepsBody}
+      </div>
+    );
+  }
+
+  // ===== Floating 模式 =====
+  // Portal 挂到 body：脱离父容器布局，不会挤压主界面。
+  // 折叠时只剩 header，让用户专注主对话；展开看进度。
+  const containerClass = collapsed
+    ? `${styles.floating} ${styles.collapsed}`
+    : styles.floating;
+
+  return createPortal(
+    <div className={containerClass} role="status" aria-live="polite">
+      <div className={styles.floatingHeader}>
+        <div className={styles.floatingTitle}>
+          {resolvedLabel}
+          <span className={styles.floatingMeta}>
+            {discoveredSessionId
+              ? ` · ${discoveredSessionId.slice(0, 8)}`
+              : ` · ${t("planner.waitingSession")}`}
+            {" · "}
+            {t("planner.stepCount", { count: steps.length })}
+          </span>
+        </div>
+        <div className={styles.floatingActions}>
+          <button
+            className={styles.iconBtn}
+            onClick={() => setCollapsed((c) => !c)}
+            title={collapsed ? t("planner.expand") : t("planner.collapse")}
+            aria-label={collapsed ? t("planner.expand") : t("planner.collapse")}
+          >
+            {collapsed ? "▴" : "▾"}
+          </button>
+        </div>
+      </div>
+      <div className={styles.floatingBody} ref={containerRef}>
+        {stepsBody}
+      </div>
+    </div>,
+    document.body,
   );
 }

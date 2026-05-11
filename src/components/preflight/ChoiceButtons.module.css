@@ -45,6 +45,40 @@
   pointer-events: none;
 }
 
+/* 关键修复 (Issue 2)：HTML disabled 属性只挡住点击，不会自动改变样式。
+   之前用户文字回复后 PreflightChat 把 disabled=true 传进来，按钮虽然点不动，
+   但视觉上仍是高亮可交互态，造成"为什么我点不动"的困惑。
+   这里统一灰化所有 disabled 来源（来自 prop 或 selectedId）。 */
+.choiceBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-tertiary);
+}
+
+.choiceBtn:disabled:hover {
+  background: var(--color-bg-secondary);
+  border-color: var(--color-border);
+}
+
+.choiceBtn:disabled .choiceKey {
+  background: var(--color-bg-secondary);
+  color: var(--color-text-tertiary);
+}
+
+/* selected 比 disabled 优先：用户刚选过的选项保留 accent 高亮，
+   不要因为 disabled 也被灰化。 */
+.choiceBtn.selected:disabled {
+  opacity: 1;
+  background: rgba(0, 122, 255, 0.1);
+  color: var(--color-accent);
+}
+
+.choiceBtn.selected:disabled .choiceKey {
+  background: var(--color-accent);
+  color: #fff;
+}
+
 .choiceKey {
   width: 20px;
   height: 20px;

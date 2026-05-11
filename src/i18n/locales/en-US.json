@@ -53,7 +53,13 @@
     "agents_one": "{{count}} agent",
     "agents_other": "{{count}} agents",
     "errorPrefix": "Error: {{message}}",
-    "unknownError": "Unknown error"
+    "unknownError": "Unknown error",
+    "flowRetry": {
+      "retry": "Retry",
+      "abandon": "Dismiss",
+      "attempts_one": "Attempted {{count}} time",
+      "attempts_other": "Attempted {{count}} times"
+    }
   },
   "nav": {
     "appTitle": "Miragenty Commander",
@@ -107,6 +113,14 @@
     "agentTimeoutLabel": "Agent timeout (s)",
     "stepIdleLabel": "Step idle timeout (s)",
     "saveConfig": "Save Configuration",
+    "configDirtyHint": "You have unsaved changes",
+    "discardChanges": "Discard",
+    "testConnection": "Test connection",
+    "testingConnection": "Testing…",
+    "testConnectionHint": "Sends a minimal request using the current form values to verify provider, URL, model and API key. No need to save first.",
+    "testConnectionSuccess": "Connected · {{latency}} ms · {{input}} in / {{output}} out tokens",
+    "testConnectionReply": "Reply: {{text}}",
+    "testConnectionUnsavedHint": "Note: the test uses your saved API key. If you just changed the provider, save the key first.",
     "languageHeader": "Language",
     "languageIntro": "Switch the UI language. Changes take effect immediately and persist across restarts.",
     "languageLabel": "Display language",
@@ -365,7 +379,9 @@
       "stepCount_other": "{{count}} steps",
       "waitingSteps": "waiting for planner steps…",
       "errorPrefix": "error",
-      "argsPrefix": "args"
+      "argsPrefix": "args",
+      "expand": "Expand",
+      "collapse": "Collapse"
     }
   },
   "workspace": {
@@ -645,6 +661,9 @@
     "sendBtnTitle": "Send",
     "agentLabel": "Swarm Agent",
     "userLabel": "You",
+    "messageFailed": "Last message failed to send",
+    "retryMessage": "Retry",
+    "retrying": "Retrying…",
     "missionContract": "Mission Contract",
     "contractReadOnly": "Signed — read only",
     "contractLive": "Live build — updates as you talk",

@@ -1,0 +1,113 @@
+/* PlannerLoopPanel 悬浮模式 (Issue 4)。
+   inline 模式不依赖这个文件，行内 style 仍按原来的方式写在 JSX 里——
+   保持向后兼容，不动 MissionsView 的现有视觉。 */
+
+.floating {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  width: 480px;
+  max-width: calc(100vw - 48px);
+  z-index: 1000;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.08);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: floatingIn 200ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes floatingIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.floatingHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-secondary);
+  cursor: grab;
+  user-select: none;
+}
+
+.floatingTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.floatingMeta {
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono);
+  margin-left: 6px;
+}
+
+.floatingActions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.iconBtn {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  line-height: 1;
+  transition: background 120ms ease;
+}
+
+.iconBtn:hover {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
+}
+
+.floatingBody {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px;
+  font-size: 12px;
+  max-height: 420px;
+}
+
+.floatingBody::-webkit-scrollbar { width: 6px; }
+.floatingBody::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 3px;
+}
+
+/* 折叠态：只保留 header，body 收起 */
+.collapsed .floatingBody {
+  display: none;
+}
+
+.collapsed {
+  width: 280px;
+}

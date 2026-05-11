@@ -1,8 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tauri::Manager;
+
+use crate::error_code::IpcError;
+use crate::llm::{
+    AnthropicProvider, ContentBlock, LlmProvider, LlmRequest, Message, MessageRole,
+    OpenAICompatProvider, TokenUsage,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -355,4 +362,116 @@ pub fn update_approval_policy(
     };
     mgr.save().map_err(|e| e.to_string())?;
     Ok(updated)
+}
+
+// ---- 模型连通性测试 ----
+//
+// 用户在 Settings 里改 provider/base_url/model 后想"先验证再保存"。
+// 设计：
+// - 入参全部 Optional，缺省回退到已保存的 config 值；这样未保存的 form 也能预试
+// - API key 永远从已保存的 config 读取（按 effective provider 路由），不在 IPC 上传敏感串
+// - 走非流式 chat，max_tokens=10，prompt 极短，把成本和延迟都控在最小
+// - 失败用 IpcError 走 i18n（前端 errors namespace）
+
+#[derive(Debug, Deserialize)]
+pub struct TestLlmConnectionRequest {
+    pub provider: Option<String>,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TestLlmConnectionResponse {
+    pub provider: String,
+    pub model: String,
+    pub latency_ms: u64,
+    pub sample_text: String,
+    pub usage: TokenUsage,
+}
+
+#[tauri::command]
+pub async fn test_llm_connection(
+    app: tauri::AppHandle,
+    request: TestLlmConnectionRequest,
+) -> Result<TestLlmConnectionResponse, String> {
+    let mgr = app.state::<ConfigManager>();
+    let snapshot = mgr.get_config_snapshot();
+
+    let provider_name = request
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| snapshot.provider.clone());
+    let base_url = request
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| snapshot.base_url.clone());
+    let model = request
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| snapshot.default_model.clone());
+
+    // API key 路由：优先按 form 里的 provider 找，找不到回退到 "default"
+    let api_key = mgr
+        .get_api_key(&provider_name)
+        .or_else(|| mgr.get_api_key("default"))
+        .ok_or_else(|| IpcError::no_api_key(provider_name.clone()).to_string())?;
+
+    let provider: Arc<dyn LlmProvider> = match provider_name.as_str() {
+        "anthropic" => Arc::new(AnthropicProvider::new(api_key)),
+        _ => Arc::new(OpenAICompatProvider::new(api_key, base_url.clone())),
+    };
+
+    let req = LlmRequest {
+        model: model.clone(),
+        system: None,
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: vec![ContentBlock::Text {
+                text: "Reply with the single word: pong".to_string(),
+            }],
+            cache_control: None,
+        }],
+        tools: vec![],
+        max_tokens: 16,
+    };
+
+    let started = Instant::now();
+    let response = provider.chat(&req).await.map_err(|e| {
+        IpcError::provider_unavailable(e.to_string())
+            .with_detail(format!("provider={provider_name} model={model}"))
+            .to_string()
+    })?;
+    let latency_ms = started.elapsed().as_millis() as u64;
+
+    // 把第一段 text 截短返回；非 text content（tool_use 等）忽略
+    let sample_text = response
+        .content
+        .iter()
+        .find_map(|c| match c {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let sample_text = if sample_text.chars().count() > 200 {
+        sample_text.chars().take(200).collect::<String>() + "…"
+    } else {
+        sample_text
+    };
+
+    Ok(TestLlmConnectionResponse {
+        provider: provider_name,
+        model,
+        latency_ms,
+        sample_text,
+        usage: response.usage,
+    })
 }

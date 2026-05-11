@@ -24,6 +24,7 @@ import { MissionDeliveryPanel } from "../components/mission/MissionDeliveryPanel
 import { MissionChatPanel } from "../components/mission/MissionChatPanel";
 import { onMissionDelivered, type MissionDeliveredPayload } from "../ipc/events";
 import { Button } from "../components/ui";
+import { useRetryableFlow } from "../hooks/useRetryableFlow";
 import styles from "./MissionsView.module.css";
 
 export function MissionsView() {
@@ -152,20 +153,19 @@ export function MissionsView() {
   }, []);
 
   const planCancelledRef = useRef(false);
+  // Quick Plan 失败后用户点"重试"时复用第一次创建出来的 mission（draft 状态依然在 DB 里）。
+  // 见 .cursor/rules/retryable-flow.mdc：失败时上一次成功的状态必须保留。
+  const lastPlanCreatedRef = useRef<CreateMissionResponse | null>(null);
 
-  const handlePlanReady = useCallback(
-    async (created: CreateMissionResponse) => {
-      // FM-15 v2.2 (S2-3): mission 已在对话框 Step 1 创建。这里只负责跑 PlannerEngine。
-      setPlanDialogOpen(false);
-      planCancelledRef.current = false;
+  const planFlow = useRetryableFlow({
+    operation: "plan_mission",
+    invoke: useCallback(async () => {
+      const created = lastPlanCreatedRef.current;
+      if (!created) {
+        throw new Error("planFlow.invoke called without prior createMission");
+      }
 
-      // 立刻把 draft mission 插入列表 + 选中，让用户感知到 mission 已存在。
-      addMission(created);
-      selectMission(created.id);
-      setDetail([], []);
-
-      // 显式重置 planner stream——这是"开始一次新 plan"的明确动作，
-      // 不能放在 effect 里（否则切 view 回来 effect 重跑会清空已有 text）。
+      // 显式重置 planner stream（首次和重试都走这里），避免上一轮失败的 thinking 残留。
       const now = Date.now();
       setStream({
         visible: true,
@@ -178,35 +178,60 @@ export function MissionsView() {
       });
       setLivePlannerSessionId(null);
       setPlanning(true);
-      setError(null);
+
       try {
         const result = await commands.planMission({ mission_id: created.id });
-        if (planCancelledRef.current) return;
         if (result.planner_session_id) {
           setLivePlannerSessionId(result.planner_session_id);
         }
         const detail = await commands.getMissionDetail(result.mission_id);
-        // 用 plan 后的 detail 覆盖（title 会被 planner 改写）
-        addMission(detail.mission);
-        selectMission(result.mission_id);
-        setDetail(detail.tasks, detail.dependencies);
-      } catch (e) {
-        if (!planCancelledRef.current) {
-          setError(formatBackendError(e));
-        }
+        return { result, detail };
       } finally {
         setPlanning(false);
       }
+    }, [setStream, setLivePlannerSessionId, setPlanning]),
+    onSuccess: useCallback(
+      ({
+        result,
+        detail,
+      }: {
+        result: Awaited<ReturnType<typeof commands.planMission>>;
+        detail: Awaited<ReturnType<typeof commands.getMissionDetail>>;
+      }) => {
+        // 用户已显式 cancel 的话不再拉用户视角——但 mission 已在 DB 里，
+        // 用户回头能在列表看到它（draft 状态）。
+        if (planCancelledRef.current) return;
+        addMission(detail.mission);
+        selectMission(result.mission_id);
+        setDetail(detail.tasks, detail.dependencies);
+      },
+      [addMission, selectMission, setDetail],
+    ),
+    onAbandon: useCallback(() => {
+      // 用户点"忽略"：不再保留 planner stream 区域，避免视觉残留。
+      setStream((s) => ({
+        ...s,
+        status: "cancelled",
+        elapsedMs: s.startTime ? Date.now() - s.startTime : s.elapsedMs,
+      }));
+    }, [setStream]),
+  });
+
+  const handlePlanReady = useCallback(
+    (created: CreateMissionResponse) => {
+      setPlanDialogOpen(false);
+      planCancelledRef.current = false;
+
+      // 立刻把 draft mission 插入列表 + 选中，让用户感知到 mission 已存在。
+      addMission(created);
+      selectMission(created.id);
+      setDetail([], []);
+      setError(null);
+
+      lastPlanCreatedRef.current = created;
+      planFlow.run();
     },
-    [
-      addMission,
-      selectMission,
-      setDetail,
-      setPlanning,
-      setError,
-      setStream,
-      setLivePlannerSessionId,
-    ],
+    [addMission, selectMission, setDetail, setError, planFlow],
   );
 
   const handlePlanCancel = useCallback(() => {
@@ -218,25 +243,37 @@ export function MissionsView() {
       elapsedMs: s.startTime ? Date.now() - s.startTime : s.elapsedMs,
     }));
     setPlanning(false);
-  }, [setPlanning, setStream]);
+    // 同时把 retryable banner 也收掉（如果有），避免"取消了还显示重试"。
+    planFlow.reset();
+  }, [setPlanning, setStream, planFlow]);
 
-  const handlePreflightReady = useCallback(
-    async (created: CreateMissionResponse) => {
-      // FM-15 v2.2 (S2-3): mission 已存在，这里只 startPreflight。
-      setPlanDialogOpen(false);
-      setError(null);
-
-      addMission(created);
-
-      try {
-        const result = await commands.startPreflight({ mission_id: created.id });
+  const startPreflightFlow = useRetryableFlow({
+    operation: "start_preflight",
+    invoke: useCallback(async () => {
+      const created = lastPlanCreatedRef.current;
+      if (!created) {
+        throw new Error("startPreflightFlow.invoke called without prior createMission");
+      }
+      return commands.startPreflight({ mission_id: created.id });
+    }, []),
+    onSuccess: useCallback(
+      (result: Awaited<ReturnType<typeof commands.startPreflight>>) => {
         setActivePreflight(result.mission_id, result.session_id);
         setActiveView("preflight");
-      } catch (e) {
-        setError(formatBackendError(e));
-      }
+      },
+      [setActivePreflight, setActiveView],
+    ),
+  });
+
+  const handlePreflightReady = useCallback(
+    (created: CreateMissionResponse) => {
+      setPlanDialogOpen(false);
+      setError(null);
+      addMission(created);
+      lastPlanCreatedRef.current = created;
+      startPreflightFlow.run();
     },
-    [addMission, setActivePreflight, setActiveView, setError],
+    [addMission, setError, startPreflightFlow],
   );
 
   const handleEditSave = useCallback(
@@ -318,23 +355,35 @@ export function MissionsView() {
     }
   }, [selectedMissionId, selectedMission?.status, updateMissionStatus, setError]);
 
-  const handleStartMission = useCallback(
-    async (repoPath: string) => {
-      if (!selectedMissionId) return;
-      try {
-        await commands.startMissionExecution({
-          mission_id: selectedMissionId,
-          repo_path: repoPath,
-        });
-        updateMissionStatus(selectedMissionId, "running");
-        setStartDialogOpen(false);
+  const lastStartArgsRef = useRef<{ missionId: string; repoPath: string } | null>(null);
+  const startMissionFlow = useRetryableFlow({
+    operation: "start_mission_execution",
+    invoke: useCallback(async () => {
+      const args = lastStartArgsRef.current;
+      if (!args) throw new Error("startMissionFlow.invoke called without prior args");
+      await commands.startMissionExecution({
+        mission_id: args.missionId,
+        repo_path: args.repoPath,
+      });
+      return args;
+    }, []),
+    onSuccess: useCallback(
+      (args: { missionId: string; repoPath: string }) => {
+        updateMissionStatus(args.missionId, "running");
         setActiveView("workspace");
-      } catch (e) {
-        setError(formatBackendError(e));
-        setStartDialogOpen(false);
-      }
+      },
+      [updateMissionStatus, setActiveView],
+    ),
+  });
+
+  const handleStartMission = useCallback(
+    (repoPath: string) => {
+      if (!selectedMissionId) return;
+      lastStartArgsRef.current = { missionId: selectedMissionId, repoPath };
+      setStartDialogOpen(false);
+      startMissionFlow.run();
     },
-    [selectedMissionId, updateMissionStatus, setActiveView, setError],
+    [selectedMissionId, startMissionFlow],
   );
 
   const handleExportMission = useCallback(
@@ -436,40 +485,63 @@ export function MissionsView() {
     [deleteTargetId, removeMission, setError],
   );
 
-  const handleRestartConfirm = useCallback(async () => {
-    if (!restartTargetId) return;
-    try {
+  const lastRestartArgsRef = useRef<{
+    missionId: string;
+    mode: "full" | "failed_only";
+  } | null>(null);
+  const restartFlow = useRetryableFlow({
+    operation: "restart_mission",
+    invoke: useCallback(async () => {
+      const args = lastRestartArgsRef.current;
+      if (!args) throw new Error("restartFlow.invoke called without prior args");
       // 优先尝试 auto_start 复用上次 repo_path 一键重跑；后端没记 repo_path 时
       // 会返回 auto_started=false，前端再 fallback 到工作区选择对话框。
       const result = await commands.restartMission({
-        mission_id: restartTargetId,
-        mode: restartMode,
+        mission_id: args.missionId,
+        mode: args.mode,
         auto_start: true,
       });
-      updateMissionStatus(
-        restartTargetId,
-        result.auto_started ? "running" : "planned",
-      );
-      if (restartTargetId === selectedMissionId) {
-        const detail = await commands.getMissionDetail(restartTargetId);
-        setDetail(detail.tasks, detail.dependencies);
-      }
-      if (!result.auto_started) {
-        setStartDialogOpen(true);
-      }
-    } catch (e) {
-      setError(formatBackendError(e));
-    } finally {
-      setRestartDialogOpen(false);
-      setRestartTargetId(null);
-    }
+      const detail =
+        args.missionId === selectedMissionId
+          ? await commands.getMissionDetail(args.missionId)
+          : null;
+      return { args, result, detail };
+    }, [selectedMissionId]),
+    onSuccess: useCallback(
+      ({
+        args,
+        result,
+        detail,
+      }: {
+        args: { missionId: string; mode: "full" | "failed_only" };
+        result: Awaited<ReturnType<typeof commands.restartMission>>;
+        detail: Awaited<ReturnType<typeof commands.getMissionDetail>> | null;
+      }) => {
+        updateMissionStatus(
+          args.missionId,
+          result.auto_started ? "running" : "planned",
+        );
+        if (detail) {
+          setDetail(detail.tasks, detail.dependencies);
+        }
+        if (!result.auto_started) {
+          setStartDialogOpen(true);
+        }
+      },
+      [updateMissionStatus, setDetail],
+    ),
+  });
+
+  const handleRestartConfirm = useCallback(() => {
+    if (!restartTargetId) return;
+    lastRestartArgsRef.current = { missionId: restartTargetId, mode: restartMode };
+    setRestartDialogOpen(false);
+    setRestartTargetId(null);
+    restartFlow.run();
   }, [
     restartTargetId,
     restartMode,
-    selectedMissionId,
-    updateMissionStatus,
-    setDetail,
-    setError,
+    restartFlow,
   ]);
 
   const canConfirm =
@@ -515,6 +587,10 @@ export function MissionsView() {
       <div className={styles.main}>
         <ApiKeyBanner />
         {error && <p className={styles.error}>{error}</p>}
+        {planFlow.failureBanner}
+        {startPreflightFlow.failureBanner}
+        {startMissionFlow.failureBanner}
+        {restartFlow.failureBanner}
 
         <div className={styles.contentSection}>
           <div className={styles.dagSection}>

@@ -193,6 +193,25 @@ export interface UpdateConfigRequest {
   language?: string;
 }
 
+export interface TestLlmConnectionRequest {
+  provider?: string;
+  base_url?: string;
+  model?: string;
+}
+
+export interface TestLlmConnectionResponse {
+  provider: string;
+  model: string;
+  latency_ms: number;
+  sample_text: string;
+  usage: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  };
+}
+
 // ---------- Agent ----------
 
 export interface RunAgentRequest {
@@ -353,6 +372,11 @@ export interface SendPreflightMessageRequest {
   mode: PreflightMode;
 }
 
+export interface RetryPreflightMessageRequest {
+  session_id: string;
+  mode: PreflightMode;
+}
+
 export interface AddContractItemRequest {
   mission_id: string;
   section: ContractSection;
@@ -405,7 +429,12 @@ export interface PreflightMessageInfo {
   role: "user" | "assistant";
   content: string;
   choices: PreflightChoice[];
+  /** 后端持久化"该消息所处的对话模式"，前端用于渲染 mode badge（刷新不丢）。 */
   mode?: PreflightMode;
+  /** 该 user 消息发出后 LLM 调用失败；前端据此显示重试按钮。 */
+  failed?: boolean;
+  /** 失败时的可读错误（已经过 friendlify_error 处理）。 */
+  error?: string;
 }
 
 export interface PreflightSessionInfo {
@@ -941,6 +970,9 @@ export const commands = {
 
   updateConfig: (request: UpdateConfigRequest) => invoke<void>("update_config", { request }),
 
+  testLlmConnection: (request: TestLlmConnectionRequest = {}) =>
+    invoke<TestLlmConnectionResponse>("test_llm_connection", { request }),
+
   // Agent
   runAgent: (request: RunAgentRequest) => invoke<RunAgentResponse>("run_agent", { request }),
 
@@ -1013,6 +1045,10 @@ export const commands = {
 
   sendPreflightMessage: (request: SendPreflightMessageRequest) =>
     invoke<void>("send_preflight_message", { request }),
+
+  /** 重试 session 里最后一条失败的用户输入（无需重发文本，复用 stored_msgs）。 */
+  retryPreflightMessage: (request: RetryPreflightMessageRequest) =>
+    invoke<void>("retry_preflight_message", { request }),
 
   addContractItem: (request: AddContractItemRequest) =>
     invoke<ContractItemInfo>("add_contract_item", { request }),
