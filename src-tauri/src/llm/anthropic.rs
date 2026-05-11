@@ -35,10 +35,28 @@ impl AnthropicProvider {
     }
 
     fn build_body(&self, request: &LlmRequest, stream: bool) -> serde_json::Value {
+        // Reasoning 块来自 OpenAI-compat 推理模型协议，schema 与 Anthropic
+        // 自身的 thinking 块不同，发到 Anthropic 会报"unknown content type"。
+        // 这里逐条 message 过滤掉 Reasoning，其它 variant 原样保留。
+        let messages: Vec<Message> = request
+            .messages
+            .iter()
+            .map(|m| Message {
+                role: m.role.clone(),
+                content: m
+                    .content
+                    .iter()
+                    .filter(|b| !matches!(b, ContentBlock::Reasoning { .. }))
+                    .cloned()
+                    .collect(),
+                cache_control: m.cache_control.clone(),
+            })
+            .collect();
+
         let mut body = json!({
             "model": request.model,
             "max_tokens": request.max_tokens,
-            "messages": request.messages,
+            "messages": messages,
             "stream": stream,
         });
         if let Some(system) = &request.system {

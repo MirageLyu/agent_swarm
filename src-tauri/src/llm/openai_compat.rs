@@ -45,7 +45,7 @@ impl OpenAICompatProvider {
         format!("{}/chat/completions", self.base_url)
     }
 
-    fn convert_messages(&self, request: &LlmRequest) -> Vec<serde_json::Value> {
+    pub(crate) fn convert_messages(&self, request: &LlmRequest) -> Vec<serde_json::Value> {
         let mut oai_messages = Vec::new();
 
         if let Some(system) = &request.system {
@@ -114,11 +114,13 @@ impl OpenAICompatProvider {
                 }
                 MessageRole::Assistant => {
                     let mut text = String::new();
+                    let mut reasoning = String::new();
                     let mut tool_calls = Vec::new();
 
                     for block in &msg.content {
                         match block {
                             ContentBlock::Text { text: t } => text.push_str(t),
+                            ContentBlock::Reasoning { text: r } => reasoning.push_str(r),
                             ContentBlock::ToolUse { id, name, input } => {
                                 tool_calls.push(json!({
                                     "id": id,
@@ -136,6 +138,12 @@ impl OpenAICompatProvider {
                     let mut msg_obj = json!({ "role": "assistant" });
                     if !text.is_empty() {
                         msg_obj["content"] = json!(text);
+                    }
+                    // DeepSeek-R1/V4、QwQ 等推理模型协议：上一轮的 reasoning_content
+                    // 必须原样回传，否则下一轮 400。空 reasoning 不发送字段，
+                    // 避免对不支持该字段的 provider 造成噪音。
+                    if !reasoning.is_empty() {
+                        msg_obj["reasoning_content"] = json!(reasoning);
                     }
                     if !tool_calls.is_empty() {
                         msg_obj["tool_calls"] = json!(tool_calls);
@@ -195,6 +203,16 @@ impl OpenAICompatProvider {
             .to_string();
 
         let mut content = Vec::new();
+
+        // Reasoning 必须放在 Text 之前，与 stream_chat 保持一致；
+        // convert_messages 在下一轮把它合并回 reasoning_content 字段。
+        if let Some(reasoning) = message["reasoning_content"].as_str() {
+            if !reasoning.is_empty() {
+                content.push(ContentBlock::Reasoning {
+                    text: reasoning.to_string(),
+                });
+            }
+        }
 
         if let Some(text) = message["content"].as_str() {
             if !text.is_empty() {
@@ -446,6 +464,14 @@ impl LlmProvider for OpenAICompatProvider {
             .await;
 
         let mut content: Vec<ContentBlock> = Vec::new();
+        // Reasoning 在 Text 之前 push，确保下一轮 convert_messages
+        // 看到的 assistant 块顺序是 reasoning → text → tool_use；
+        // 这样 reasoning_content 字段能在序列化时正确集中拼接。
+        if !full_reasoning.is_empty() {
+            content.push(ContentBlock::Reasoning {
+                text: full_reasoning,
+            });
+        }
         if !full_text.is_empty() {
             content.push(ContentBlock::Text { text: full_text });
         }
@@ -479,5 +505,126 @@ impl LlmProvider for OpenAICompatProvider {
     fn estimate_cost(&self, _model: &str, input_tokens: u64, output_tokens: u64) -> f64 {
         // DashScope/generic pricing — rough estimate
         (input_tokens as f64 * 2.0 + output_tokens as f64 * 6.0) / 1_000_000.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider() -> OpenAICompatProvider {
+        OpenAICompatProvider::new("k".into(), "https://example.com".into())
+    }
+
+    /// Bug: DeepSeek-R1 / V4 / QwQ 等推理模型上一轮的 reasoning_content
+    /// 必须原样回传，否则 API 400。验证 convert_messages 把 Reasoning 块
+    /// 合并进 assistant 消息的 reasoning_content 字段。
+    #[test]
+    fn convert_messages_emits_reasoning_content_for_assistant() {
+        let req = LlmRequest {
+            model: "deepseek-r1".into(),
+            system: None,
+            messages: vec![
+                Message {
+                    role: MessageRole::User,
+                    content: vec![ContentBlock::Text { text: "hi".into() }],
+                    cache_control: None,
+                },
+                Message {
+                    role: MessageRole::Assistant,
+                    content: vec![
+                        ContentBlock::Reasoning { text: "let me think...".into() },
+                        ContentBlock::Text { text: "hello".into() },
+                    ],
+                    cache_control: None,
+                },
+                Message {
+                    role: MessageRole::User,
+                    content: vec![ContentBlock::Text { text: "more".into() }],
+                    cache_control: None,
+                },
+            ],
+            tools: vec![],
+            max_tokens: 100,
+        };
+
+        let oai = provider().convert_messages(&req);
+        let assistant = oai
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant message present");
+        assert_eq!(assistant["reasoning_content"], "let me think...");
+        assert_eq!(assistant["content"], "hello");
+    }
+
+    /// 没有 reasoning 时不要发 reasoning_content 字段（避免给不支持的模型噪音）。
+    #[test]
+    fn convert_messages_omits_reasoning_content_when_absent() {
+        let req = LlmRequest {
+            model: "gpt-4o".into(),
+            system: None,
+            messages: vec![Message {
+                role: MessageRole::Assistant,
+                content: vec![ContentBlock::Text { text: "hi".into() }],
+                cache_control: None,
+            }],
+            tools: vec![],
+            max_tokens: 100,
+        };
+
+        let oai = provider().convert_messages(&req);
+        let assistant = &oai[0];
+        assert!(assistant.get("reasoning_content").is_none());
+    }
+
+    /// 多个 Reasoning 块要拼接（streaming 切片场景）。
+    #[test]
+    fn convert_messages_concatenates_multiple_reasoning_blocks() {
+        let req = LlmRequest {
+            model: "qwq".into(),
+            system: None,
+            messages: vec![Message {
+                role: MessageRole::Assistant,
+                content: vec![
+                    ContentBlock::Reasoning { text: "part1 ".into() },
+                    ContentBlock::Reasoning { text: "part2".into() },
+                    ContentBlock::Text { text: "answer".into() },
+                ],
+                cache_control: None,
+            }],
+            tools: vec![],
+            max_tokens: 100,
+        };
+
+        let oai = provider().convert_messages(&req);
+        assert_eq!(oai[0]["reasoning_content"], "part1 part2");
+    }
+
+    /// parse_response 要从 message.reasoning_content 解出 Reasoning 块。
+    #[test]
+    fn parse_response_extracts_reasoning_content() {
+        let raw = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "final answer",
+                    "reasoning_content": "step 1, step 2",
+                },
+                "finish_reason": "stop",
+            }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 20 },
+        });
+
+        let resp = provider().parse_response(&raw).unwrap();
+        let has_reasoning = resp
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Reasoning { text } if text == "step 1, step 2"));
+        let has_text = resp
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { text } if text == "final answer"));
+        assert!(has_reasoning, "Reasoning block missing from parsed response");
+        assert!(has_text, "Text block missing from parsed response");
     }
 }

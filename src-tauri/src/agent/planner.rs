@@ -3,11 +3,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
 use tauri::Emitter;
 use tokio::sync::mpsc;
 
-use crate::llm::{ContentBlock, LlmProvider, LlmRequest, Message, MessageRole, StreamChunk, StreamChunkKind, ToolDefinition, ModelCapabilities, CacheControl, TokenUsage};
+use crate::llm::{
+    stream_chat_with_idle_guard, CacheControl, ContentBlock, LlmProvider, LlmRequest, Message,
+    MessageRole, ModelCapabilities, StreamChunk, StreamChunkKind, TokenUsage, ToolDefinition,
+    DEFAULT_STREAM_IDLE_TIMEOUT,
+};
 use crate::agent::belief_state::{PreflightBeliefState, ConversationPhase, SlotStatus, default_slot_definitions};
 
 // ---------------------------------------------------------------------------
@@ -32,6 +35,19 @@ const STATIC_PREFIX: &str = r#"你是 Miragenty 的 Pre-flight Planner Agent，�
 - update_contract_item: 后续讨论推翻了之前的假设时使用，必须注明 reason
 - suggest_sign: 仅在收敛分数 > 85% 或 phase=ReadyToSign 时使用
 - switch_clarification_mode: 当前模式效率低下时切换
+
+# present_choices 互斥性约束（强制）
+单一决策点的互斥选项是 present_choices 的核心契约。违反将让用户陷入"几个都想选"的困惑。
+- 所有选项必须互斥（mutually exclusive）：同一时刻只可能选其中一个
+- 所有选项必须围绕同一个决策维度（例如全部是"默认键盘类型"，不能掺入"是否记住上次"等正交问题）
+- 反面例子（禁止）：
+  A. 默认基础键盘，可切换科学键盘
+  B. 始终显示科学键盘
+  C. 记住用户上次的模式      ← C 与 A/B 不冲突，是正交的"记忆策略"问题
+  D. 你决定
+- 正确做法：把 C 留给下一轮 present_choices 单独决策；本轮只问"默认键盘类型"
+- 如果一个问题里出现"……，且……"或"前后关系"，几乎一定是把多个决策点捆绑了，必须拆轮次
+- 选项数量 2~4 为佳；超过 4 个意味着维度划分有问题，先收缩再问
 
 # 输出规范
 - 文本部分使用中文，保持简洁专业
@@ -872,6 +888,12 @@ pub struct PreflightResponse {
     pub tool_calls: Vec<PreflightToolCall>,
     #[serde(default)]
     pub fallback_used: String,
+    /// Reasoning / thinking 内容（DeepSeek-R1/V4-Pro、QwQ、Qwen3-thinking 等）。
+    /// 必须 round-trip 回 stored_msgs → 下一轮 reconstruct_history → API
+    /// reasoning_content 字段，否则 OpenAI-compat 推理模型会在第二轮 400。
+    /// 见 `llm/openai_compat.rs::convert_messages` 的 reasoning_content 处理。
+    #[serde(default)]
+    pub reasoning: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -956,7 +978,12 @@ pub fn preflight_tools() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "present_choices".into(),
-            description: "Present structured choices to the user for a single decision point.".into(),
+            description: "Present mutually-exclusive choices for ONE decision point. \
+                All options must address the same dimension (e.g. all about \"default keyboard type\"); \
+                do NOT mix orthogonal questions (e.g. memory policy, defaults, fallback behavior) \
+                in the same call — split them into separate rounds. \
+                A user must be able to pick exactly one option; if any two options could both be \
+                desirable simultaneously, the choice set is wrong.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1175,25 +1202,25 @@ fn parse_preflight_response(raw: &str) -> PreflightResponse {
         let json_part = raw[idx + separator.len()..].trim();
         if let Ok(choices) = serde_json::from_str::<Vec<PreflightChoice>>(json_part) {
             if !choices.is_empty() {
-                return PreflightResponse { text, choices, tool_calls: vec![], fallback_used: "text".into() };
+                return PreflightResponse { text, choices, tool_calls: vec![], fallback_used: "text".into(), reasoning: String::new() };
             }
         }
         let json_part = extract_json(json_part);
         if let Ok(choices) = serde_json::from_str::<Vec<PreflightChoice>>(json_part) {
             if !choices.is_empty() {
-                return PreflightResponse { text, choices, tool_calls: vec![], fallback_used: "text".into() };
+                return PreflightResponse { text, choices, tool_calls: vec![], fallback_used: "text".into(), reasoning: String::new() };
             }
         }
         let fallback = extract_choices_from_markdown(&text);
         if !fallback.is_empty() {
-            return PreflightResponse { text, choices: fallback, tool_calls: vec![], fallback_used: "markdown".into() };
+            return PreflightResponse { text, choices: fallback, tool_calls: vec![], fallback_used: "markdown".into(), reasoning: String::new() };
         }
-        PreflightResponse { text, choices: vec![], tool_calls: vec![], fallback_used: "none".into() }
+        PreflightResponse { text, choices: vec![], tool_calls: vec![], fallback_used: "none".into(), reasoning: String::new() }
     } else {
         let text = raw.trim().to_string();
         let fallback = extract_choices_from_markdown(&text);
         let fb = if fallback.is_empty() { "none" } else { "markdown" };
-        PreflightResponse { text, choices: fallback, tool_calls: vec![], fallback_used: fb.into() }
+        PreflightResponse { text, choices: fallback, tool_calls: vec![], fallback_used: fb.into(), reasoning: String::new() }
     }
 }
 
@@ -1323,7 +1350,6 @@ pub async fn preflight_chat(
     // so continuation calls don't re-trigger the loading state.
 
     let (tx, mut rx) = mpsc::channel::<StreamChunk>(256);
-    let provider_clone = provider.clone();
     let request_clone = LlmRequest {
         model: request.model.clone(),
         system: request.system.clone(),
@@ -1332,33 +1358,40 @@ pub async fn preflight_chat(
         max_tokens: request.max_tokens,
     };
 
-    let stream_handle = tokio::spawn(async move {
-        provider_clone.stream_chat(&request_clone, tx).await
-    });
-
+    // 把 stream_chat 包进通用 idle 看门狗（llm::stream_guard）；
+    // 同时启 forwarder task 把 chunk 转成 preflight 事件。
     let app_clone = app.clone();
     let sid = session_id.to_string();
-    let mut full_text = String::new();
+    let full_text_buf: Arc<tokio::sync::Mutex<String>> =
+        Arc::new(tokio::sync::Mutex::new(String::new()));
+    let full_text_for_fwd = full_text_buf.clone();
 
-    while let Some(chunk) = rx.recv().await {
-        match chunk.kind {
-            StreamChunkKind::TextDelta => {
-                full_text.push_str(&chunk.content);
-                emit_preflight_event(&app_clone, &sid, "text_delta", &chunk.content);
+    let forwarder = tokio::spawn(async move {
+        while let Some(chunk) = rx.recv().await {
+            match chunk.kind {
+                StreamChunkKind::TextDelta => {
+                    full_text_for_fwd.lock().await.push_str(&chunk.content);
+                    emit_preflight_event(&app_clone, &sid, "text_delta", &chunk.content);
+                }
+                StreamChunkKind::ReasoningDelta => {
+                    emit_preflight_event(&app_clone, &sid, "reasoning_delta", &chunk.content);
+                }
+                StreamChunkKind::MessageStop => {}
+                _ => {}
             }
-            StreamChunkKind::ReasoningDelta => {
-                emit_preflight_event(&app_clone, &sid, "reasoning_delta", &chunk.content);
-            }
-            StreamChunkKind::MessageStop => {}
-            _ => {}
         }
-    }
+    });
 
-    let response = tokio::time::timeout(Duration::from_secs(5), stream_handle)
-        .await
-        .map_err(|_| PlannerError::LlmError("Preflight stream handle timed out".into()))?
-        .map_err(|e| PlannerError::LlmError(format!("Preflight stream task failed: {e}")))?
-        .map_err(|e| PlannerError::LlmError(e.to_string()))?;
+    let response = stream_chat_with_idle_guard(
+        provider.clone(),
+        request_clone,
+        tx,
+        DEFAULT_STREAM_IDLE_TIMEOUT,
+    )
+    .await
+    .map_err(|e| PlannerError::LlmError(e.user_message_zh()))?;
+    let _ = forwarder.await;
+    let mut full_text = full_text_buf.lock().await.clone();
 
     if full_text.is_empty() {
         full_text = response
@@ -1447,11 +1480,25 @@ pub async fn preflight_chat(
         (parsed.choices, vec![], fallback.to_string())
     };
 
+    // 提取 reasoning 块并 round-trip。流式收到的 reasoning_delta 已经
+    // emit 给前端做"思考中"指示，但在 LlmResponse 里它只活在 ContentBlock::Reasoning，
+    // 必须显式拎出来塞到 PreflightResponse，否则下游 stored_msgs / history
+    // 都拿不到，第二轮 convert_messages 不发 reasoning_content → 推理模型 400。
+    let reasoning: String = response
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Reasoning { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+
     let result = PreflightResponse {
         text: full_text,
         choices,
         tool_calls,
         fallback_used,
+        reasoning,
     };
 
     // Log cache metrics (FM-10.4)

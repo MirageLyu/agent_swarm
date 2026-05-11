@@ -30,11 +30,21 @@ use crate::agent::planner_tools::{
 use crate::commands::ConfigManager;
 use crate::db::{queries, Database};
 use crate::llm::{
-    ContentBlock, LlmProvider, LlmRequest, Message, MessageRole, StreamChunk, StreamChunkKind,
+    stream_chat_with_idle_guard, ContentBlock, LlmProvider, LlmRequest, Message, MessageRole,
+    StreamChunk, StreamChunkKind, DEFAULT_STREAM_IDLE_TIMEOUT,
 };
 
-/// 单次 plan_mission 的总超时
-const PLANNER_LOOP_TIMEOUT: Duration = Duration::from_secs(180);
+/// 单次 plan_mission 的总超时（wall-clock 兜底）。
+///
+/// 之前是 180s 硬上限，对生成 5~10 个任务的 DAG 来说远远不够：仅 stream_chat 本身
+/// 跑完就要 30~60s，再加多轮 propose_task / validate_plan 工具调用，常态需要 5~10 min。
+/// 现在的策略：
+/// 1. **空闲 watchdog**：每次 LLM 流式调用通过 `stream_chat_with_idle_guard` 复用统一
+///    实现（`llm::stream_guard`），相邻 chunk 没有进度才算"卡死"。
+/// 2. **配置化 wall-clock cap**：从 `AppConfig.planner_timeout_seconds` 读取（默认 600s），
+///    用户可在 Settings 调整，对超长 mission 提供逃生通道。
+/// 3. **Step 上限**（`PLANNER_MAX_STEPS`）独立兜底，防止死循环。
+const PLANNER_FALLBACK_WALL_TIMEOUT: Duration = Duration::from_secs(600);
 /// 最大 LLM 迭代次数（每次 = 一轮 stream_chat）
 const PLANNER_MAX_STEPS: u32 = 30;
 /// 单次 LLM 输出 token 上限
@@ -307,8 +317,15 @@ impl PlannerEngine {
 
         self.emit_status(&session_id, "started");
 
+        // wall-clock cap 从配置读取（用户可调）；缺省走 PLANNER_FALLBACK_WALL_TIMEOUT。
+        let wall_timeout = self
+            .app_handle
+            .try_state::<ConfigManager>()
+            .map(|c| Duration::from_secs(c.get_config_snapshot().planner_timeout_seconds))
+            .unwrap_or(PLANNER_FALLBACK_WALL_TIMEOUT);
+
         let loop_result = tokio::time::timeout(
-            PLANNER_LOOP_TIMEOUT,
+            wall_timeout,
             self.drive_loop(
                 &session_id,
                 req.description,
@@ -354,8 +371,8 @@ impl PlannerEngine {
                 Err(e)
             }
             Err(_) => {
-                let secs = PLANNER_LOOP_TIMEOUT.as_secs();
-                let msg = format!("Planner timed out after {secs}s");
+                let secs = wall_timeout.as_secs();
+                let msg = format!("Planner exceeded wall-clock cap of {secs}s");
                 if let Err(db_err) = db.with_conn(|conn| {
                     queries::fail_planner_session(conn, &session_id, 0, 0, &msg)
                 }) {
@@ -610,19 +627,17 @@ impl PlannerEngine {
 
     /// 走 stream_chat 拉响应：text_delta 通过 `planner-stream` 透传给前端
     /// （兼容现有 PlannerStreamPanel）；最终 LlmResponse 用于驱动主循环。
+    ///
+    /// 空闲看门狗复用 `llm::stream_guard::stream_chat_with_idle_guard`：
+    /// 任意 chunk 都算活动，超 `DEFAULT_STREAM_IDLE_TIMEOUT` 自动 abort。
     async fn call_llm_streaming(
         &self,
         request: LlmRequest,
     ) -> Result<crate::llm::LlmResponse, PlannerEngineError> {
         let (tx, mut rx) = mpsc::channel::<StreamChunk>(256);
-        let provider = self.provider.clone();
-        let req = request.clone();
-
-        let stream_handle =
-            tokio::spawn(async move { provider.stream_chat(&req, tx).await });
 
         let app_handle = self.app_handle.clone();
-        tokio::spawn(async move {
+        let forwarder = tokio::spawn(async move {
             while let Some(chunk) = rx.recv().await {
                 if let StreamChunkKind::TextDelta = chunk.kind {
                     let _ = app_handle.emit(
@@ -636,11 +651,16 @@ impl PlannerEngine {
             }
         });
 
-        let response = stream_handle
-            .await
-            .map_err(|e| PlannerEngineError::Llm(format!("Stream task join error: {e}")))?
-            .map_err(|e| PlannerEngineError::Llm(e.to_string()))?;
-        Ok(response)
+        let result = stream_chat_with_idle_guard(
+            self.provider.clone(),
+            request,
+            tx,
+            DEFAULT_STREAM_IDLE_TIMEOUT,
+        )
+        .await;
+        let _ = forwarder.await;
+
+        result.map_err(|e| PlannerEngineError::Llm(e.user_message_zh()))
     }
 
     fn persist_step(

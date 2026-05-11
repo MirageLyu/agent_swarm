@@ -32,6 +32,22 @@ pub enum ContentBlock {
         content: String,
         is_error: bool,
     },
+    /// Reasoning / "thinking" 内容。
+    ///
+    /// 某些 OpenAI-compat 推理模型（DeepSeek-R1、DeepSeek V4 系列、QwQ 等）
+    /// 在响应里返回 `reasoning_content` 字段。**下一轮请求必须把它原样回传**，
+    /// 否则 API 会返回 400 "The reasoning_content in the thinking mode must
+    /// be passed back to the API."。
+    ///
+    /// 设计为独立 variant 而不是塞进 Text：
+    /// - 业务逻辑（agent loop / tool dispatch）只关心 Text + ToolUse，
+    ///   Reasoning 在所有现有 match 的 `_ => {}` 兜底里被自然忽略
+    /// - openai_compat 在 convert_messages 时把 Reasoning 块合并进 assistant
+    ///   message 的 `reasoning_content` 字段，专门解决 round-trip 协议
+    /// - anthropic 在 build_body 时过滤掉（Anthropic 有自己的 thinking 块协议，
+    ///   schema 与 OpenAI compat 不同，目前未启用）
+    #[serde(rename = "reasoning")]
+    Reasoning { text: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

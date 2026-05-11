@@ -23,7 +23,8 @@ use uuid::Uuid;
 use crate::db::{queries, Database};
 use crate::git::WorktreeManager;
 use crate::llm::{
-    ContentBlock, LlmProvider, LlmRequest, Message, MessageRole, StreamChunk, StreamChunkKind,
+    stream_chat_with_idle_guard, ContentBlock, LlmProvider, LlmRequest, Message, MessageRole,
+    StreamChunk, StreamChunkKind, DEFAULT_STREAM_IDLE_TIMEOUT,
 };
 use crate::tools::{
     chat_agent_tools, ToolExecutor, PROPOSE_FOLLOWUP_TOOL, TASK_COMPLETE_TOOL,
@@ -321,16 +322,11 @@ impl ChatAgent {
             };
 
             let (tx, mut rx) = mpsc::channel::<StreamChunk>(256);
-            let provider = self.provider.clone();
-            let req = request.clone();
-            let resp_handle =
-                tokio::spawn(async move { provider.stream_chat(&req, tx).await });
-
             let app_handle = self.app_handle.clone();
             let mission_id_owned = mission_id.to_string();
             let msg_id_owned = assistant_msg_id.to_string();
             let stream_step = step;
-            tokio::spawn(async move {
+            let forwarder = tokio::spawn(async move {
                 while let Some(chunk) = rx.recv().await {
                     if let StreamChunkKind::TextDelta = chunk.kind {
                         let _ = app_handle.emit(
@@ -346,7 +342,16 @@ impl ChatAgent {
                 }
             });
 
-            let response = resp_handle.await??;
+            // Idle 看门狗复用 llm::stream_guard，避免聊天卡死无人察觉。
+            let response = stream_chat_with_idle_guard(
+                self.provider.clone(),
+                request,
+                tx,
+                DEFAULT_STREAM_IDLE_TIMEOUT,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!(e.user_message_zh()))?;
+            let _ = forwarder.await;
 
             messages.push(Message {
                 role: MessageRole::Assistant,

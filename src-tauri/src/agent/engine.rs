@@ -20,7 +20,8 @@ use uuid::Uuid;
 
 use crate::db::{queries, Database};
 use crate::llm::{
-    ContentBlock, LlmProvider, LlmRequest, Message, MessageRole, StreamChunk, StreamChunkKind,
+    stream_chat_with_idle_guard, ContentBlock, LlmProvider, LlmRequest, Message, MessageRole,
+    StreamChunk, StreamChunkKind, DEFAULT_STREAM_IDLE_TIMEOUT,
 };
 use crate::tools::{coding_agent_tools_with_artifact_support, ToolExecutor, TASK_COMPLETE_TOOL};
 
@@ -261,15 +262,10 @@ impl AgentEngine {
             };
 
             let (tx, mut rx) = mpsc::channel::<StreamChunk>(256);
-            let provider = self.provider.clone();
-            let req = request.clone();
-            let response_handle =
-                tokio::spawn(async move { provider.stream_chat(&req, tx).await });
-
             let agent_id_owned = agent_id.to_string();
             let app_handle = self.app_handle.clone();
             let stream_step = step;
-            tokio::spawn(async move {
+            let forwarder = tokio::spawn(async move {
                 while let Some(chunk) = rx.recv().await {
                     if let StreamChunkKind::TextDelta = chunk.kind {
                         let _ = app_handle.emit(
@@ -285,7 +281,17 @@ impl AgentEngine {
                 }
             });
 
-            let response = response_handle.await??;
+            // Idle 看门狗统一走 llm::stream_guard：长沉默 abort，避免 agent
+            // 单步永远卡死整个任务（之前完全没有空闲保护）。
+            let response = stream_chat_with_idle_guard(
+                self.provider.clone(),
+                request,
+                tx,
+                DEFAULT_STREAM_IDLE_TIMEOUT,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!(e.user_message_zh()))?;
+            let _ = forwarder.await;
 
             if self.cancel_token.is_cancelled() {
                 return self.finish_cancelled(agent_id, step);
