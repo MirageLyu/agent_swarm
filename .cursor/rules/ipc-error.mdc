@@ -1,0 +1,71 @@
+---
+description: Tauri command 报错走 IpcError 结构化错误码，不要 format! 硬编码英文/中文消息
+globs: src-tauri/src/commands/**/*.rs
+alwaysApply: false
+---
+
+# IPC 错误约定
+
+所有用户能看到的错误必须**机器可读 + i18n 友好**。
+
+## 写新 command 时
+
+```rust
+use crate::error_code::IpcError;
+
+#[tauri::command]
+pub async fn do_thing(state: State<'_, AppState>, id: String) -> Result<Foo, String> {
+    let mission = state.repo.get_mission(&id)
+        .map_err(|_| IpcError::mission_not_found(id.clone()).to_string())?;
+    // ...
+}
+```
+
+`.to_string()` 会输出 JSON envelope `{"code":"error.mission_not_found","params":{"id":"..."}}`，前端 `formatBackendError` 自动按 `code` 在 `errors` namespace 翻译。沿用现有的 `Result<_, String>` 签名即可，**不必**改成 `Result<_, IpcError>`。
+
+## 加新错误类型
+
+如果现有 builder 不够用：
+
+1. 在 `src-tauri/src/error_code.rs` 加 builder：
+
+   ```rust
+   pub fn budget_exceeded(limit: impl Into<Value>) -> Self {
+       Self::new("error.budget_exceeded").with_param("limit", limit.into())
+   }
+   ```
+
+2. 在 `src/i18n/locales/en-US.json` 和 `zh-CN.json` 的 `errors` namespace 加文案：
+
+   ```json
+   "budget_exceeded": "Budget cap exceeded: limit ${{limit}}"
+   ```
+
+3. command 里调 `IpcError::budget_exceeded(50.0).to_string()`。
+
+## 反例
+
+```rust
+// ❌ 直接 format 英文 / 中文，前端没法翻译
+.map_err(|e| format!("Mission not found: {e}"))?
+.ok_or_else(|| "未配置 API 密钥".to_string())?
+
+// ❌ 把 detail 拼到 message 里，前端解析困难
+.map_err(|e| format!("workspace invalid: path={path} err={e}"))?
+
+// ✅ 用 IpcError，detail 走 with_detail
+.map_err(|e| {
+    IpcError::workspace_invalid("not a directory")
+        .with_detail(format!("path={path} err={e}"))
+        .to_string()
+})?
+```
+
+## 例外
+
+- 内部模块之间的 `anyhow::Error` 传递不需要——`IpcError` 只在 `commands/` 边界使用。
+- 纯调试日志（`tracing::warn!`）保持英文即可，那是给开发者看的。
+
+## 测试
+
+新 builder 至少在 `error_code.rs::tests` 里加一条 roundtrip 测试，确保 JSON envelope 解码正确。

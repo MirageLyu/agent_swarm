@@ -1,10 +1,10 @@
 ---
-description: Apple-native macOS design language for Swarm Commander. Overrides frontend-design.mdc where conflicting (e.g., system fonts ARE required). Apply when building desktop UI, prototypes, or any macOS-style interface.
-globs: "design/**/*.{html,css,js,tsx,jsx,ts,svelte,vue}"
+description: Apple-native macOS design language for Miragenty. Apply when building or styling any UI in src/ or design/ — fonts, spacing, color, shadows, blur all follow this spec.
+globs: src/**/*.{tsx,css},src/**/*.module.css,design/**/*.{html,css,js,tsx,jsx,ts,svelte,vue}
 alwaysApply: false
 ---
 
-# Apple macOS Design Language — Swarm Commander
+# Apple macOS Design Language — Miragenty
 
 Build interfaces that feel like they belong on the user's Mac. Every pixel should say "Apple built this."
 
@@ -14,7 +14,7 @@ Build interfaces that feel like they belong on the user's Mac. Every pixel shoul
 - **Deference**: Interface elements step back so content shines through. Use translucency and blur to imply depth without competing for attention.
 - **Depth**: Layered surfaces with blur, shadows, and vibrancy create a physical sense of space.
 
-**Override note**: This rule overrides `frontend-design.mdc` for matched files. Apple style REQUIRES system fonts — do NOT use custom display fonts or Google Fonts for UI text. SF Mono is acceptable for code blocks.
+**Font policy**: Apple style REQUIRES system fonts — do NOT use custom display fonts or Google Fonts for UI text. SF Mono is acceptable for code blocks.
 
 ---
 

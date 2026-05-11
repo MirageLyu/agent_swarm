@@ -1,0 +1,66 @@
+---
+description: 后端用 tracing 不用 println!；前端 console.* 仅限调试场景，不进数据流
+globs: src-tauri/src/**/*.rs,src/**/*.{ts,tsx}
+alwaysApply: false
+---
+
+# Logging 约定
+
+## 后端（Rust）
+
+用 `tracing` 系列宏。**禁止** `println!` / `eprintln!` 在生产代码路径上。
+
+```rust
+// ✅
+tracing::info!("agent {agent_id} started on {worktree_path}");
+tracing::warn!("checkpoint cost parse failed: {content}");
+tracing::error!("scheduler crashed: {err:?}");
+
+// ❌
+println!("agent started"); // 进 stdout，污染 IPC bridge 极少数情况会脏 frontend
+eprintln!("scheduler crashed"); // 不带结构化字段，运维不可搜
+```
+
+唯一例外：tracing subscriber **初始化之前**的兜底打印（`src-tauri/src/lib.rs` 已有这种用法），用 `eprintln!` 加注释说明原因。
+
+## 前端（TypeScript）
+
+`console.*` 不被禁，但用法有限制：
+
+```typescript
+// ✅ 异常分支 / "should never happen" 兜底
+.catch(e => {
+  console.warn("[ipc] failed to load agents", e);
+  setError(formatBackendError(e));
+});
+
+// ✅ 开发期 hot-path 的 noise 用 eslint-disable 显式标注
+// eslint-disable-next-line no-console
+console.warn("[i18n missing]", key);
+
+// ❌ 用 console.log 调试完忘了删
+console.log("draft is", draft);
+
+// ❌ 把 console.error 当用户 feedback
+catch (e) {
+  console.error("Save failed");  // 用户看不到；应该 setError(formatBackendError(e))
+}
+```
+
+## 不要在日志里塞用户敏感数据
+
+API key、完整 prompt、文件内容等不要进 `info!/warn!`，至多 `debug!` 加 redact。
+
+```rust
+// ❌
+tracing::info!("calling provider with key {api_key}");
+
+// ✅
+tracing::info!("calling provider {provider} (key=***{tail})", tail = &api_key[api_key.len()-4..]);
+```
+
+## 检查清单
+
+- [ ] 新 Rust 文件没有 `println!` / `eprintln!`（除非有兜底注释）
+- [ ] 新 TS 文件没有 `console.log`；`console.warn/error` 仅用于异常分支
+- [ ] 日志不含 API key / prompt 全文 / 用户文件内容

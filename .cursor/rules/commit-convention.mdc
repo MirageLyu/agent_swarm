@@ -1,7 +1,6 @@
 ---
-description: Commit message convention based on Conventional Commits for Miragenty
-globs:
-alwaysApply: true
+description: 写 git commit message 时阅读。Miragenty 遵循 Conventional Commits 1.0：type(scope): description，列出本项目推荐的 scope 和示例。
+alwaysApply: false
 ---
 
 # Commit Convention

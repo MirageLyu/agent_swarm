@@ -1,0 +1,155 @@
+---
+description: 多步骤的"流程型交互"必须支持失败重试。后端事务边界 + 前端统一失败 UI 的端到端契约
+globs: src-tauri/src/commands/**/*.rs,src/views/**/*.tsx,src/components/**/*.tsx,src/hooks/**/*.ts
+alwaysApply: false
+---
+
+# 流程型交互重试契约
+
+## 何时适用
+
+只要满足以下**任一**条件，就属于"流程型交互"，必须按本规则设计：
+
+- 单次 IPC 调用包含 **>1 个副作用** 步骤（DB 写、文件写、外部 API 调用）
+- 流程总耗时 ≥ 5s，期间用户只能等待
+- 失败时上游已经修改过 DB / 用户输入，回退到"全新开始"对用户是损失
+
+典型清单：`sign_contract`、`plan_mission`、`start_mission`、`send_preflight_message`、`start_preflight`、`run_agent`。
+
+> 不适用：`get_mission`、`add_contract_item` 等纯读 / 单步写。
+
+## 后端契约：事务边界铁律
+
+### 规则 1：副作用提交延后到最后一步成功后
+
+**所有持久化的状态推进**（mission status / contract status / 写新 tasks / 写 messages）必须放在流程的**最后一个**事务里，且最后一个事务里只做"快速落库"，不做耗时操作（LLM call / HTTP）。
+
+中间任何耗时步骤（PlannerEngine.run、stream_chat）**只读不写**或写**临时 session 表**（不影响流程对外可见状态）。
+
+```rust
+// ✅ 正确：耗时操作之前只读校验，状态推进延后
+async fn sign_contract(...) -> Result<...> {
+    // 步骤 1：只读校验 + 拿元数据（不改 contract / mission status）
+    let (contract_id, desc, repo) = db.with_conn(|conn| {
+        validate_scope_present(conn, mission_id)?;
+        load_meta(conn, mission_id)
+    })?;
+
+    // 步骤 2：耗时操作（可能失败）。失败时上游 contract / mission 状态没动过
+    let plan = engine.run(&desc).await?;
+
+    // 步骤 3：原子提交（事务里只做 DB 写，不会失败超过几 ms）
+    db.with_conn(|conn| {
+        let tx = conn.unchecked_transaction()?;
+        update_contract_signed(&tx, &contract_id)?;
+        update_mission_planned(&tx, mission_id)?;
+        write_tasks(&tx, &plan)?;
+        tx.commit()?;
+        Ok(())
+    })?;
+}
+```
+
+```rust
+// ❌ 反例：sign_contract 早期版本
+async fn sign_contract(...) {
+    db.with_conn(|conn| {
+        // 提前 UPDATE contract status = 'signed' ← 错！
+        conn.execute("UPDATE mission_contracts SET status = 'signed' WHERE id = ?", ...)?;
+    })?;
+
+    let plan = engine.run(...).await?;  // 这里超时报错
+
+    // 没跑到。contract 永久卡在 signed，但没有 tasks，前端按钮消失，用户"会话作废"
+    db.with_conn(|conn| { write_tasks(...) })?;
+}
+```
+
+### 规则 2：多条 SQL 必须用显式事务
+
+`Database::with_conn` **不是**事务包装。多条 `conn.execute()` 之间没有原子性。任何"需要全部成功或全部不写"的多语句操作必须用 `conn.unchecked_transaction()`：
+
+```rust
+db.with_conn(|conn| {
+    let tx = conn.unchecked_transaction()?;
+    // 多条写
+    tx.commit()?;
+    Ok(())
+})?;
+```
+
+### 规则 3：中间态用专用 status，并要有自然回退
+
+如果流程必须在中间持久化"我正在做某件事"（例如长任务的进度），**不能**复用 `signed` / `completed` 等终态。新加专用值（`signing` / `running`），并保证：
+
+- 进程重启后能识别这个中间态并允许用户重试
+- 失败路径必须把它**回退到上一个稳态**（如 `signing` 失败回 `drafting`）
+
+修改 `CHECK` 约束需要走 db migration（见 `db-migrations.mdc`）。
+
+## 前端契约：统一失败 UI
+
+### 规则 4：流程型操作走 `useRetryableFlow` hook
+
+**不要**在 view 里手工拼 `setError` + `setLoading` + 重试按钮。用 `useRetryableFlow`（在 `src/hooks/useRetryableFlow.ts`）：
+
+```tsx
+const sign = useRetryableFlow({
+  operation: "sign_contract",
+  invoke: () => commands.signContract(missionId),
+  onSuccess: (result) => {
+    selectMission(result.mission_id);
+    setActiveView("missions");
+  },
+  // 自动渲染失败 banner + 重试按钮 + loading
+});
+
+return (
+  <>
+    <button onClick={sign.run} disabled={sign.state === "running"}>
+      {sign.state === "running" ? t("signing") : t("signContractCta")}
+    </button>
+    {sign.failureBanner /* 失败时自动渲染：错误信息 + 重试 + 放弃按钮 */}
+  </>
+);
+```
+
+hook 的统一 UX 不变量：
+
+- 失败信息走 `formatBackendError`（i18n + IpcError 解码，见 `i18n.mdc` / `ipc-error.mdc`）
+- 失败 banner 必须包含「重试」按钮（除非业务说明不可重试）
+- 失败时上一次成功的状态（contract / messages / form 输入）必须保留，**不要** reset
+- 重试期间禁用"放弃 / 关闭"按钮，避免用户误操作创建脏状态
+
+### 规则 5：失败后 UI 不能"自我作废"
+
+如果按钮 / 表单的可见性依赖某个后端 status（如 `contract.status === 'signed'` 决定是否显示签约按钮），必须保证：
+
+- 任何"流程失败但状态被推进"的路径都被规则 1~3 杜绝
+- 否则用户会进入"按钮消失但功能未完成"的死锁
+
+## 反例 vs 正例对照
+
+| 流程 | 反例（修复前） | 正例（修复后） |
+|---|---|---|
+| `sign_contract` | 先标 contract signed → planner 失败 → 按钮消失 | 校验 → planner → 一个事务里 sign + 写 tasks |
+| `send_preflight_message` LLM 失败 | error event 弹 banner，stored_msgs 丢失，无法重试 | error 路径先把 stored_msgs 落盘 + failed flag，前端渲染重试按钮 |
+| `plan_mission` LLM 超时 | 关闭对话框，输入丢失，要重输 | 输入保留在 store，failure banner 直接重试同一 description |
+
+## 测试要求
+
+每个流程型 command 必须有以下回归测试覆盖（见 `testing.mdc`）：
+
+1. **失败不污染上游状态**：mock 中间步骤失败，断言 DB 状态等于"流程开始前"
+2. **重试 idempotent**：连续两次成功调用，最终状态等于"只调用一次"
+3. **中间态回退**（如适用）：mock 中间步骤失败，断言 status 已回到稳态
+
+## Checklist（写新流程型 command 时过一遍）
+
+- [ ] 持久化推进只在最后一个事务里？
+- [ ] 多条 SQL 用了 `unchecked_transaction()`？
+- [ ] 失败时上游状态会被回滚或保持原样？
+- [ ] 前端走 `useRetryableFlow` 而不是手写 setError + 按钮？
+- [ ] 失败 banner 有重试按钮？
+- [ ] 用户输入 / 上一次成功状态在失败后被保留？
+- [ ] 至少 1 个回归测试覆盖"失败不污染状态"？

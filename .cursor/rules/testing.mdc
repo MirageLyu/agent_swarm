@@ -1,0 +1,109 @@
+---
+description: 后端测试用 in-memory SQLite，新功能至少 1 个 happy path 测试，不要写 sleep-based 测试
+globs: src-tauri/src/**/*.rs,src/**/*.test.{ts,tsx}
+alwaysApply: false
+---
+
+# 测试约定
+
+## 后端（cargo test）
+
+345+ 测试全部 in-memory，pnpm test 必须 < 30s 跑完。新写测试时遵守：
+
+### DB 用 in-memory
+
+```rust
+// ✅
+use crate::db::pool::DbPool;
+let pool = DbPool::open(":memory:").await.unwrap();
+crate::db::migrations::run(&pool).await.unwrap();
+
+// ❌ 在测试里建临时文件
+let path = tempfile::tempdir().unwrap();
+DbPool::open(path.path().join("test.db")).await.unwrap();
+```
+
+### 不要 sleep 等待异步
+
+```rust
+// ❌ flaky，CI 慢机器会失败
+agent.start();
+tokio::time::sleep(Duration::from_millis(100)).await;
+assert_eq!(agent.status(), "completed");
+
+// ✅ 用 channel / oneshot / join handle
+let handle = agent.start();
+handle.await.unwrap();
+assert_eq!(agent.status(), "completed");
+
+// ✅ 实在要轮询，加 timeout 上限和退避
+tokio::time::timeout(Duration::from_secs(2), async {
+    loop {
+        if agent.status() == "completed" { break; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}).await.expect("agent did not finish in 2s");
+```
+
+### 真 LLM 调用要 mock
+
+```rust
+// ❌ 直接打真 API，CI 没 key + 烧钱 + 不确定
+let resp = anthropic_client.send(&prompt).await?;
+
+// ✅ 用 trait + mock impl
+let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::responding_with("hello"));
+```
+
+### 命名
+
+`test_<scope>_<behavior>`：
+- `test_planner_decomposes_into_dag`
+- `test_approval_expires_after_ttl`
+- `test_evaluator_handles_oversized_diff`
+
+## 前端（vitest）
+
+只测**纯函数 + 复杂 reducer**，不测 React 渲染（成本高、抗变更性差）。
+
+```typescript
+// ✅ 适合写测试
+describe("parseCheckpointCost", () => {
+  it("extracts tokens and cost from checkpoint content", () => { ... });
+});
+
+// ⚠️ 慎写 React 测试；只在交互逻辑复杂到 1 周回归一次的组件才值得
+```
+
+## 新功能必带
+
+- 至少 1 个 **happy path** 测试（最常见正确流程）
+- 至少 1 个 **错误路径** 测试（会真的发生的失败：not found / invalid input / timeout）
+- 边界值（empty / max）按需
+
+## 反例
+
+```rust
+// ❌ 只有 happy path，没考虑 mission 不存在
+#[test]
+fn test_get_mission_returns_data() {
+    let m = repo.get_mission("known_id").unwrap();
+    assert_eq!(m.id, "known_id");
+}
+
+// ✅ 加上失败路径
+#[test]
+fn test_get_mission_not_found_returns_err() {
+    let err = repo.get_mission("nonexistent").unwrap_err();
+    assert!(matches!(err, RepoError::NotFound { .. }));
+}
+```
+
+## 跑测试
+
+```bash
+cargo test --lib              # 后端全部
+cargo test --lib mission::    # 单个模块
+pnpm test                     # 前端 vitest
+pnpm test -- planner-stream   # 单文件
+```

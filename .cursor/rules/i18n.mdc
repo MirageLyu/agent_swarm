@@ -1,0 +1,86 @@
+---
+description: 前端任何用户可见文本必须走 i18n（react-i18next）；不要硬编码中英文
+globs: src/**/*.{ts,tsx}
+alwaysApply: false
+---
+
+# i18n 强制约束
+
+## 何时必须翻译
+
+任何**最终会渲染给用户看**的字符串：
+- JSX text node、`placeholder` / `title` / `aria-label`
+- 来自前端构造的错误信息 / 状态提示 / 按钮文案
+- 弹窗标题、空态文案、loading 文案
+
+## 何时不需要翻译
+
+- 调试日志（`console.warn` 内容）
+- HTML 标签内属性 key、CSS class 名
+- 给后端的命令名 / artifact 路径 / 配置 key
+- 对照表里的英文 enum 值（`status`、`kind` 等机器值）
+
+## 组件里怎么用
+
+```typescript
+import { useTranslation } from "react-i18next";
+
+function MyComp() {
+  const { t } = useTranslation("mission"); // namespace 选最贴近的
+  return <button title={t("startBtn.title")}>{t("startBtn.label")}</button>;
+}
+```
+
+带变量：`t("welcome", { name })` ←→ `"welcome": "Hello, {{name}}!"`
+
+复数：`t("itemCount", { count })` ←→ `"itemCount_one": "{{count}} item"` + `"itemCount_other": "{{count}} items"`
+
+文本里有 React 元素时**必须**用 `<Trans>`，不要拼字符串：
+
+```typescript
+import { Trans } from "react-i18next";
+<Trans i18nKey="confirmDelete" t={t}>
+  Delete <strong>{{ name }}</strong>?
+</Trans>
+```
+
+## 同步两个 locale 文件
+
+新 key 必须**同时**加到：
+- `src/i18n/locales/en-US.json`（fallback，先加这个）
+- `src/i18n/locales/zh-CN.json`
+
+漏了 zh-CN 不会报错，但中文用户会看到英文，是回归。
+
+## 后端错误的处理
+
+**不要** `setError(String(e))`。用：
+
+```typescript
+import { formatBackendError } from "../i18n/format-error";
+.catch(e => setError(formatBackendError(e)));
+```
+
+`formatBackendError` 会解码后端 `IpcError` JSON 并按 `code` 在 `errors` namespace 翻译。
+
+## 反例
+
+```tsx
+// ❌ 硬编码
+<button>Start Mission</button>
+<input placeholder="输入任务描述..." />
+setError("Mission not found");
+setError(String(e));
+
+// ✅
+<button>{t("startMission")}</button>
+<input placeholder={t("missionInputPlaceholder")} />
+// 后端用 IpcError::mission_not_found(id)，前端：
+.catch(e => setError(formatBackendError(e)));
+```
+
+## namespace 速查
+
+`common` / `nav` / `settings` / `mission` / `workspace` / `report` / `approval` / `insights` / `preflight` / `errors`。
+
+设计原则在 `src/i18n/index.ts` 顶部 JSDoc。新 namespace 必须同时更新 `NAMESPACES` 数组 + 两个 locale。

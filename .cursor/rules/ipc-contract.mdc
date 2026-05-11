@@ -1,0 +1,63 @@
+---
+description: Rust 端的 Tauri command request/response 类型必须和 src/ipc/commands.ts 的 TS interface 同步；新 command 必须在 lib.rs 注册
+globs: src-tauri/src/commands/**/*.rs,src/ipc/**/*.ts
+alwaysApply: false
+---
+
+# IPC 契约同步
+
+后端和前端通过 Tauri command + event 串联，类型对不上时**编译期不会报错**，只会运行时报 "missing field" / 数据 undefined，调试很贵。
+
+## 改 / 加 command 必做的三件事
+
+1. **后端**：`src-tauri/src/commands/xxx.rs` 写函数，加 `#[tauri::command]`。
+2. **后端注册**：`src-tauri/src/lib.rs` 的 `tauri::generate_handler![...]` 列表里加上新函数名，否则前端 `invoke` 会 404。
+3. **前端**：`src/ipc/commands.ts` 镜像所有 `Request` / `Response` struct 为 TS `interface`，并在 `commands` 对象里加调用包装。
+
+## struct 命名约定
+
+- 入参 struct：`XxxRequest`（snake_case fields，serde 默认）
+- 出参 struct：`XxxResponse` 或语义化的 `MissionDetail` 等
+- 字段名用 **snake_case**，Rust 和 TS 两端都是 snake_case；**不要**配 `#[serde(rename_all = "camelCase")]` 让两端不一致
+
+## 反例
+
+```rust
+// ❌ Rust 端加了字段，前端忘了同步 → 前端拿到 undefined
+pub struct PlanResponse {
+    pub mission_id: String,
+    pub planner_session_id: Option<String>, // ← 新加
+}
+```
+
+```typescript
+// ❌ src/ipc/commands.ts 里 PlanResponse 还是旧的，runtime 才发现
+interface PlanResponse {
+  mission_id: string;
+}
+```
+
+```rust
+// ❌ 单边 rename 让两端字段名对不上
+#[derive(Serialize)]
+pub struct Foo {
+    #[serde(rename = "missionId")] // 前端如果还是 mission_id 就崩
+    pub mission_id: String,
+}
+```
+
+## 加 event 时同样
+
+新 `app.emit("xxx-event", payload)` 必须在 `src/ipc/events.ts` 加：
+
+1. `XxxPayload` interface
+2. `onXxx(handler)` 包装
+
+## 检查清单（写 / 改 command 时过一遍）
+
+- [ ] 后端函数签名加了 `#[tauri::command]`
+- [ ] `lib.rs` `generate_handler!` 注册了
+- [ ] 前端 `commands.ts` 的 interface 字段一一对应（snake_case）
+- [ ] 前端 `commands.ts` 的 `commands.xxx` 包装函数加上了
+- [ ] 错误返回符合 `ipc-error.mdc`（用 `IpcError`）
+- [ ] 用户可见文本符合 `i18n.mdc`（前端 `t()`，错误用 `formatBackendError`）

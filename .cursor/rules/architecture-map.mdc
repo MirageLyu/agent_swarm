@@ -1,0 +1,78 @@
+---
+description: Miragenty 目录心智图 + FM 模块到代码的映射。开始处理新需求、不确定代码该放哪个目录、或者要找某个 FM 功能在哪实现时，先读这条
+alwaysApply: false
+---
+
+# Miragenty 目录心智图
+
+Tauri 2 + React 19 + Rust，**desktop-only**（macOS 主战场，Linux/Win 次之）。
+
+## 顶层
+
+```
+src/                  前端 (React + TS + Vite)
+src-tauri/            后端 (Rust)
+docs/requirements/    每个 FM 模块的 IR/SR/AR + 测试用例
+docs/dts/             缺陷追踪
+design/prototypes/    HTML 原型，决定 UI
+.cursor/rules/        本目录 — 项目长期约束
+```
+
+## 后端 (`src-tauri/src/`)
+
+| 目录 | 职责 |
+|---|---|
+| `commands/` | Tauri IPC 命令（≈50 个）。**用户能从前端调到的**全在这。 |
+| `agent/` | AgentEngine、Planner、Evaluator、Scheduler、Approval coordinator + gate、Report generator。这是产品的**大脑**。 |
+| `git/` | WorktreeManager、frontier merge、3-layer 冲突解决器。 |
+| `tools/` | 内建工具（read_file、write_file、shell_exec、publish_artifact、fetch_url）。 |
+| `llm/` | Provider 抽象（Anthropic + OpenAI-compat）。 |
+| `db/` | SQLite + 22 条 migration + queries。 |
+| `error_code.rs` | `IpcError` 结构化错误码（i18n 友好）。**新错误必须加 builder**。 |
+| `lib.rs` | tauri::generate_handler! 注册所有 command；启动 wire-up。 |
+
+## 前端 (`src/`)
+
+| 目录 | 职责 |
+|---|---|
+| `views/` | 顶层路由：Missions / Preflight / Workspace / Review / Report / Insights / Settings。每个 view 一个文件。 |
+| `components/` | 按 view 二级分组：`mission/` `workspace/` `report/` `approval/` `preflight/` `settings/` `ui/`。 |
+| `stores/` | Zustand store（agent / task / ui / approval）。**只放跨组件状态**，组件内 state 用 useState。 |
+| `ipc/` | Tauri command + event 的 TS 包装。`commands.ts` 镜像后端 struct，`events.ts` 镜像后端 emit。 |
+| `i18n/` | i18n 框架。`index.ts` 是设计文档；`locales/{en-US,zh-CN}.json` 是文案；`format-error.ts` 是后端错误的本地化适配器。 |
+
+## 关键基础设施 / 入口
+
+- **加新 IPC 命令** → `src-tauri/src/commands/<area>.rs` + `lib.rs` 注册 + `src/ipc/commands.ts` 镜像（见 `ipc-contract.mdc`）
+- **加用户文本** → 永远走 `t()`；改两个 locale 文件（见 `i18n.mdc`）
+- **加用户错误** → `IpcError` builder + `errors` namespace 文案（见 `ipc-error.mdc`）
+- **改 schema** → 追加 migration，永不改老的（见 `db-migrations.mdc`）
+- **加事件类型** → `agent_events` 表的 `kind` CHECK 约束 + `src/stores/agent-store.ts` 的 `AgentEvent["kind"]`
+- **加 UI view** → `src/views/XxxView.tsx` + `src/components/Sidebar.tsx` 加导航项 + `nav` namespace 加文案
+
+## FM 模块到代码的映射
+
+| FM | 主要代码位置 |
+|---|---|
+| FM-01/07 Planning & DAG | `agent/planner*.rs` + `components/mission/TaskDAG.tsx` |
+| FM-02/03 Multi-agent | `agent/scheduler.rs` + `agent/engine.rs` |
+| FM-04/06 Activity & Intervention | `commands/agent.rs` (events) + `views/WorkspaceView.tsx` |
+| FM-05 Code Review | `views/ReviewView.tsx` + Monaco |
+| FM-08 Mission Lifecycle | `commands/mission.rs` (delete/restart/stop) |
+| FM-10 Pre-flight | `agent/preflight*.rs` + `views/PreflightView.tsx` |
+| FM-11 Evaluator | `agent/evaluator*.rs` + `components/review/EvaluatorAnnotation.tsx` |
+| FM-12 Mission Report | `agent/report_generator.rs` + `views/ReportView.tsx` |
+| FM-13 Insights | `commands/insights.rs` + `views/InsightsView.tsx` |
+| FM-14 Approval Queue | `agent/approval*.rs` + `components/approval/` |
+| FM-15 Worktree v2.2 | `git/` + `components/mission/MissionDeliveryPanel.tsx` |
+
+## 反例（找错地方写代码）
+
+- ❌ 在 `views/XxxView.tsx` 里直接 `tauriInvoke('foo')` —— 应该过 `src/ipc/commands.ts` 包装
+- ❌ 在 `commands/` 里写复杂 agent 逻辑 —— commands 只做"翻译 + 调 agent 模块"
+- ❌ 把 store 当全局变量塞 derived state —— 派生状态用 `useMemo`
+- ❌ 在组件里直接 `JSON.parse(error)` —— 用 `formatBackendError`
+
+## 想了解某模块详情
+
+读 `docs/requirements/FM-XX-*.md`，每个 FM 模块都有 IR（需求）/ SR（设计）/ AR（验收）三件套。

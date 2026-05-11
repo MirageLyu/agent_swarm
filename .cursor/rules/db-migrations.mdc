@@ -1,0 +1,76 @@
+---
+description: SQLite migration 永远追加不修改；命名 NNN_description 递增
+globs: src-tauri/src/db/migrations.rs,src-tauri/src/db/queries.rs
+alwaysApply: false
+---
+
+# DB Migration 约定
+
+migration 一旦合入 main 分支就视为**已发布**——用户机器上已经执行过了。
+
+## 铁律
+
+1. **永不修改已发布的 migration**——已经执行过的 SQL 改了不会重跑，开发机和用户机会处于不同 schema。
+2. **永不重排顺序 / 改名 / 删除**——`schema_migrations` 表按 name 去重，改名等于跑两次。
+3. **新需求 = 新 migration**——加列、改约束、回填数据，全部走新文件。
+
+## 添加新 migration
+
+在 `src-tauri/src/db/migrations.rs` 的 `MIGRATIONS` 数组**末尾**追加：
+
+```rust
+const MIGRATIONS: &[(&str, &str)] = &[
+    // ... 已有 22 条 ...
+    (
+        "023_fmXX_short_description",
+        r#"
+        ALTER TABLE missions ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+        CREATE INDEX IF NOT EXISTS idx_missions_priority ON missions(priority);
+        "#,
+    ),
+];
+```
+
+命名规范：`NNN_<scope>_<description>`
+- `NNN` 三位数字递增（当前最高 `022`，下一个就是 `023`）
+- `<scope>` 用 FM 模块编号或域名：`fm15_s1` / `fm14` / `evaluator`
+- `<description>` 蛇形小写、动宾结构：`add_priority` / `enlarge_status_check`
+
+## SQLite 限制要绕过
+
+SQLite 不能 `ALTER TABLE DROP COLUMN`（旧版本）、不能改 CHECK 约束、不能改类型。需要这种变更时：
+
+```sql
+-- 023_enlarge_status_check
+CREATE TABLE missions_new (...);  -- 新 schema
+INSERT INTO missions_new SELECT * FROM missions;
+DROP TABLE missions;
+ALTER TABLE missions_new RENAME TO missions;
+-- 别忘了重建索引和触发器
+```
+
+## 反例
+
+```rust
+// ❌ 改老 migration 的 SQL
+("001_initial", r#"
+    CREATE TABLE missions (
+        id TEXT PRIMARY KEY,
+        priority INTEGER, -- ← 不要在已发布的 migration 里加字段
+        ...
+    );
+"#),
+
+// ❌ 把 022 的 name 改了
+("022_fm12_mission_report_v2", ...) // 之前叫 022_fm12_mission_report
+
+// ❌ 在 migration 之间插入新条目（破坏顺序）
+("014_5_hotfix", ...) // 不行，必须追加到末尾
+
+// ✅ 都用新 migration 解决
+("023_missions_add_priority", "ALTER TABLE missions ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;"),
+```
+
+## 改 query 时
+
+`queries.rs` 里读写新字段前**先确认 migration 已落地**。本地开发可以删 `~/Library/Application Support/com.miragenty.app/miragenty.db` 让 migration 重跑。
