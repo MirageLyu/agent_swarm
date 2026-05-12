@@ -654,6 +654,13 @@ async fn preflight_with_continuation(
 
         // FM-10.5: Full Compaction check (only on first iteration of each round)
         if iteration == 0 {
+            // 关键修复：之前这里查了 `compacted_at IS NOT NULL` 拿到一个 bool，但调用
+            // should_compact 时第 5 个参数硬编码为 false —— compact 信号根本没传进去。
+            // 配合 should_compact 内 `round >= 12 → 必触发`，结果第 12 轮之后每发
+            // 一条消息都触发一次 50s+ 的完整 compaction，UI 永远卡在"正在优化对话上下文…"。
+            //
+            // 现在直接读取 compacted_at 的 round 值（INTEGER，migration 012 定义），
+            // None 表示本 session 还没 compact 过；should_compact 据此实现冷却。
             let compact_state = db.with_conn(|conn| {
                 let last_input: Option<u64> = conn
                     .query_row("SELECT last_input_tokens FROM preflight_sessions WHERE id = ?", [session_id], |row| row.get(0))
@@ -661,18 +668,18 @@ async fn preflight_with_continuation(
                 let failures: u32 = conn
                     .query_row("SELECT compaction_failures FROM preflight_sessions WHERE id = ?", [session_id], |row| row.get(0))
                     .unwrap_or(0);
-                let already_compacted: bool = conn
-                    .query_row("SELECT compacted_at IS NOT NULL FROM preflight_sessions WHERE id = ?", [session_id], |row| row.get(0))
-                    .unwrap_or(false);
-                Ok::<_, anyhow::Error>((last_input, failures, already_compacted))
-            }).unwrap_or((None, 0, false));
+                let last_compacted_round: Option<u32> = conn
+                    .query_row("SELECT compacted_at FROM preflight_sessions WHERE id = ?", [session_id], |row| row.get(0))
+                    .ok().flatten();
+                Ok::<_, anyhow::Error>((last_input, failures, last_compacted_round))
+            }).unwrap_or((None, 0, None));
 
             let (needs_compact, needs_warn) = planner::should_compact(
                 compact_state.0,
                 caps.context_window,
                 belief_state_snapshot.round,
                 compact_state.1,
-                false,
+                compact_state.2,
             );
 
             if needs_warn {

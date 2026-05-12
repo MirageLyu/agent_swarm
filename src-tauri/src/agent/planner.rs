@@ -429,30 +429,53 @@ pub fn estimate_tokens(text: &str) -> u64 {
 }
 
 /// Check if full compaction should be triggered (FR-10.5.4).
+///
+/// 返回 `(should_compact, should_warn)`。
+///
+/// 不变量：**compact 之间必须有冷却**。否则第 12 轮后每个 user 消息都会触发一次
+/// 完整 compaction（一次独立的非流式 LLM 调用，最长 120s），UI 上每条气泡都显示
+/// "正在优化对话上下文…"，体验崩。
+///
+/// 触发规则：
+/// - token ratio ≥ 0.70 **且** 距离上次 compact ≥ 3 轮 → 触发
+/// - token ratio ≥ 0.55 → 仅 warn（不触发）
+/// - 从未 compact 过 **且** round ≥ 12 → 触发"首次预防性 compact"（FR-10.5.4）
+/// - 否则不触发
+///
+/// `last_compacted_round` 来自 `preflight_sessions.compacted_at`（migration 012），
+/// 是最近一次成功 compact 时记录的 round 编号；`None` 表示本 session 还没 compact 过。
 pub fn should_compact(
     last_input_tokens: Option<u64>,
     context_window: u64,
     round: u32,
     compaction_failures: u32,
-    already_compacting: bool,
+    last_compacted_round: Option<u32>,
 ) -> (bool, bool) {
-    // Returns (should_compact, should_warn)
-    if already_compacting || compaction_failures >= 3 {
+    if compaction_failures >= 3 {
         return (false, false);
     }
 
-    if round >= 12 {
-        return (true, false);
-    }
+    let rounds_since_compact = match last_compacted_round {
+        Some(last) => round.saturating_sub(last),
+        None => u32::MAX,
+    };
 
     if let Some(tokens) = last_input_tokens {
         let ratio = tokens as f64 / context_window as f64;
-        if ratio >= 0.70 {
+        // 距离上次 compact 至少 3 轮才允许再次 token-触发，避免 compact 完 token
+        // 仍然偏高时连续触发（compact 后第一轮的 input 还包含较长 summary）。
+        if ratio >= 0.70 && rounds_since_compact >= 3 {
             return (true, false);
         }
         if ratio >= 0.55 {
             return (false, true);
         }
+    }
+
+    // Round-based 触发只用于"首次预防性 compact"。一旦做过一次，后续完全交给
+    // token-ratio 判定；否则到了 12 轮以后每发一条消息都会再压一次。
+    if last_compacted_round.is_none() && round >= 12 {
+        return (true, false);
     }
 
     (false, false)
@@ -1850,27 +1873,56 @@ mod tests {
 
     #[test]
     fn ut_10_5_4a_no_compact_low_usage() {
-        let (compact, warn) = should_compact(Some(10000), 100000, 5, 0, false);
+        let (compact, warn) = should_compact(Some(10000), 100000, 5, 0, None);
         assert!(!compact);
         assert!(!warn);
     }
 
     #[test]
     fn ut_10_5_4b_compact_high_usage() {
-        let (compact, _) = should_compact(Some(75000), 100000, 5, 0, false);
+        let (compact, _) = should_compact(Some(75000), 100000, 5, 0, None);
         assert!(compact);
     }
 
     #[test]
     fn ut_10_5_4c_compact_many_rounds() {
-        let (compact, _) = should_compact(Some(30000), 100000, 12, 0, false);
+        let (compact, _) = should_compact(Some(30000), 100000, 12, 0, None);
         assert!(compact);
     }
 
     #[test]
     fn ut_10_5_4e_circuit_breaker() {
-        let (compact, _) = should_compact(Some(90000), 100000, 15, 3, false);
+        let (compact, _) = should_compact(Some(90000), 100000, 15, 3, None);
         assert!(!compact, "Should not compact after 3 failures");
+    }
+
+    /// 回归测试：第 12 轮触发首次 compact 后，第 13/14/15 轮（token 没飙到 70%）
+    /// **不能**再因为 round 阈值而再次触发。这就是用户报告的"每条消息都显示
+    /// 正在优化对话上下文"bug，根因是 should_compact 完全没用上 compacted_at 信号。
+    #[test]
+    fn ut_10_5_4f_round_trigger_fires_only_once() {
+        let (first, _) = should_compact(Some(30000), 100000, 12, 0, None);
+        assert!(first, "12 轮且未 compact 过：应触发首次预防性 compact");
+
+        for r in 13..=20 {
+            let (again, _) = should_compact(Some(30000), 100000, r, 0, Some(12));
+            assert!(
+                !again,
+                "round={r}：已经 compact 过，token 也低，绝不能再触发 compact（否则每轮都跑一次 50s LLM）"
+            );
+        }
+    }
+
+    /// compact 之后 token 仍偏高时的冷却：距上次 compact < 3 轮即便 ratio ≥ 0.70 也不再触发。
+    /// 这覆盖另一种 "连续触发" 路径：compact 完 history 里塞了长 summary，下一轮
+    /// input 仍然 ≥ 70%，如果没有冷却就又压一次。
+    #[test]
+    fn ut_10_5_4g_post_compact_cooldown() {
+        let (compact_now, _) = should_compact(Some(75000), 100000, 13, 0, Some(12));
+        assert!(!compact_now, "刚 compact 完 1 轮，token 仍高也要忍住");
+
+        let (compact_later, _) = should_compact(Some(75000), 100000, 15, 0, Some(12));
+        assert!(compact_later, "距上次 compact 已 3 轮且 token 仍高：可以再压一次");
     }
 
     // --- FM-10.6 Decision Log tests ---
