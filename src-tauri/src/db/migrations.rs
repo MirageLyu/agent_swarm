@@ -613,6 +613,45 @@ const MIGRATIONS: &[(&str, &str)] = &[(
             ON report_votes(report_id);
         "#,
     ),
+    // retryable-flow rule 1 的历史脏数据回收（一次性）。
+    //
+    // 背景：早期 `sign_contract` 把 `UPDATE mission_contracts SET status='signed'`
+    // 放在 PlannerEngine 之前。Planner 超时 / LLM 失败时，contract 永久卡在 'signed'
+    // 而 tasks 表为空，前端 ContractPanel 的 `readOnly = status === 'signed'` 把整个
+    // 签约区块隐藏 → 用户进入"签约按钮消失"的死锁。
+    //
+    // 新版 `sign_contract` 已经把 `signed` 放进与 tasks 同一个事务（见
+    // commands/preflight.rs::sign_contract 与 retryable-flow.mdc rule 1/2），未来不会
+    // 再产生这种状态。但已发布版本留在用户机器上的脏数据无法自愈，本 migration
+    // 用一条 UPDATE 一次性回收：
+    //
+    //   - 仅命中 `status='signed'` **且** mission 仍处 draft/preflight **且** 该 mission
+    //     下确实没有 tasks 的 contract —— 严格表达"signed 必然伴随 tasks"不变量；
+    //   - 回退到 'drafting' + 清 signed_at，**保留 contract_items**（用户写的 scope/
+    //     constraints 等条目不丢）；
+    //   - 成功签约的 mission（mission.status >= 'planned' 且有 tasks）永远不会被命中。
+    //
+    // 同时保留 idx_mission_contracts_mission 索引，让未来按 mission_id 反查 contract
+    // （sign_contract 第 1 步 + 自愈逻辑）更快。
+    (
+        "023_retryable_flow_recover_stuck_signed_contracts",
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_mission_contracts_mission
+            ON mission_contracts(mission_id);
+
+        UPDATE mission_contracts
+        SET status = 'drafting',
+            signed_at = NULL,
+            updated_at = datetime('now')
+        WHERE status = 'signed'
+          AND mission_id IN (
+              SELECT id FROM missions WHERE status IN ('draft', 'preflight')
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM tasks WHERE tasks.mission_id = mission_contracts.mission_id
+          );
+        "#,
+    ),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
@@ -640,4 +679,140 @@ pub fn run(conn: &Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod migration_023_tests {
+    //! 回归测试：023 一次性回收 `signed` 但 mission 下无 tasks 的脏 contract。
+    //!
+    //! 见 retryable-flow.mdc rule 1。此 migration 表达的不变量：
+    //!   contract.status = 'signed'  ==>  EXISTS tasks WHERE mission_id = …
+    //!
+    //! 测试覆盖：① 真脏数据被回退；② 成功签约的 mission 不被误伤；③ 幂等。
+    use super::run;
+    use rusqlite::Connection;
+
+    /// 跑除了 023 之外的所有 migration，再插入脏数据，再跑 023。
+    /// 这样能精确观察 023 单独的效果，避免被其他 migration 覆盖。
+    fn setup_db_pre_023() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        // 跑全套 migration；023 此时会扫描，但表里啥都没有，等价于 no-op
+        run(&conn).unwrap();
+        // 删 023 的记录，让我们后面手动 setup 脏数据后能再跑一次 023
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE name = '023_retryable_flow_recover_stuck_signed_contracts'",
+            [],
+        ).unwrap();
+        conn
+    }
+
+    fn read_contract_status(conn: &Connection, contract_id: &str) -> (String, Option<String>) {
+        conn.query_row(
+            "SELECT status, signed_at FROM mission_contracts WHERE id = ?",
+            [contract_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        ).unwrap()
+    }
+
+    fn insert_mission(conn: &Connection, id: &str, status: &str) {
+        conn.execute(
+            "INSERT INTO missions (id, title, description, status) VALUES (?, ?, ?, ?)",
+            rusqlite::params![id, "T", "D", status],
+        ).unwrap();
+    }
+
+    fn insert_contract(conn: &Connection, id: &str, mission_id: &str, status: &str, signed_at: Option<&str>) {
+        conn.execute(
+            "INSERT INTO mission_contracts (id, mission_id, status, signed_at) VALUES (?, ?, ?, ?)",
+            rusqlite::params![id, mission_id, status, signed_at],
+        ).unwrap();
+    }
+
+    fn insert_task(conn: &Connection, id: &str, mission_id: &str) {
+        conn.execute(
+            "INSERT INTO tasks (id, mission_id, title, description, complexity, status) VALUES (?, ?, ?, ?, ?, 'pending')",
+            rusqlite::params![id, mission_id, "task title", "desc", "low"],
+        ).unwrap();
+    }
+
+    /// 真脏数据：mission='preflight' + contract='signed' + 0 tasks → 必须回退。
+    /// 这正是用户机器上 26d64c5d 的形态。
+    #[test]
+    fn rolls_back_stuck_signed_contract_with_no_tasks() {
+        let conn = setup_db_pre_023();
+        insert_mission(&conn, "m-stuck", "preflight");
+        insert_contract(&conn, "c-stuck", "m-stuck", "signed", Some("2025-05-12 00:00:00"));
+        // 也插入若干 contract_items，断言回退后不丢
+        conn.execute(
+            "INSERT INTO contract_items (id, contract_id, section, text) VALUES (?, ?, 'scope', ?)",
+            rusqlite::params!["ci-1", "c-stuck", "build calculator"],
+        ).unwrap();
+
+        run(&conn).unwrap();
+
+        let (status, signed_at) = read_contract_status(&conn, "c-stuck");
+        assert_eq!(status, "drafting", "脏 contract 必须回退到 drafting，否则签约按钮永久消失");
+        assert!(signed_at.is_none(), "回退后 signed_at 必须清空");
+
+        let item_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM contract_items WHERE contract_id = 'c-stuck'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(item_count, 1, "contract_items 必须保留 —— 用户写的 scope 不能丢");
+    }
+
+    /// 成功签约的 mission（mission.status='planned' + 有 tasks）→ 必须保持 signed。
+    /// 守住"不误伤"的边界。
+    #[test]
+    fn does_not_touch_legitimately_signed_mission() {
+        let conn = setup_db_pre_023();
+        insert_mission(&conn, "m-ok", "planned");
+        insert_contract(&conn, "c-ok", "m-ok", "signed", Some("2025-05-12 00:00:00"));
+        insert_task(&conn, "t-ok", "m-ok");
+
+        run(&conn).unwrap();
+
+        let (status, signed_at) = read_contract_status(&conn, "c-ok");
+        assert_eq!(status, "signed", "已成功签约 + 有 tasks 的 contract 不能被回退");
+        assert!(signed_at.is_some(), "signed_at 必须保留");
+    }
+
+    /// 边界 case：mission='preflight' + contract='signed' + 居然有 tasks。
+    /// 实际不会发生，但 migration 谨慎一些 —— 既然有 tasks，就当 sign 已完成，不动。
+    #[test]
+    fn does_not_touch_signed_preflight_with_tasks_present() {
+        let conn = setup_db_pre_023();
+        insert_mission(&conn, "m-weird", "preflight");
+        insert_contract(&conn, "c-weird", "m-weird", "signed", Some("2025-05-12 00:00:00"));
+        insert_task(&conn, "t-weird", "m-weird");
+
+        run(&conn).unwrap();
+
+        let (status, _) = read_contract_status(&conn, "c-weird");
+        assert_eq!(status, "signed", "有 tasks 时不视为脏数据");
+    }
+
+    /// 幂等：连续跑两次 migration（人为复位 schema_migrations）效果相同。
+    #[test]
+    fn is_idempotent() {
+        let conn = setup_db_pre_023();
+        insert_mission(&conn, "m-idem", "preflight");
+        insert_contract(&conn, "c-idem", "m-idem", "signed", Some("2025-05-12 00:00:00"));
+
+        run(&conn).unwrap();
+        let (status1, _) = read_contract_status(&conn, "c-idem");
+
+        // 让 023 再跑一次
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE name = '023_retryable_flow_recover_stuck_signed_contracts'",
+            [],
+        ).unwrap();
+        run(&conn).unwrap();
+        let (status2, _) = read_contract_status(&conn, "c-idem");
+
+        assert_eq!(status1, "drafting");
+        assert_eq!(status2, "drafting");
+    }
 }

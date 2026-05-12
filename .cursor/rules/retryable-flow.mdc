@@ -136,6 +136,30 @@ hook 的统一 UX 不变量：
 | `send_preflight_message` LLM 失败 | error event 弹 banner，stored_msgs 丢失，无法重试 | error 路径先把 stored_msgs 落盘 + failed flag，前端渲染重试按钮 |
 | `plan_mission` LLM 超时 | 关闭对话框，输入丢失，要重输 | 输入保留在 store，failure banner 直接重试同一 description |
 
+## 历史脏数据的回收
+
+如果规则确立**之前**的旧代码违反过规则 1（例如先把 `contract.status='signed'` 写
+死，然后耗时步骤崩了），那么用户机器上会有遗留脏数据。**新代码不会自动修复
+这种状态**——它只保证不再产生。必须用一次性 migration 回收。
+
+判定条件：**对不变量的直接表达**。例如 retryable-flow rule 1 的不变量
+"`signed` 必然伴随 tasks"翻成 SQL 就是：
+
+```sql
+-- migrations.rs 中的 023_retryable_flow_recover_stuck_signed_contracts
+UPDATE mission_contracts
+SET status = 'drafting', signed_at = NULL, updated_at = datetime('now')
+WHERE status = 'signed'
+  AND mission_id IN (SELECT id FROM missions WHERE status IN ('draft','preflight'))
+  AND NOT EXISTS (SELECT 1 FROM tasks WHERE tasks.mission_id = mission_contracts.mission_id);
+```
+
+- 命名挂 `retryable_flow_` 前缀让来历自解释
+- 回退到**上一个稳态**（drafting），不删用户已有数据（contract_items 保留）
+- 必须配回归测试，至少 happy path + 不误伤（已成功签的 mission 不被命中）
+- **不要**把这种回收逻辑塞进读路径（如 `get_contract` 自愈）——会污染读写分离
+  且让 bug 不易暴露
+
 ## 测试要求
 
 每个流程型 command 必须有以下回归测试覆盖（见 `testing.mdc`）：
