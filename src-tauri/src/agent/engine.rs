@@ -43,12 +43,37 @@ const READ_ONLY_LOOP_THRESHOLD: u32 = 5;
 /// 步数距上限只剩 N 时注入"剩余 N 步"提示。
 const STEPS_REMAINING_HINT: u32 = 5;
 /// Issue 3: 单步 LLM 流被 idle watchdog 中止（卡住 180s）时，给 LLM 发"continue"
-/// 重试的次数预算。耗尽则真失败。
+/// 重试的次数预算。耗尽则真失败。**Step 级**：每个 step 开始时重置。
 ///
 /// 之前一次 IdleTimeout 就把整个 agent 标 failed，对于经常半截卡住的 reseller
 /// （DeepSeek-V4 / SiliconFlow Qwen）非常痛。改成"卡住就 continue"，更接近用户
 /// 在 Cursor / Claude Desktop 看到 "continue" 按钮的直觉。
+///
+/// 为什么 step 级而非任务级：任务级 budget 等于把"可恢复故障"当"不可恢复故障"
+/// 处理——一个 80-step 任务里偶发 3 次卡就直接 failed，违背 retry 的本意。
+/// max_steps 自身（80）已是 retry 总次数的隐式上限，加上 cancel_token + UI 可见
+/// 的 system_hint，无需再加任务级 budget。
 const DEFAULT_IDLE_RETRY_BUDGET: u32 = 2;
+
+/// Issue 3: 纯函数版的"idle-retry budget 转移"语义。
+///
+/// 抽出来仅是为了写单测——loop 里实际还是 inline 状态机。**契约**：
+/// - 进入新 step（`resume_after_idle_retry == false`）→ budget 重置到 `default`
+/// - 上一次是 retry 跳过来的（`resume_after_idle_retry == true`）→ 保留当前 budget
+///
+/// 任何对这个函数的"简化"（例如忘了 reset 或永远 reset）都会被下面 mod tests 抓住。
+#[inline]
+fn next_idle_retry_budget(
+    resume_after_idle_retry: bool,
+    current: u32,
+    default: u32,
+) -> u32 {
+    if resume_after_idle_retry {
+        current
+    } else {
+        default
+    }
+}
 
 /// 只读工具集合（不会改变工作区状态）。L3 循环检测据此判断是否在原地探索。
 fn is_read_only_tool(name: &str) -> bool {
@@ -216,15 +241,34 @@ impl AgentEngine {
         let mut hinted_read_only_loop = false;
         let mut retries_left: u32 = opts.guardrail_retry_budget;
         let mut hinted_remaining_steps = false;
-        // Issue 3: idle-retry 预算。每次 stream 卡住注入 continue 后 -= 1，
-        // 单次 step 成功完成（response 拿到）后**不**重置 —— 我们要的是"整任务"
-        // 容忍上限，不是"每步容忍 2 次"，否则一个真坏的模型会让 task 跑很久。
+        // Issue 3: idle-retry 预算（**step 级**）。
+        //
+        // 早期设计是"任务级"——整个 task 总共 2 次容错——结果一个 80-step 的任务
+        // 偶发卡 3 次就直接 failed。Reseller 的真实卡频率（DeepSeek-V4 / SiliconFlow
+        // Qwen）大约是每 10-20 step 一次，任务级 budget 等于把可恢复故障当不可恢复
+        // 处理，违背 retry 的本意。
+        //
+        // 改成 step 级：每个 step 开始时把 budget 重置到 `opts.idle_retry_budget`。
+        // 兜底 invariant：
+        // - `max_steps`（默认 80）天然是 retry 总次数的隐式上限（每次 retry 都 step += 1）
+        // - 每次 retry 都 emit `system_hint`，用户能在 Workspace 实时看到，可主动 cancel
+        // - 与"每 step 是一次独立 LLM 调用"的语义对齐，更符合直觉
         let mut idle_retries_left: u32 = opts.idle_retry_budget;
+        let mut resume_after_idle_retry = false;
 
         self.emit_event(agent_id, step, "status_change", "running");
         self.update_agent_status(agent_id, "running");
 
         loop {
+            // step 级 budget 重置：仅当本次迭代不是从 idle-retry continue 跳过来时
+            // 才重置。语义已抽到 `next_idle_retry_budget` 单独写测试守住。
+            idle_retries_left = next_idle_retry_budget(
+                resume_after_idle_retry,
+                idle_retries_left,
+                opts.idle_retry_budget,
+            );
+            resume_after_idle_retry = false;
+
             if self.cancel_token.is_cancelled() {
                 return self.finish_cancelled(agent_id, step);
             }
@@ -317,8 +361,11 @@ impl AgentEngine {
                     if idle_retries_left > 0 =>
                 {
                     idle_retries_left -= 1;
+                    // 关键：标记下一次 loop 是"延续本 step 的 retry"，否则 loop 顶部
+                    // 会把 budget 重置回满，等于无限 retry。
+                    resume_after_idle_retry = true;
                     let notice = format!(
-                        "LLM stream idle for {idle_secs}s (threshold {threshold_secs}s); auto-continue ({} retries left)",
+                        "LLM stream idle for {idle_secs}s (threshold {threshold_secs}s); auto-continue ({} retries left this step)",
                         idle_retries_left
                     );
                     tracing::warn!(
@@ -1121,4 +1168,64 @@ fn render_produces_brief(produces: &[(String, String)]) -> String {
         .map(|(name, ty)| format!("  - {name} ({ty})"))
         .collect();
     format!("\n\n## Required Artifacts\n{}", lines.join("\n"))
+}
+
+#[cfg(test)]
+mod idle_retry_budget_tests {
+    //! 回归测试：`next_idle_retry_budget` 是 idle-retry 设计的契约函数。
+    //!
+    //! 任何"简化"——例如永远 reset / 永远不 reset / reset 条件反了——都会让
+    //! 用户经历两类回归：
+    //!  - 永远 reset → 等价于无限 retry，遇到真挂的 provider task 会跑到 max_steps 才挂
+    //!  - 永远不 reset → 回到任务级 budget 的老 bug，长 task 撞 3 次卡就 failed
+    //!
+    //! 守住这一组小不变量就能让未来的重构不至于摔进同一个坑。
+    use super::next_idle_retry_budget;
+
+    #[test]
+    fn new_step_resets_to_default() {
+        assert_eq!(next_idle_retry_budget(false, 0, 2), 2);
+        assert_eq!(next_idle_retry_budget(false, 1, 2), 2);
+        assert_eq!(next_idle_retry_budget(false, 2, 2), 2);
+    }
+
+    #[test]
+    fn retry_continuation_keeps_current() {
+        // 第一次 retry 后剩 1
+        assert_eq!(next_idle_retry_budget(true, 1, 2), 1);
+        // 第二次连续 retry 后剩 0
+        assert_eq!(next_idle_retry_budget(true, 0, 2), 0);
+    }
+
+    #[test]
+    fn full_step_lifecycle_two_retries_then_recover() {
+        // 模拟一个 step：默认 budget=2，连续 2 次 retry，然后 step 成功 → 下一个 step 重置回 2
+        let default = 2u32;
+
+        // 进入新 step
+        let mut budget = next_idle_retry_budget(false, 99, default);
+        assert_eq!(budget, 2, "新 step 必须重置");
+
+        // 第一次 IdleTimeout
+        budget -= 1;
+        budget = next_idle_retry_budget(true, budget, default);
+        assert_eq!(budget, 1, "retry 续命，不重置");
+
+        // 第二次 IdleTimeout
+        budget -= 1;
+        budget = next_idle_retry_budget(true, budget, default);
+        assert_eq!(budget, 0, "再次 retry 续命，依然不重置");
+
+        // 这一步 LLM 终于回了完整 response，进入下一个 step（resume = false）
+        budget = next_idle_retry_budget(false, budget, default);
+        assert_eq!(budget, 2, "step 成功后下一个 step 必须再次重置回满");
+    }
+
+    #[test]
+    fn zero_default_disables_retry() {
+        // 用户/未来配置如果把 budget 设为 0，整套机制等价于"卡就 fail"——
+        // 这是合法配置，函数不应抛错或返回 surprising 值。
+        assert_eq!(next_idle_retry_budget(false, 0, 0), 0);
+        assert_eq!(next_idle_retry_budget(true, 0, 0), 0);
+    }
 }
