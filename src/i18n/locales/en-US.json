@@ -288,7 +288,11 @@
     "dag": {
       "noTasks": "No tasks yet",
       "addTask": "+ Add Task",
-      "autoLayout": "Auto Layout"
+      "autoLayout": "Auto Layout",
+      "showReferenceEdges": "Show reference edges ({{count}})",
+      "hideReferenceEdges": "Hide reference edges ({{count}})",
+      "referenceEdgesHint": "Reference edges carry document-style artifacts (design docs, API specs, reports). Hidden by default to reduce visual clutter; toggle on to see the full artifact provenance.",
+      "referenceFanOutTooltip": "This node feeds {{count}} reference artifact(s) downstream (hidden). Toggle \"Show reference edges\" to expand."
     },
     "taskNode": {
       "edit": "Edit",

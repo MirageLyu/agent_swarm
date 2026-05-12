@@ -288,7 +288,11 @@
     "dag": {
       "noTasks": "暂无任务",
       "addTask": "+ 添加任务",
-      "autoLayout": "自动布局"
+      "autoLayout": "自动布局",
+      "showReferenceEdges": "显示参考依赖 ({{count}})",
+      "hideReferenceEdges": "隐藏参考依赖 ({{count}})",
+      "referenceEdgesHint": "参考依赖：携带文档型 artifact 的边（架构文档 / 接口契约 / 报告等）。默认折叠以避免视觉拥挤；展开可查看完整 artifact 流向。",
+      "referenceFanOutTooltip": "该节点向下游分发 {{count}} 份文档型 artifact（已折叠）。点击工具栏「显示参考依赖」展开。"
     },
     "taskNode": {
       "edit": "编辑",

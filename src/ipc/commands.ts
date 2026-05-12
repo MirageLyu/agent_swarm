@@ -67,11 +67,24 @@ export interface TaskInfo {
   last_failed_at?: string | null;
 }
 
+/**
+ * FM-15 v2.3 边语义分类。
+ * - `producer`：携带 code_module / test_module / config 等实物 artifact 的边；DAG 默认显示。
+ * - `reference`：携带 design_doc / api_spec / schema / docs / report 等文档型 artifact 的边；
+ *   DAG 默认隐藏（toggle 可打开），目的是缓解长 DAG 中"一份架构文档扇出 N 条边"的视觉噪音。
+ *
+ * 当前调度路径**不区分** kind——reference 边仍然要等上游 completed 才能拿到 artifact。
+ * 这个字段是纯视觉/元数据标签，为未来"外部参考资料解耦于 task"埋字段。
+ */
+export type DependencyKind = "producer" | "reference";
+
 export interface DependencyInfo {
   task_id: string;
   depends_on: string;
   /** FM-15 v2.2 (S4): 该依赖边上承载的 artifact id 列表，JSON 字符串。 */
   artifact_refs_json?: string | null;
+  /** FM-15 v2.3：边语义分类。旧 mission 默认为 `producer`。 */
+  kind?: DependencyKind;
 }
 
 export interface MissionDetail {

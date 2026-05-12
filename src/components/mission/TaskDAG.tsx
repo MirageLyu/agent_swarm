@@ -42,15 +42,38 @@ export function TaskDAG({
   const { t } = useTranslation("mission");
   const dagSelectedTaskId = useUiStore((s) => s.dagSelectedTaskId);
   const setDagSelectedTaskId = useUiStore((s) => s.setDagSelectedTaskId);
+  const showReferenceEdges = useUiStore((s) => s.dagShowReferenceEdges);
+  const setShowReferenceEdges = useUiStore((s) => s.setDagShowReferenceEdges);
   const [elevatedNodeId, setElevatedNodeId] = useState<string | null>(null);
 
   const handleElevate = useCallback((id: string | null) => {
     setElevatedNodeId(id);
   }, []);
 
+  // FM-15 v2.3：reference 边默认折叠不画——把"一份文档扇出 N 条"的噪音从 layout
+  // 里就摘掉，hub 节点不再因 reference 抢 layer 槽位。每个上游有多少条被折叠
+  // 由 referenceFanOut 单独算，下方用小角标提示。
+  const { visibleDependencies, referenceFanOut } = useMemo(() => {
+    const fanOut = new Map<string, number>();
+    const visible: typeof dependencies = [];
+    for (const dep of dependencies) {
+      if (dep.kind === "reference") {
+        fanOut.set(dep.depends_on, (fanOut.get(dep.depends_on) ?? 0) + 1);
+        if (!showReferenceEdges) continue;
+      }
+      visible.push(dep);
+    }
+    return { visibleDependencies: visible, referenceFanOut: fanOut };
+  }, [dependencies, showReferenceEdges]);
+
+  const totalReferenceEdges = useMemo(
+    () => Array.from(referenceFanOut.values()).reduce((a, b) => a + b, 0),
+    [referenceFanOut],
+  );
+
   const layout = useMemo(
-    () => computeDagLayout(tasks, dependencies),
-    [tasks, dependencies],
+    () => computeDagLayout(tasks, visibleDependencies),
+    [tasks, visibleDependencies],
   );
 
   const [transform, setTransform] = useState<ViewportTransform>({
@@ -137,14 +160,14 @@ export function TaskDAG({
   // to 是 consumer，所以 edge.from === dep.depends_on，edge.to === dep.task_id。
   const artifactRefMap = useMemo(() => {
     const m = new Map<string, string[]>();
-    for (const dep of dependencies) {
+    for (const dep of visibleDependencies) {
       const refs = parseArtifactRefs(dep);
       if (refs.length > 0) {
         m.set(`${dep.depends_on}->${dep.task_id}`, refs);
       }
     }
     return m;
-  }, [dependencies]);
+  }, [visibleDependencies]);
   const taskMap = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
   const nodeMap = useMemo(
     () => new Map(layout.nodes.map((n) => [n.id, n])),
@@ -173,6 +196,17 @@ export function TaskDAG({
         {hasOverrides && (
           <button className={styles.addBtn} onClick={handleAutoLayout}>
             {t("dag.autoLayout")}
+          </button>
+        )}
+        {totalReferenceEdges > 0 && (
+          <button
+            className={styles.addBtn}
+            onClick={() => setShowReferenceEdges(!showReferenceEdges)}
+            title={t("dag.referenceEdgesHint")}
+          >
+            {showReferenceEdges
+              ? t("dag.hideReferenceEdges", { count: totalReferenceEdges })
+              : t("dag.showReferenceEdges", { count: totalReferenceEdges })}
           </button>
         )}
       </div>
@@ -252,6 +286,44 @@ export function TaskDAG({
                 />
               );
             })}
+            {/* FM-15 v2.3：当 reference 边被折叠时，在 hub 节点右上角显示
+                "feeds N references" 小角标——告诉用户这里其实还连着 N 条文档型
+                依赖，点 toolbar 的 toggle 可以展开。 */}
+            {!showReferenceEdges &&
+              Array.from(referenceFanOut.entries()).map(([taskId, count]) => {
+                const nl = nodeMap.get(taskId);
+                if (!nl) return null;
+                const override = positionOverrides[taskId];
+                const x = (override?.x ?? nl.x) + NODE_WIDTH - 4;
+                const y = (override?.y ?? nl.y) + 4;
+                return (
+                  <g key={`refbadge-${taskId}`} transform={`translate(${x}, ${y})`}>
+                    <title>{t("dag.referenceFanOutTooltip", { count })}</title>
+                    <rect
+                      x={-26}
+                      y={-2}
+                      width={28}
+                      height={14}
+                      rx={7}
+                      fill="var(--color-bg-elevated)"
+                      stroke="var(--color-text-tertiary)"
+                      strokeOpacity={0.5}
+                      strokeWidth={0.8}
+                      strokeDasharray="2 2"
+                    />
+                    <text
+                      x={-12}
+                      y={8}
+                      textAnchor="middle"
+                      fontSize={9}
+                      fill="var(--color-text-tertiary)"
+                      style={{ pointerEvents: "none" }}
+                    >
+                      {`↗ ${count}`}
+                    </text>
+                  </g>
+                );
+              })}
             {/* FM-15 v2.2 (S4): edge 上的 ArtifactBadge——单独一层，便于 z-index 管理 */}
             {layout.edges.map((edge) => {
               const refs = artifactRefMap.get(`${edge.from}->${edge.to}`);

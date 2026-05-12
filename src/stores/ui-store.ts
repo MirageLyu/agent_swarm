@@ -20,6 +20,12 @@ interface UiState {
   workspaceMode: WorkspaceMode;
   commandPaletteOpen: boolean;
   dagSelectedTaskId: string | null;
+  /**
+   * FM-15 v2.3：DAG 视图是否显示 reference（文档型）依赖边。
+   * 默认 false：避免一份架构文档扇出 N 条边把图糊成蜘蛛网。
+   * 用户可以通过 DAG toolbar 的 toggle 打开查看 artifact provenance 全貌。
+   */
+  dagShowReferenceEdges: boolean;
   activePreflightMissionId: string | null;
   activePreflightSessionId: string | null;
   /** FM-12: 当前正在查看的 Mission Report 的 mission_id */
@@ -40,6 +46,7 @@ interface UiState {
   setWorkspaceMode: (mode: WorkspaceMode) => void;
   setCommandPaletteOpen: (open: boolean) => void;
   setDagSelectedTaskId: (id: string | null) => void;
+  setDagShowReferenceEdges: (show: boolean) => void;
   setActivePreflight: (missionId: string | null, sessionId: string | null) => void;
   /** FM-12: 切到 ReportView 同时设置查看哪个 mission；传 null 关闭报告 */
   openMissionReport: (missionId: string | null) => void;
@@ -54,6 +61,7 @@ export const useUiStore = create<UiState>((set) => ({
   workspaceMode: "grid",
   commandPaletteOpen: false,
   dagSelectedTaskId: null,
+  dagShowReferenceEdges: false,
   activePreflightMissionId: null,
   activePreflightSessionId: null,
   activeReportMissionId: null,
@@ -65,6 +73,7 @@ export const useUiStore = create<UiState>((set) => ({
   setWorkspaceMode: (mode) => set({ workspaceMode: mode }),
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
   setDagSelectedTaskId: (id) => set({ dagSelectedTaskId: id }),
+  setDagShowReferenceEdges: (show) => set({ dagShowReferenceEdges: show }),
   setActivePreflight: (missionId, sessionId) =>
     set({ activePreflightMissionId: missionId, activePreflightSessionId: sessionId }),
   openMissionReport: (missionId) =>

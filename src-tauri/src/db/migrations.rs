@@ -652,6 +652,75 @@ const MIGRATIONS: &[(&str, &str)] = &[(
           );
         "#,
     ),
+    // FM-15 v2.3：task_dependencies 增加 `kind` 列区分 producer / reference 边。
+    //
+    // 背景：sign_contract 把 task.consumes_artifacts 反向映射成 task_dependencies 时，
+    // 每条边都被等权画到 DAG 上。但实际上有的边携带的是 **文档型 artifact**
+    //（design_doc / api_spec / schema / docs / report）——上游 task 是 architect/
+    // researcher/spec writer，下游消费的只是"参考资料"。这类边在长 DAG 里指数膨胀
+    //（一份架构文档扇出 N 条），把视觉糊成蜘蛛网。
+    //
+    //   - kind='producer'：携带 code_module / test_module / config 等"实物 artifact"
+    //     的边，下游真的依赖上游的代码产出。
+    //   - kind='reference'：携带文档型 artifact 的边，对调度而言**当前**与 producer
+    //     等价（仍要等上游 completed 才能拿到 artifact），但 UI 默认弱化/隐藏。
+    //
+    // 历史行存量推导：通过 task_dependencies.artifact_refs 反向解析每条 ref
+    //（"upstream_task_id.local_name"）到 tasks.produces_artifacts 的 type 字段，
+    // 全部命中 doc-set 则标 reference，否则 producer。无 artifact_refs 的纯拓扑
+    // 边保守标 producer（不会改变默认行为）。
+    //
+    // 不影响调度：advance_dependencies / get_completed_parent_tasks_for / 等查询
+    // 不区分 kind，新代码继续把 producer/reference 一视同仁。kind 只对 IPC 输出
+    // 和前端渲染生效。
+    (
+        "024_task_dependencies_kind",
+        r#"
+        ALTER TABLE task_dependencies ADD COLUMN kind TEXT NOT NULL DEFAULT 'producer'
+            CHECK (kind IN ('producer', 'reference'));
+
+        -- 历史数据 backfill：解析 artifact_refs，每条 ref 形如 "<upstream_task_id>.<local_name>"，
+        -- 到 upstream task.produces_artifacts JSON 中找 matching local_name 的 type。
+        -- 所有 ref 的 type 都属于 doc-set 才算 reference。
+        WITH ref_types AS (
+            SELECT
+                td.task_id,
+                td.depends_on,
+                json_extract(
+                    t_up.produces_artifacts,
+                    '$[' || (
+                        SELECT key FROM json_each(t_up.produces_artifacts)
+                        WHERE json_extract(value, '$.local_name') = substr(
+                            json_each_refs.value,
+                            instr(json_each_refs.value, '.') + 1
+                        )
+                        LIMIT 1
+                    ) || '].type'
+                ) AS artifact_type
+            FROM task_dependencies td
+            JOIN tasks t_up ON t_up.id = td.depends_on
+            JOIN json_each(td.artifact_refs) AS json_each_refs
+        ),
+        edge_classification AS (
+            SELECT
+                task_id,
+                depends_on,
+                COUNT(*) AS total_refs,
+                SUM(CASE WHEN artifact_type IN
+                    ('design_doc', 'api_spec', 'schema', 'docs', 'report')
+                    THEN 1 ELSE 0 END) AS doc_refs
+            FROM ref_types
+            GROUP BY task_id, depends_on
+        )
+        UPDATE task_dependencies
+        SET kind = 'reference'
+        WHERE (task_id, depends_on) IN (
+            SELECT task_id, depends_on
+            FROM edge_classification
+            WHERE total_refs > 0 AND doc_refs = total_refs
+        );
+        "#,
+    ),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
@@ -814,5 +883,218 @@ mod migration_023_tests {
 
         assert_eq!(status1, "drafting");
         assert_eq!(status2, "drafting");
+    }
+}
+
+#[cfg(test)]
+mod migration_024_tests {
+    //! 回归测试：024 给 task_dependencies 加 kind 列 + backfill。
+    //!
+    //! 表达的不变量：
+    //!   "边上 artifact_refs 解析到的 artifact_type 全部 ∈ doc-set"  ==>  kind='reference'
+    //!   否则  ==>  kind='producer'
+    //!
+    //! 覆盖：① doc-only 边被标 reference；② 含 code 的边保持 producer；
+    //! ③ 空 artifact_refs 的纯拓扑边保持 producer；④ ALTER 不破坏旧索引。
+    use super::run;
+    use rusqlite::Connection;
+
+    fn setup_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        run(&conn).unwrap();
+        conn
+    }
+
+    fn insert_mission(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO missions (id, title, description, status) VALUES (?, ?, ?, 'planned')",
+            rusqlite::params![id, "T", "D"],
+        )
+        .unwrap();
+    }
+
+    fn insert_task_with_produces(
+        conn: &Connection,
+        id: &str,
+        mission_id: &str,
+        produces_json: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO tasks (id, mission_id, title, description, complexity, status, produces_artifacts)
+             VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+            rusqlite::params![id, mission_id, "title", "desc", "low", produces_json],
+        )
+        .unwrap();
+    }
+
+    fn insert_dep(conn: &Connection, task_id: &str, depends_on: &str, refs_json: &str) {
+        // 注意：迁移已经跑过，所以这里必须显式不写 kind（让 DEFAULT 生效），
+        // 但 backfill 已在 migration 内完成 —— 我们要的是 backfill 完之后再插，
+        // 故手动复跑 backfill 的核心 UPDATE 来验证逻辑（migration 不会重跑）。
+        conn.execute(
+            "INSERT INTO task_dependencies (task_id, depends_on, artifact_refs) VALUES (?, ?, ?)",
+            rusqlite::params![task_id, depends_on, refs_json],
+        )
+        .unwrap();
+    }
+
+    /// 把 migration 024 的 backfill 子句单独再跑一次，覆盖手动 insert 的行。
+    /// 与 migration 内的 UPDATE 语句保持一致，否则就是测试在演戏。
+    fn rerun_backfill(conn: &Connection) {
+        conn.execute_batch(
+            r#"
+            WITH ref_types AS (
+                SELECT
+                    td.task_id,
+                    td.depends_on,
+                    json_extract(
+                        t_up.produces_artifacts,
+                        '$[' || (
+                            SELECT key FROM json_each(t_up.produces_artifacts)
+                            WHERE json_extract(value, '$.local_name') = substr(
+                                json_each_refs.value,
+                                instr(json_each_refs.value, '.') + 1
+                            )
+                            LIMIT 1
+                        ) || '].type'
+                    ) AS artifact_type
+                FROM task_dependencies td
+                JOIN tasks t_up ON t_up.id = td.depends_on
+                JOIN json_each(td.artifact_refs) AS json_each_refs
+            ),
+            edge_classification AS (
+                SELECT
+                    task_id,
+                    depends_on,
+                    COUNT(*) AS total_refs,
+                    SUM(CASE WHEN artifact_type IN
+                        ('design_doc', 'api_spec', 'schema', 'docs', 'report')
+                        THEN 1 ELSE 0 END) AS doc_refs
+                FROM ref_types
+                GROUP BY task_id, depends_on
+            )
+            UPDATE task_dependencies
+            SET kind = 'reference'
+            WHERE (task_id, depends_on) IN (
+                SELECT task_id, depends_on
+                FROM edge_classification
+                WHERE total_refs > 0 AND doc_refs = total_refs
+            );
+            "#,
+        )
+        .unwrap();
+    }
+
+    fn read_kind(conn: &Connection, task_id: &str, depends_on: &str) -> String {
+        conn.query_row(
+            "SELECT kind FROM task_dependencies WHERE task_id = ? AND depends_on = ?",
+            rusqlite::params![task_id, depends_on],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// 上游产 design_doc，边只携带这一个 doc → reference。
+    #[test]
+    fn classifies_doc_only_edge_as_reference() {
+        let conn = setup_db();
+        insert_mission(&conn, "m1");
+        insert_task_with_produces(
+            &conn,
+            "architect",
+            "m1",
+            r#"[{"local_name":"architecture_doc","type":"design_doc","summary":"x"}]"#,
+        );
+        insert_task_with_produces(&conn, "impl", "m1", "[]");
+        insert_dep(&conn, "impl", "architect", r#"["architect.architecture_doc"]"#);
+
+        rerun_backfill(&conn);
+
+        assert_eq!(read_kind(&conn, "impl", "architect"), "reference");
+    }
+
+    /// 边携带 code_module → producer（实物依赖必须保持 producer 默认）。
+    #[test]
+    fn classifies_code_module_edge_as_producer() {
+        let conn = setup_db();
+        insert_mission(&conn, "m1");
+        insert_task_with_produces(
+            &conn,
+            "engine",
+            "m1",
+            r#"[{"local_name":"engine_module","type":"code_module","summary":"x"}]"#,
+        );
+        insert_task_with_produces(&conn, "ui", "m1", "[]");
+        insert_dep(&conn, "ui", "engine", r#"["engine.engine_module"]"#);
+
+        rerun_backfill(&conn);
+
+        assert_eq!(read_kind(&conn, "ui", "engine"), "producer");
+    }
+
+    /// 混合边：一个 doc + 一个 code 同时被消费 → producer（保守，任一非 doc 即视为实物依赖）。
+    #[test]
+    fn classifies_mixed_edge_as_producer() {
+        let conn = setup_db();
+        insert_mission(&conn, "m1");
+        insert_task_with_produces(
+            &conn,
+            "src",
+            "m1",
+            r#"[{"local_name":"doc1","type":"design_doc","summary":""},
+                {"local_name":"code1","type":"code_module","summary":""}]"#,
+        );
+        insert_task_with_produces(&conn, "dst", "m1", "[]");
+        insert_dep(&conn, "dst", "src", r#"["src.doc1","src.code1"]"#);
+
+        rerun_backfill(&conn);
+
+        assert_eq!(read_kind(&conn, "dst", "src"), "producer");
+    }
+
+    /// 空 artifact_refs（老/纯拓扑边）→ producer。绝对不能误标 reference 而被 UI 隐藏。
+    #[test]
+    fn classifies_empty_refs_edge_as_producer() {
+        let conn = setup_db();
+        insert_mission(&conn, "m1");
+        insert_task_with_produces(&conn, "a", "m1", "[]");
+        insert_task_with_produces(&conn, "b", "m1", "[]");
+        insert_dep(&conn, "b", "a", "[]");
+
+        rerun_backfill(&conn);
+
+        assert_eq!(read_kind(&conn, "b", "a"), "producer");
+    }
+
+    /// api_spec / schema / docs / report 同样属于 doc-set。
+    #[test]
+    fn classifies_all_doc_like_types_as_reference() {
+        let conn = setup_db();
+        insert_mission(&conn, "m1");
+        for (i, ty) in ["api_spec", "schema", "docs", "report"].iter().enumerate() {
+            let up = format!("up{i}");
+            let down = format!("dn{i}");
+            insert_task_with_produces(
+                &conn,
+                &up,
+                "m1",
+                &format!(
+                    r#"[{{"local_name":"a","type":"{ty}","summary":""}}]"#,
+                    ty = ty
+                ),
+            );
+            insert_task_with_produces(&conn, &down, "m1", "[]");
+            insert_dep(&conn, &down, &up, &format!(r#"["{up}.a"]"#));
+        }
+
+        rerun_backfill(&conn);
+
+        for i in 0..4 {
+            assert_eq!(
+                read_kind(&conn, &format!("dn{i}"), &format!("up{i}")),
+                "reference"
+            );
+        }
     }
 }

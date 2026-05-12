@@ -69,6 +69,59 @@ pub struct DependencyInfo {
     /// None 表示尚未升级到富语义边的老依赖。
     #[serde(default)]
     pub artifact_refs_json: Option<String>,
+    /// FM-15 v2.3：边的语义分类（`producer` / `reference`）。
+    /// - `producer`：携带 code_module / test_module / config 等"实物 artifact"，
+    ///   下游真依赖上游的代码产出。
+    /// - `reference`：携带 design_doc / api_spec / schema / docs / report 等
+    ///   文档型 artifact，对调度等价但 UI 默认弱化/隐藏，缓解长 DAG 的视觉膨胀。
+    ///
+    /// 旧行（migration 024 之前）默认 `producer`。调度路径暂不区分 kind。
+    #[serde(default = "default_dep_kind")]
+    pub kind: String,
+}
+
+fn default_dep_kind() -> String {
+    "producer".to_string()
+}
+
+/// 携带 doc 类 artifact 的边在 UI 上默认弱化为 reference。集合保持与
+/// migration 024 的 backfill 子句一致——任何变更需要同步两边。
+pub(crate) const DOC_ARTIFACT_TYPES: &[&str] = &[
+    "design_doc",
+    "api_spec",
+    "schema",
+    "docs",
+    "report",
+];
+
+/// 根据边上的 artifact_refs + 上游 task 的 produces 声明判定 kind。
+///
+/// 规则（与 migration 024 backfill 一致）：
+/// - `artifact_refs` 为空 → `producer`（保守：纯拓扑边按实物依赖处理）。
+/// - 所有 ref 解析出的 artifact_type 都属于 `DOC_ARTIFACT_TYPES` → `reference`。
+/// - 任一 ref 解析失败（找不到 local_name）或类型不在 doc-set → `producer`。
+pub(crate) fn classify_edge_kind(
+    refs: &[String],
+    upstream_produces: &[crate::agent::artifacts::ArtifactDecl],
+) -> &'static str {
+    if refs.is_empty() {
+        return "producer";
+    }
+    for r in refs {
+        let local = match r.split_once('.') {
+            Some((_, n)) => n,
+            None => return "producer",
+        };
+        let typ = upstream_produces
+            .iter()
+            .find(|a| a.local_name == local)
+            .map(|a| a.artifact_type.as_str());
+        match typ {
+            Some(t) if DOC_ARTIFACT_TYPES.contains(&t) => continue,
+            _ => return "producer",
+        }
+    }
+    "reference"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -461,6 +514,13 @@ pub async fn plan_mission(
                 });
             }
 
+            // 用 planner_id → PlannerTask 的索引便于查上游的 produces_artifacts（推导 kind 用）。
+            let planner_task_by_id: std::collections::HashMap<&str, &_> = planner_output
+                .tasks
+                .iter()
+                .map(|t| (t.id.as_str(), t))
+                .collect();
+
             for pt in &planner_output.tasks {
                 let task_db_id = &planner_id_to_db_id[&pt.id];
                 for dep_planner_id in &pt.depends_on {
@@ -480,10 +540,16 @@ pub async fn plan_mission(
                             .collect();
                         let refs_json =
                             serde_json::to_string(&refs).unwrap_or_else(|_| "[]".into());
+                        // FM-15 v2.3：根据边上携带的 artifact 类型推导 kind。
+                        let upstream_produces = planner_task_by_id
+                            .get(dep_planner_id.as_str())
+                            .map(|t| t.produces_artifacts.as_slice())
+                            .unwrap_or(&[]);
+                        let kind = classify_edge_kind(&refs, upstream_produces);
                         tx.execute(
-                            "INSERT INTO task_dependencies (task_id, depends_on, artifact_refs)
-                             VALUES (?, ?, ?)",
-                            rusqlite::params![task_db_id, dep_db_id, refs_json],
+                            "INSERT INTO task_dependencies (task_id, depends_on, artifact_refs, kind)
+                             VALUES (?, ?, ?, ?)",
+                            rusqlite::params![task_db_id, dep_db_id, refs_json, kind],
                         )?;
                     }
                 }
@@ -569,7 +635,7 @@ pub fn get_mission_detail(
             vec![]
         } else {
             let sql = format!(
-                "SELECT task_id, depends_on, artifact_refs FROM task_dependencies WHERE task_id IN ({placeholders})"
+                "SELECT task_id, depends_on, artifact_refs, kind FROM task_dependencies WHERE task_id IN ({placeholders})"
             );
             let mut dep_stmt = conn.prepare(&sql)?;
             let params: Vec<&dyn rusqlite::types::ToSql> = task_ids
@@ -582,6 +648,11 @@ pub fn get_mission_detail(
                         task_id: row.get(0)?,
                         depends_on: row.get(1)?,
                         artifact_refs_json: row.get(2).ok(),
+                        kind: row
+                            .get::<_, Option<String>>(3)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| "producer".to_string()),
                     })
                 })?
                 .filter_map(|r| r.ok())
@@ -1121,7 +1192,7 @@ pub fn export_mission_template(
                 vec![]
             } else {
                 let sql = format!(
-                    "SELECT task_id, depends_on FROM task_dependencies WHERE task_id IN ({placeholders})"
+                    "SELECT task_id, depends_on, artifact_refs, kind FROM task_dependencies WHERE task_id IN ({placeholders})"
                 );
                 let mut dep_stmt = conn.prepare(&sql)?;
                 let params: Vec<&dyn rusqlite::types::ToSql> = task_ids
@@ -1133,7 +1204,12 @@ pub fn export_mission_template(
                         Ok(DependencyInfo {
                             task_id: row.get(0)?,
                             depends_on: row.get(1)?,
-                            artifact_refs_json: None,
+                            artifact_refs_json: row.get(2).ok(),
+                            kind: row
+                                .get::<_, Option<String>>(3)
+                                .ok()
+                                .flatten()
+                                .unwrap_or_else(|| "producer".to_string()),
                         })
                     })?
                     .filter_map(|r| r.ok())
@@ -1295,6 +1371,96 @@ pub fn list_task_base_conflicts(
                 .collect()
         })
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod classify_edge_kind_tests {
+    //! FM-15 v2.3：边语义分类的纯函数测试。覆盖 sign_contract 写入前的判定逻辑。
+    //! 必须与 migration 024 的 SQL backfill 行为完全一致，否则同一条边在历史数据
+    //! 和新数据上会被标成不同 kind。
+    use super::classify_edge_kind;
+    use crate::agent::artifacts::ArtifactDecl;
+
+    fn decl(local: &str, typ: &str) -> ArtifactDecl {
+        ArtifactDecl {
+            local_name: local.into(),
+            artifact_type: typ.into(),
+            summary: String::new(),
+        }
+    }
+
+    #[test]
+    fn empty_refs_classified_as_producer() {
+        let upstream = vec![decl("a", "design_doc")];
+        assert_eq!(classify_edge_kind(&[], &upstream), "producer");
+    }
+
+    #[test]
+    fn doc_only_refs_classified_as_reference() {
+        let upstream = vec![decl("architecture_doc", "design_doc")];
+        let refs = vec!["up1.architecture_doc".to_string()];
+        assert_eq!(classify_edge_kind(&refs, &upstream), "reference");
+    }
+
+    #[test]
+    fn code_module_refs_classified_as_producer() {
+        let upstream = vec![decl("engine_module", "code_module")];
+        let refs = vec!["up1.engine_module".to_string()];
+        assert_eq!(classify_edge_kind(&refs, &upstream), "producer");
+    }
+
+    #[test]
+    fn mixed_refs_classified_as_producer() {
+        let upstream = vec![
+            decl("doc1", "design_doc"),
+            decl("code1", "code_module"),
+        ];
+        let refs = vec!["up1.doc1".to_string(), "up1.code1".to_string()];
+        assert_eq!(classify_edge_kind(&refs, &upstream), "producer");
+    }
+
+    #[test]
+    fn all_doc_like_types_count_as_reference() {
+        for ty in ["design_doc", "api_spec", "schema", "docs", "report"] {
+            let upstream = vec![decl("a", ty)];
+            let refs = vec!["up1.a".to_string()];
+            assert_eq!(
+                classify_edge_kind(&refs, &upstream),
+                "reference",
+                "{ty} 应该被视为 doc-like"
+            );
+        }
+    }
+
+    #[test]
+    fn non_doc_types_count_as_producer() {
+        for ty in ["code_module", "test_module", "config"] {
+            let upstream = vec![decl("a", ty)];
+            let refs = vec!["up1.a".to_string()];
+            assert_eq!(
+                classify_edge_kind(&refs, &upstream),
+                "producer",
+                "{ty} 必须按实物依赖处理，否则 UI 默认会隐藏掉真实物依赖"
+            );
+        }
+    }
+
+    /// ref 解析失败（找不到 local_name in upstream.produces）→ producer。
+    /// 这种情况通常是 plan 数据残缺，保守起见按实物依赖处理避免误隐藏。
+    #[test]
+    fn unresolvable_ref_falls_back_to_producer() {
+        let upstream = vec![decl("known", "design_doc")];
+        let refs = vec!["up1.unknown".to_string()];
+        assert_eq!(classify_edge_kind(&refs, &upstream), "producer");
+    }
+
+    /// ref 字符串没有 `.` 分隔（格式异常）→ producer。
+    #[test]
+    fn malformed_ref_falls_back_to_producer() {
+        let upstream = vec![decl("a", "design_doc")];
+        let refs = vec!["malformed_no_dot".to_string()];
+        assert_eq!(classify_edge_kind(&refs, &upstream), "producer");
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-import type { TaskInfo, DependencyInfo } from "../../ipc/commands";
+import type { TaskInfo, DependencyInfo, DependencyKind } from "../../ipc/commands";
 
 export interface NodeLayout {
   id: string;
@@ -16,6 +16,8 @@ export interface EdgeLayout {
   y2: number;
   /** SVG path "d" attribute for the edge curve */
   path: string;
+  /** FM-15 v2.3：边语义分类（producer / reference）。旧 mission 默认 producer。 */
+  kind: DependencyKind;
 }
 
 export interface DagLayout {
@@ -290,6 +292,7 @@ export function computeDagLayout(
       to: dep.task_id,
       x1, y1: y1v, x2, y2: y2v,
       path: buildEdgePath(x1, y1v, x2, y2v, from.layer, to.layer),
+      kind: dep.kind ?? "producer",
     });
   }
 

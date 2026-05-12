@@ -248,6 +248,7 @@ mod tests {
                     task_id: tid.to_string(),
                     depends_on: dep.to_string(),
                     artifact_refs_json: None,
+                    kind: "producer".into(),
                 })
                 .collect(),
         }
