@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::db::{queries, Database};
 use crate::llm::{
     stream_chat_with_idle_guard, ContentBlock, LlmProvider, LlmRequest, Message, MessageRole,
-    StreamChunk, StreamChunkKind, DEFAULT_STREAM_IDLE_TIMEOUT,
+    StreamChunk, StreamChunkKind, StreamGuardError, DEFAULT_STREAM_IDLE_TIMEOUT,
 };
 use crate::tools::{coding_agent_tools_with_artifact_support, ToolExecutor, TASK_COMPLETE_TOOL};
 
@@ -42,6 +42,13 @@ const MAX_CONSECUTIVE_NO_TOOL: u32 = 3;
 const READ_ONLY_LOOP_THRESHOLD: u32 = 5;
 /// 步数距上限只剩 N 时注入"剩余 N 步"提示。
 const STEPS_REMAINING_HINT: u32 = 5;
+/// Issue 3: 单步 LLM 流被 idle watchdog 中止（卡住 180s）时，给 LLM 发"continue"
+/// 重试的次数预算。耗尽则真失败。
+///
+/// 之前一次 IdleTimeout 就把整个 agent 标 failed，对于经常半截卡住的 reseller
+/// （DeepSeek-V4 / SiliconFlow Qwen）非常痛。改成"卡住就 continue"，更接近用户
+/// 在 Cursor / Claude Desktop 看到 "continue" 按钮的直觉。
+const DEFAULT_IDLE_RETRY_BUDGET: u32 = 2;
 
 /// 只读工具集合（不会改变工作区状态）。L3 循环检测据此判断是否在原地探索。
 fn is_read_only_tool(name: &str) -> bool {
@@ -66,6 +73,8 @@ pub struct AgentRunOptions {
     /// 来自 task.produces_artifacts 解析后的 (local_name, type) 对，供 ArtifactsExist guardrail 使用。
     pub produces: Vec<(String, String)>,
     pub expected_output: Option<String>,
+    /// Issue 3: stream idle timeout 时给 LLM 发"continue"重试的次数预算。
+    pub idle_retry_budget: u32,
 }
 
 impl Default for AgentRunOptions {
@@ -78,6 +87,7 @@ impl Default for AgentRunOptions {
             guardrail_retry_budget: 3,
             produces: Vec::new(),
             expected_output: None,
+            idle_retry_budget: DEFAULT_IDLE_RETRY_BUDGET,
         }
     }
 }
@@ -206,6 +216,10 @@ impl AgentEngine {
         let mut hinted_read_only_loop = false;
         let mut retries_left: u32 = opts.guardrail_retry_budget;
         let mut hinted_remaining_steps = false;
+        // Issue 3: idle-retry 预算。每次 stream 卡住注入 continue 后 -= 1，
+        // 单次 step 成功完成（response 拿到）后**不**重置 —— 我们要的是"整任务"
+        // 容忍上限，不是"每步容忍 2 次"，否则一个真坏的模型会让 task 跑很久。
+        let mut idle_retries_left: u32 = opts.idle_retry_budget;
 
         self.emit_event(agent_id, step, "status_change", "running");
         self.update_agent_status(agent_id, "running");
@@ -283,15 +297,54 @@ impl AgentEngine {
 
             // Idle 看门狗统一走 llm::stream_guard：长沉默 abort，避免 agent
             // 单步永远卡死整个任务（之前完全没有空闲保护）。
-            let response = stream_chat_with_idle_guard(
+            //
+            // Issue 3: IdleTimeout 不再立即 fail —— 还有 idle_retries_left 时注入
+            // 一条 "[System] 上一次响应中断，请继续" 的 user 提示，下一次 loop
+            // 重新发起 LLM 调用。这模拟用户在 Cursor / Claude Desktop 按 "continue"
+            // 的体验，对偶发卡住的 reseller（DeepSeek-V4 / SiliconFlow Qwen）尤其有效。
+            // 其他错误（Llm / Join）保持原失败路径。
+            let stream_outcome = stream_chat_with_idle_guard(
                 self.provider.clone(),
                 request,
                 tx,
                 DEFAULT_STREAM_IDLE_TIMEOUT,
             )
-            .await
-            .map_err(|e| anyhow::anyhow!(e.user_message_zh()))?;
+            .await;
             let _ = forwarder.await;
+            let response = match stream_outcome {
+                Ok(r) => r,
+                Err(StreamGuardError::IdleTimeout { idle_secs, threshold_secs })
+                    if idle_retries_left > 0 =>
+                {
+                    idle_retries_left -= 1;
+                    let notice = format!(
+                        "LLM stream idle for {idle_secs}s (threshold {threshold_secs}s); auto-continue ({} retries left)",
+                        idle_retries_left
+                    );
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        step,
+                        idle_secs,
+                        threshold_secs,
+                        retries_left = idle_retries_left,
+                        "stream idle timeout, auto-injecting continue prompt"
+                    );
+                    self.emit_event(agent_id, step, "system_hint", &notice);
+                    // 没有 assistant turn 可 push（流被中止）。直接追加一条 user
+                    // 提示给 LLM 让它在下一次 stream 里基于已有上下文继续。
+                    let continue_msg = format!(
+                        "[System] 上一次响应在 {idle_secs}s 后中断未输出完整内容。请基于到目前为止的对话上下文继续完成任务；\
+                         不需要重复你已经说过的内容，直接接着写。如果上次正打算调用工具，请重新调用一次。"
+                    );
+                    messages.push(Message {
+                        role: MessageRole::User,
+                        content: vec![ContentBlock::Text { text: continue_msg }],
+                        cache_control: None,
+                    });
+                    continue;
+                }
+                Err(e) => return Err(anyhow::anyhow!(e.user_message_zh())),
+            };
 
             if self.cancel_token.is_cancelled() {
                 return self.finish_cancelled(agent_id, step);

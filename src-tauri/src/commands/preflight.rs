@@ -1227,8 +1227,28 @@ pub async fn send_preflight_message(
     let mut stored_msgs: Vec<serde_json::Value> =
         serde_json::from_str(&messages_json).unwrap_or_default();
 
-    if stored_msgs.len() >= 100 {
-        return Err("Conversation limit reached (50 rounds). Please sign the contract.".into());
+    // Issue 2: 原来到 100 messages（约 50 round）直接报错"会话作废"，过于简单粗暴。
+    // 改为：
+    // - 100..160 messages：放行，但 emit 一条 status 软提示让前端 status bar 高亮
+    //   引导用户向 LLM 提分 / 签约（强引导也由 planner.rs::render_round_pressure_directive
+    //   写进 system prompt）。
+    // - >=160 messages（约 80 round）：才阻断，作为兜底防止真死循环。
+    const HARD_MAX_MESSAGES: usize = 160;
+    const SOFT_WARN_MESSAGES: usize = 100;
+    if stored_msgs.len() >= HARD_MAX_MESSAGES {
+        return Err(crate::error_code::IpcError::preflight_too_long(
+            stored_msgs.len() as i64,
+            HARD_MAX_MESSAGES as i64,
+        )
+        .to_string());
+    }
+    if stored_msgs.len() >= SOFT_WARN_MESSAGES {
+        planner::emit_preflight_event_pub(
+            &app,
+            &request.session_id,
+            "status",
+            "对话已较长，请尽快确认核心条目并签署 Contract",
+        );
     }
 
     // 持久化"发送时所处的 mode"。Fix D：刷新或重开页面后，前端需要恢复

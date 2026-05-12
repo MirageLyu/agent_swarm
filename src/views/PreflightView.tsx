@@ -13,10 +13,10 @@ import type {
 import { onPreflightStream, type PreflightStreamPayload } from "../ipc/events";
 import { useUiStore } from "../stores/ui-store";
 import { useTaskStore } from "../stores/task-store";
+import { usePlannerProgressStore } from "../stores/planner-progress-store";
 import { PreflightChat } from "../components/preflight/PreflightChat";
 import { ContractPanel } from "../components/preflight/ContractPanel";
 import { PreflightStatusBar } from "../components/preflight/PreflightStatusBar";
-import { PlannerLoopPanel } from "../components/mission";
 import { useRetryableFlow } from "../hooks/useRetryableFlow";
 import styles from "./PreflightView.module.css";
 
@@ -26,8 +26,7 @@ export function PreflightView() {
   const missionId = useUiStore((s) => s.activePreflightMissionId);
   const sessionId = useUiStore((s) => s.activePreflightSessionId);
   const setActivePreflight = useUiStore((s) => s.setActivePreflight);
-  const setActiveView = useUiStore((s) => s.setActiveView);
-  const { addMission, selectMission, setDetail } = useTaskStore();
+  const { addMission, setDetail } = useTaskStore();
 
   const [messages, setMessages] = useState<PreflightMessageInfo[]>([]);
   const [mode, setMode] = useState<PreflightMode>("scenario_walk");
@@ -309,26 +308,51 @@ export function PreflightView() {
   // 流程型操作：sign_contract 内部跑 PlannerEngine（可能超时 / LLM 失败）。
   // 走 useRetryableFlow，失败时统一渲染 banner + 重试按钮，避免用户"会话作废"。
   // 详见 .cursor/rules/retryable-flow.mdc。
+  //
+  // Planner 浮窗已抽到应用根 `<PlannerProgressOverlay>`：进入流程时 setActive，
+  // 用户在 sign 期间切到其它 view 也能看见进度，签约成功后浮窗展示"查看任务图"按钮。
+  const plannerLabel = t("plannerLabel");
+  const setPlannerActive = usePlannerProgressStore((s) => s.setActive);
+  const markPlannerCompleted = usePlannerProgressStore((s) => s.markCompleted);
+  const clearPlanner = usePlannerProgressStore((s) => s.clear);
   const signFlow = useRetryableFlow({
     operation: "sign_contract",
     invoke: useCallback(async () => {
       if (!missionId) throw new Error("noActiveSession");
-      const result = await commands.signContract(missionId);
-      const detail = await commands.getMissionDetail(result.mission_id);
-      return { result, detail };
-    }, [missionId]),
+      // 进入 sign 流程：先把浮窗显式装上，让用户即便立即切走也看得见。
+      // sessionId 现在拿不到（sign_contract 跑完才返回），PlannerLoopPanel 会
+      // 从首个 planner-step 事件自动 discover。
+      setPlannerActive({
+        kind: "sign_contract",
+        missionId,
+        label: plannerLabel,
+        startedAt: Date.now(),
+      });
+      try {
+        const result = await commands.signContract(missionId);
+        const detail = await commands.getMissionDetail(result.mission_id);
+        return { result, detail };
+      } catch (e) {
+        // 失败时清掉浮窗，让 useRetryableFlow 的 failure banner 接管错误展示。
+        // 用户点重试会重新进入 invoke 又 setActive，行为对称。
+        clearPlanner();
+        throw e;
+      }
+    }, [missionId, setPlannerActive, clearPlanner, plannerLabel]),
     onSuccess: useCallback(
       ({ result, detail }: {
         result: Awaited<ReturnType<typeof commands.signContract>>;
         detail: Awaited<ReturnType<typeof commands.getMissionDetail>>;
       }) => {
         addMission(detail.mission);
-        selectMission(result.mission_id);
         setDetail(detail.tasks, detail.dependencies);
         setActivePreflight(null, null);
-        setActiveView("missions");
+        // 转入"完成"态：浮窗显示 ✓ 与"查看任务图"按钮，由用户主动决定何时跳转。
+        // 不再自动 selectMission + setActiveView —— 让用户先看见浮窗反馈，
+        // 避免"突然跳走又不知道为啥"的体验断层。
+        markPlannerCompleted({ missionId: result.mission_id, kind: "sign_contract" });
       },
-      [addMission, selectMission, setDetail, setActivePreflight, setActiveView],
+      [addMission, setDetail, setActivePreflight, markPlannerCompleted],
     ),
   });
   const signing = signFlow.state === "running";
@@ -375,11 +399,8 @@ export function PreflightView() {
           signing={signing}
         />
       </div>
-      {signing && (
-        // Issue 4: 用 floating 模式，避免下方 PlannerLoopPanel 把上面的对话/合同
-        // 面板挤成滚动条。Portal 到 body，固定右下角，可折叠。
-        <PlannerLoopPanel label={t("plannerLabel")} isLive floating />
-      )}
+      {/* Issue 4 / Issue 1: Planner 浮窗已抽到 App 根 `<PlannerProgressOverlay>`，
+          切换 view 也能继续看到进度。本 view 不再渲染浮窗。 */}
       <PreflightStatusBar
         convergenceScore={convergenceScore}
         phase={phase}

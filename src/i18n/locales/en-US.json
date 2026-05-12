@@ -644,6 +644,12 @@
     "decisionLogHeader": "Decision Log",
     "noActiveSession": "No active pre-flight session. Please start one from the Missions view.",
     "plannerLabel": "Pre-flight planner",
+    "plannerOverlay": {
+      "completedTitle": "Contract signed",
+      "completedBody": "The mission plan is ready. Open the task graph to review the planned tasks.",
+      "viewDag": "View task graph",
+      "dismiss": "Dismiss"
+    },
     "modeLabel": {
       "scenario_walk": "Scenario Walk",
       "devils_advocate": "Devil's Advocate",
@@ -701,7 +707,9 @@
       "hintReady": "Clarification complete — ready to sign the Contract",
       "hintAlmost": "Almost there — confirm a few key points",
       "hintEmpty": "Have a few rounds with the AI to clarify the requirement scope",
-      "hintGeneric": "5 minutes of clarification → save ~$50 of wrong-direction cost"
+      "hintGeneric": "5 minutes of clarification → save ~$50 of wrong-direction cost",
+      "hintLengthy": "Conversation getting long — focus on remaining key points",
+      "hintOverLength": "Conversation is quite long — review the contract and consider signing"
     },
     "decisionTimeline": {
       "title": "Decision Timeline",
@@ -727,6 +735,7 @@
     "approval_expired": "This approval has expired.",
     "approval_already_resolved": "This approval has already been resolved.",
     "workspace_invalid": "Workspace path is invalid: {{reason}}",
+    "preflight_too_long": "Pre-flight conversation has reached the {{messages}}-message safety cap. Please review the contract and sign.",
     "permission_denied": "Permission denied.",
     "disk_full": "Disk full or quota exceeded.",
     "unknown": "An unexpected error occurred.",

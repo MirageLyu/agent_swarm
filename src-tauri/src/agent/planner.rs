@@ -109,6 +109,13 @@ fn build_dynamic_suffix(
     // § Convergence directive
     sections.push(get_convergence_directive(belief_state));
 
+    // § Round-pressure directive：用户反馈"50 轮硬截断"过于简单粗暴。改成软引导：
+    // 随轮次增多 + 收敛分偏低，逐级强化"请聚焦/请 suggest_sign"的指令，让 LLM
+    // 主动收敛而不是无限拓宽话题。仅在 round ≥ 15 时输出；早期保持自由探索。
+    if let Some(pressure) = render_round_pressure_directive(belief_state) {
+        sections.push(pressure);
+    }
+
     // § Rejected alternatives (FM-10.6)
     if !rejected_alternatives.is_empty() {
         sections.push(render_rejected_alternatives(rejected_alternatives));
@@ -242,6 +249,53 @@ fn slot_display_name(id: &str) -> &'static str {
         "timeline_budget" => "时间预算",
         _ => "未知",
     }
+}
+
+/// Round-pressure directive：基于"已对话轮数 + 当前收敛分"产生收敛压力。
+///
+/// 与单纯的硬轮数上限相比，这里把"提高收敛分"作为可观察的引导目标传给 LLM，
+/// 而不是简单地禁止再发消息。返回 `None` 表示当前轮次还在自由探索区间，
+/// 不加额外压力。
+///
+/// 阶梯（与前端 status bar 视觉提示保持同步）：
+/// - round 15..25 且 score < 0.65：温和提醒，要求聚焦未填 slot
+/// - round 25..40 且 score < 0.85：允许 inferred 推断填充，准备 suggest_sign
+/// - round 40..：无论收敛分都要求立即 suggest_sign 收尾，剩余细节走 follow-up
+pub fn render_round_pressure_directive(bs: &PreflightBeliefState) -> Option<String> {
+    let round = bs.round;
+    let score_pct = (bs.convergence_score * 100.0).round() as u32;
+
+    if round >= 40 {
+        return Some(format!(
+            "# 收尾压力（强制）\n\
+             已对话 {} 轮，收敛分 {}%。无论分数如何，请**立即**调用 suggest_sign 收尾。\n\
+             - 剩余空白 slot 用 inferred 推断填充，理由写「对话已较长，按行业惯例推断，可后续调整」\n\
+             - 本轮不要再提出新问题或开启新话题\n\
+             - 用户已耐心配合多轮，继续拉长会降低签约意愿",
+            round, score_pct
+        ));
+    }
+    if round >= 25 && bs.convergence_score < 0.85 {
+        return Some(format!(
+            "# 收尾压力（中级）\n\
+             已对话 {} 轮但收敛分仅 {}%。请优先把对话推进到可签约状态：\n\
+             - 把剩余次要维度（如性能目标、错误处理）用 inferred 推断写入 assumptions\n\
+             - 仅对「明显改变范围」的关键空白点继续追问，每轮最多 1 个\n\
+             - 当核心目标 + 关键功能 + 排除范围已确认时，主动调用 suggest_sign",
+            round, score_pct
+        ));
+    }
+    if round >= 15 && bs.convergence_score < 0.65 {
+        return Some(format!(
+            "# 收尾压力（轻度）\n\
+             已对话 {} 轮，收敛分 {}% 偏低。请聚焦未填 slot，避免开启新话题：\n\
+             - 用 present_choices 二/三选一快速收敛\n\
+             - 不要再发散到外围话题\n\
+             - 用户耐心是有限资源",
+            round, score_pct
+        ));
+    }
+    None
 }
 
 /// Phase-driven convergence directive (FR-10.3.5).
@@ -1899,6 +1953,57 @@ mod tests {
     /// 回归测试：第 12 轮触发首次 compact 后，第 13/14/15 轮（token 没飙到 70%）
     /// **不能**再因为 round 阈值而再次触发。这就是用户报告的"每条消息都显示
     /// 正在优化对话上下文"bug，根因是 should_compact 完全没用上 compacted_at 信号。
+    // Issue 2: round-pressure directive 阶梯。守住三档阈值的边界与文案 anchor，
+    // 让以后误改阈值 / 漏插某档时立刻挂红。
+    #[test]
+    fn round_pressure_silent_in_early_rounds() {
+        let mut bs = PreflightBeliefState::new();
+        bs.round = 10;
+        bs.convergence_score = 0.4;
+        assert!(render_round_pressure_directive(&bs).is_none(), "10 轮内不加压");
+    }
+
+    #[test]
+    fn round_pressure_mild_at_round_15_low_score() {
+        let mut bs = PreflightBeliefState::new();
+        bs.round = 16;
+        bs.convergence_score = 0.4;
+        let out = render_round_pressure_directive(&bs).expect("应输出轻度压力");
+        assert!(out.contains("收尾压力（轻度）"));
+        assert!(out.contains("present_choices"));
+    }
+
+    #[test]
+    fn round_pressure_mild_not_triggered_when_score_high() {
+        let mut bs = PreflightBeliefState::new();
+        bs.round = 16;
+        bs.convergence_score = 0.75;
+        assert!(
+            render_round_pressure_directive(&bs).is_none(),
+            "高分场景不该出压力——LLM 应被允许继续完成确认阶段"
+        );
+    }
+
+    #[test]
+    fn round_pressure_medium_at_round_28() {
+        let mut bs = PreflightBeliefState::new();
+        bs.round = 28;
+        bs.convergence_score = 0.7;
+        let out = render_round_pressure_directive(&bs).expect("应输出中级压力");
+        assert!(out.contains("收尾压力（中级）"));
+        assert!(out.contains("inferred"));
+    }
+
+    #[test]
+    fn round_pressure_force_at_round_40_regardless_of_score() {
+        let mut bs = PreflightBeliefState::new();
+        bs.round = 42;
+        bs.convergence_score = 0.95;
+        let out = render_round_pressure_directive(&bs).expect("≥40 轮无论分数都强制收尾");
+        assert!(out.contains("收尾压力（强制）"));
+        assert!(out.contains("suggest_sign"));
+    }
+
     #[test]
     fn ut_10_5_4f_round_trigger_fires_only_once() {
         let (first, _) = should_compact(Some(30000), 100000, 12, 0, None);

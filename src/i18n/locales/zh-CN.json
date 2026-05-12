@@ -644,6 +644,12 @@
     "decisionLogHeader": "决策日志",
     "noActiveSession": "当前没有进行中的预演会话。请前往「任务」视图发起一次。",
     "plannerLabel": "Pre-flight 规划器",
+    "plannerOverlay": {
+      "completedTitle": "Contract 已签署",
+      "completedBody": "任务规划已生成，点击查看任务 DAG 图。",
+      "viewDag": "查看任务图",
+      "dismiss": "关闭"
+    },
     "modeLabel": {
       "scenario_walk": "场景走查",
       "devils_advocate": "魔鬼代言人",
@@ -701,7 +707,9 @@
       "hintReady": "澄清完成，可签署 Contract",
       "hintAlmost": "即将完成，再确认几个关键点",
       "hintEmpty": "与 AI 多轮对话，逐步澄清需求边界",
-      "hintGeneric": "5 分钟澄清 → 节省 ~$50 错误方向成本"
+      "hintGeneric": "5 分钟澄清 → 节省 ~$50 错误方向成本",
+      "hintLengthy": "对话较长了，聚焦剩余关键点提升收敛分",
+      "hintOverLength": "对话已较长，建议确认当前 Contract 后签约"
     },
     "decisionTimeline": {
       "title": "决策时间线",
@@ -727,6 +735,7 @@
     "approval_expired": "此审批已过期。",
     "approval_already_resolved": "此审批已被处理。",
     "workspace_invalid": "工作区路径无效：{{reason}}",
+    "preflight_too_long": "对话已达上限（{{messages}} 条），请尽快确认 Contract 后签署。",
     "permission_denied": "权限不足。",
     "disk_full": "磁盘空间不足或已超出配额。",
     "unknown": "发生了意外错误。",

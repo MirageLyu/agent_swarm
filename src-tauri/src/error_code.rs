@@ -111,6 +111,15 @@ impl IpcError {
     pub fn generic(reason: impl Into<String>) -> Self {
         Self::new("error.generic").with_detail(reason.into())
     }
+
+    /// Issue 2: Pre-flight 对话超过兜底硬限（>80 round）。仅作为防死循环兜底。
+    /// 日常 round-pressure 引导走 `planner.rs::render_round_pressure_directive`，
+    /// 不靠这条错误推动用户。
+    pub fn preflight_too_long(messages: impl Into<Value>, hard_limit: impl Into<Value>) -> Self {
+        Self::new("error.preflight_too_long")
+            .with_param("messages", messages.into())
+            .with_param("hard_limit", hard_limit.into())
+    }
 }
 
 impl std::fmt::Display for IpcError {

@@ -25,13 +25,24 @@ export function PreflightStatusBar({
   const color = PHASE_COLOR[phase] ?? PHASE_COLOR.exploring;
   const isReady = phase === "ready_to_sign";
 
+  // Issue 2: round-pressure 软提示。messageCount 约等于 2-3 倍 round；
+  // - >=80 (~30 round) 且 phase 不在 ready_to_sign：催聚焦
+  // - >=140 (~50 round)：明确提示对话过长、建议直接签约
+  // 同样的引导后端 LLM prompt 也会收到（render_round_pressure_directive），
+  // 这里只是给用户的视觉镜像，让用户能"看见"自己被引导的原因。
+  const overLength = !isReady && messageCount >= 140;
+  const lengthy = !isReady && messageCount >= 80 && messageCount < 140;
   const hint = isReady
     ? t("statusBar.hintReady")
-    : percent >= 60
-      ? t("statusBar.hintAlmost")
-      : messageCount === 0
-        ? t("statusBar.hintEmpty")
-        : t("statusBar.hintGeneric");
+    : overLength
+      ? t("statusBar.hintOverLength")
+      : lengthy
+        ? t("statusBar.hintLengthy")
+        : percent >= 60
+          ? t("statusBar.hintAlmost")
+          : messageCount === 0
+            ? t("statusBar.hintEmpty")
+            : t("statusBar.hintGeneric");
 
   return (
     <div className={styles.bar}>

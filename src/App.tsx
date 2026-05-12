@@ -4,6 +4,7 @@ import { Sidebar } from "./components/Sidebar";
 import { Titlebar } from "./components/Titlebar";
 import { CommandPalette } from "./components/CommandPalette";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { PlannerProgressOverlay } from "./components/global/PlannerProgressOverlay";
 import { useUiStore } from "./stores/ui-store";
 import { useTheme } from "./hooks/useTheme";
 import { usePlannerEventSync } from "./hooks/usePlannerEventSync";
@@ -101,6 +102,10 @@ export default function App() {
       </div>
       <ErrorBoundary scope="CommandPalette">
         <CommandPalette />
+      </ErrorBoundary>
+      {/* App-level Planner 浮窗：跨 view 持久，签约/规划等长流程任意切换都能看见进度。 */}
+      <ErrorBoundary scope="PlannerProgressOverlay">
+        <PlannerProgressOverlay />
       </ErrorBoundary>
     </div>
   );

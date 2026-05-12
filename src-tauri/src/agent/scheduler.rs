@@ -1006,6 +1006,9 @@ impl Scheduler {
             guardrail_retry_budget: retry_budget.max(0) as u32,
             produces,
             expected_output: expected_output.filter(|s| !s.trim().is_empty()),
+            // Issue 3: 复用 Default 的 idle_retry_budget。未来如需用户级配置，
+            // 这里读 cfg.idle_retry_budget 替换即可。
+            idle_retry_budget: crate::agent::engine::AgentRunOptions::default().idle_retry_budget,
         })
     }
 
