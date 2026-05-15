@@ -183,6 +183,7 @@ pub fn run() {
             commands::list_agents_by_mission,
             commands::get_default_workspace_path,
             commands::list_agent_events,
+            commands::list_agent_todos,
             commands::get_mission_cost_summary,
             commands::get_agent_diff,
             commands::submit_review_action,

@@ -721,6 +721,64 @@ const MIGRATIONS: &[(&str, &str)] = &[(
         );
         "#,
     ),
+    (
+        // Single-Agent Uplift Phase 0.1–0.2:
+        // - 扩 agent_events.kind CHECK 约束，把 engine.rs 已经在 emit 的 system_hint /
+        //   guardrail_pass / guardrail_fail / guardrail_summary / note_applied 真正落库；
+        //   并提前给 Phase 1/2 预留 tool_progress / tool_summary / compact / todo_update。
+        //   之前这些 INSERT 全部因 CHECK 失败而被 tracing::warn! 一行吞掉，刷新就丢，
+        //   是用户感知"卡住但其实在跑"的最大来源。
+        // - 加 meta TEXT NULL 列：tool_use / tool_result 之类不再只能存裸字符串，
+        //   后端可塞 {tool, input, output_summary, is_error, duration_ms, tool_use_id} JSON。
+        // - 新增 agent_todos 表：FM-15 uplift Phase 1.2 用，让 Agent 自己维护待办清单。
+        "025_single_agent_uplift_events_and_todos",
+        r#"
+        PRAGMA foreign_keys=OFF;
+
+        CREATE TABLE agent_events_new (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+            step INTEGER NOT NULL DEFAULT 0,
+            kind TEXT NOT NULL
+                CHECK (kind IN (
+                    'llm_call', 'tool_use', 'tool_result', 'checkpoint',
+                    'error', 'message', 'status_change', 'review',
+                    'system_hint', 'guardrail_pass', 'guardrail_fail',
+                    'guardrail_summary', 'note_applied',
+                    'tool_progress', 'tool_summary', 'compact', 'todo_update'
+                )),
+            content TEXT NOT NULL DEFAULT '',
+            meta TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        INSERT INTO agent_events_new (id, agent_id, step, kind, content, created_at)
+            SELECT id, agent_id, step, kind, content, created_at FROM agent_events;
+
+        DROP TABLE agent_events;
+        ALTER TABLE agent_events_new RENAME TO agent_events;
+
+        CREATE INDEX IF NOT EXISTS idx_agent_events_agent ON agent_events(agent_id, created_at);
+
+        PRAGMA foreign_keys=ON;
+
+        -- agent_todos: 持久化 TodoWriteTool 写出的清单。
+        -- 一个 agent 一组 todo；Agent 每次写都全量替换（语义和 Cursor / Claude Code 一致）。
+        -- order_idx 决定渲染顺序；id 由 agent 端生成（uuid 或自增整数都可），同一 agent 内唯一。
+        CREATE TABLE IF NOT EXISTS agent_todos (
+            agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+            id TEXT NOT NULL,
+            order_idx INTEGER NOT NULL DEFAULT 0,
+            content TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'in_progress', 'completed', 'cancelled')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (agent_id, id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_todos_agent ON agent_todos(agent_id, order_idx);
+        "#,
+    ),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

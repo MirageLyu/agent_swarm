@@ -27,6 +27,9 @@ export interface AgentEventPayload {
   step: number;
   kind: string;
   content: string;
+  /// Single-Agent Uplift Phase 0.2: 结构化 payload，由后端 emit_event_with_meta 携带。
+  /// 后端 #[serde(skip_serializing_if = "Option::is_none")]，所以裸字符串事件不带这个字段。
+  meta?: unknown;
 }
 
 export interface AgentStreamPayload {
@@ -34,6 +37,7 @@ export interface AgentStreamPayload {
   step: number;
   kind: string;
   content: string;
+  meta?: unknown;
 }
 
 export interface AgentStartedPayload {

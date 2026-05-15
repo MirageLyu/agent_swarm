@@ -8,13 +8,54 @@ export type AgentStatus =
   | "cancelled"
   | "waiting";
 
+/// Single-Agent Uplift Phase 0.1: agent_events.kind 枚举与后端 migration 025 完全对齐。
+/// 加新 kind 必须同时改：
+///   1. src-tauri/src/db/migrations.rs 末尾追加 migration 扩 CHECK 约束
+///   2. 这里
+///   3. AgentTerminalPane / tool-renderers 里的分发逻辑
+export type AgentEventKind =
+  | "llm_call"
+  | "tool_use"
+  | "tool_result"
+  | "checkpoint"
+  | "error"
+  | "message"
+  | "status_change"
+  | "review"
+  | "system_hint"
+  | "guardrail_pass"
+  | "guardrail_fail"
+  | "guardrail_summary"
+  | "note_applied"
+  | "tool_progress"
+  | "tool_summary"
+  | "compact"
+  | "todo_update";
+
 export interface AgentEvent {
   id: string;
   agentId: string;
   step: number;
   timestamp: string;
-  kind: "llm_call" | "tool_use" | "tool_result" | "checkpoint" | "error" | "message" | "status_change";
+  kind: AgentEventKind;
   content: string;
+  /// Single-Agent Uplift Phase 0.2: 结构化 payload。后端 emit_event_with_meta 写入。
+  /// 前端按 kind 解析（每种 kind 有自己的 schema）：
+  ///   - tool_use:     { tool, tool_use_id, input }
+  ///   - tool_result:  { tool, tool_use_id, is_error, duration_ms, size_chars }
+  ///   - guardrail_*:  GuardrailReport[]（直接 array，方便循环渲染）
+  ///   - note_applied: { applied_count, note_ids, notes }
+  ///   - tool_progress:{ kind: "llm_idle", idle_secs, step }
+  /// 解析失败时 fallback 到 content 文本即可。
+  meta?: unknown;
+}
+
+/// Single-Agent Uplift Phase 1.2: agent 自维护的 todo 项。
+/// 一次 todo_write 调用全量替换；status 顺序约定 pending → in_progress → completed。
+export interface AgentTodo {
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "completed" | "cancelled";
 }
 
 export interface Agent {
@@ -33,6 +74,10 @@ export interface Agent {
   /// FM-15 follow-up: shell_exec 实时输出，独立于 LLM streamBuffer。
   /// 由 `agent-tool-stream` 事件驱动，进入终态时清空，避免下次重启混淆。
   shellBuffer: string;
+  /// Single-Agent Uplift Phase 1.2: agent 自维护的 todo 列表。
+  /// 由后端 todo_update 事件 / list_agent_todos 命令同步刷新。
+  /// 没用过 TodoWriteTool 的 agent 始终为 []，前端用空数组表示"不显示 panel"。
+  todos: AgentTodo[];
 }
 
 export type WorkspaceViewMode = "list" | "focus" | "grid";
@@ -65,6 +110,10 @@ interface AgentState {
   hydrateEvents: (agentId: string, events: AgentEvent[]) => void;
   hydrateAgents: (agents: Agent[]) => void;
   setSidebarAgents: (agents: SidebarAgent[]) => void;
+  /// Single-Agent Uplift Phase 1.2: 全量替换某 agent 的 todo 清单。
+  /// 调用方：① WorkspaceView 启动时 list_agent_todos hydrate；
+  /// ② 实时收到 `todo_update` 事件后 setAgentTodos(meta.todos)。
+  setAgentTodos: (agentId: string, todos: AgentTodo[]) => void;
 }
 
 export const useAgentStore = create<AgentState>((set) => ({
@@ -167,6 +216,18 @@ export const useAgentStore = create<AgentState>((set) => ({
 
   setSidebarAgents: (agents) => set({ sidebarAgents: agents }),
 
+  setAgentTodos: (agentId, todos) =>
+    set((s) => {
+      const agent = s.agents[agentId];
+      if (!agent) return s;
+      return {
+        agents: {
+          ...s.agents,
+          [agentId]: { ...agent, todos },
+        },
+      };
+    }),
+
   hydrateEvents: (agentId, events) =>
     set((s) => {
       const agent = s.agents[agentId];
@@ -201,9 +262,12 @@ export const useAgentStore = create<AgentState>((set) => ({
             costUsd: Math.max(a.costUsd, existing.costUsd),
             streamBuffer: isTerminal ? "" : existing.streamBuffer,
             shellBuffer: isTerminal ? "" : existing.shellBuffer,
+            // todos 走 list_agent_todos / todo_update 单独 hydrate；这里保留 existing
+            // 避免闪烁；新 agent 初始为空数组（来自上面构造）。
+            todos: existing.todos,
           };
         } else {
-          merged[a.id] = a;
+          merged[a.id] = { ...a, todos: a.todos ?? [] };
         }
       }
       return { agents: merged };

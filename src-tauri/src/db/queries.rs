@@ -18,9 +18,24 @@ pub fn insert_event(
     kind: &str,
     content: &str,
 ) -> Result<()> {
+    insert_event_with_meta(conn, id, agent_id, step, kind, content, None)
+}
+
+/// Single-Agent Uplift Phase 0.2: 持久化结构化 event meta。
+/// `meta` 为 JSON 字符串（已序列化），调用方负责保证可解析。
+pub fn insert_event_with_meta(
+    conn: &Connection,
+    id: &str,
+    agent_id: &str,
+    step: i64,
+    kind: &str,
+    content: &str,
+    meta: Option<&str>,
+) -> Result<()> {
     conn.execute(
-        "INSERT INTO agent_events (id, agent_id, step, kind, content) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![id, agent_id, step, kind, content],
+        "INSERT INTO agent_events (id, agent_id, step, kind, content, meta) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, agent_id, step, kind, content, meta],
     )?;
     Ok(())
 }
@@ -31,12 +46,13 @@ pub struct EventRow {
     pub step: i64,
     pub kind: String,
     pub content: String,
+    pub meta: Option<String>,
     pub created_at: String,
 }
 
 pub fn get_events_for_agent(conn: &Connection, agent_id: &str) -> Result<Vec<EventRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, agent_id, step, kind, content, created_at
+        "SELECT id, agent_id, step, kind, content, meta, created_at
          FROM agent_events WHERE agent_id = ?1 ORDER BY created_at ASC",
     )?;
     let rows = stmt
@@ -47,11 +63,74 @@ pub fn get_events_for_agent(conn: &Connection, agent_id: &str) -> Result<Vec<Eve
                 step: row.get(2)?,
                 kind: row.get(3)?,
                 content: row.get(4)?,
-                created_at: row.get(5)?,
+                meta: row.get(5)?,
+                created_at: row.get(6)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+// ---- Single-Agent Uplift Phase 1.2: agent_todos helpers ----
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TodoRow {
+    pub id: String,
+    pub agent_id: String,
+    pub order_idx: i64,
+    pub content: String,
+    pub status: String,
+    pub updated_at: String,
+}
+
+/// 列出某 agent 的 todo 清单，按 order_idx 升序。
+pub fn list_agent_todos(conn: &Connection, agent_id: &str) -> Result<Vec<TodoRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, order_idx, content, status, updated_at \
+         FROM agent_todos WHERE agent_id = ?1 ORDER BY order_idx ASC",
+    )?;
+    let rows = stmt
+        .query_map(params![agent_id], |row| {
+            Ok(TodoRow {
+                id: row.get(0)?,
+                agent_id: row.get(1)?,
+                order_idx: row.get(2)?,
+                content: row.get(3)?,
+                status: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub struct TodoInput<'a> {
+    pub id: &'a str,
+    pub content: &'a str,
+    pub status: &'a str,
+}
+
+/// 全量替换某 agent 的 todo 清单。一次事务里清空 + 重写，避免半状态。
+/// 语义对齐 Cursor / Claude Code 的 TodoWrite：每次调用都是"我现在的清单是这样"。
+pub fn replace_agent_todos(
+    conn: &Connection,
+    agent_id: &str,
+    todos: &[TodoInput<'_>],
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM agent_todos WHERE agent_id = ?1",
+        params![agent_id],
+    )?;
+    for (idx, td) in todos.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO agent_todos (agent_id, id, order_idx, content, status, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+            params![agent_id, td.id, idx as i64, td.content, td.status],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 // ---- Scheduler query helpers ----
@@ -636,7 +715,7 @@ pub fn list_agent_events(
         }
         (Some(mid), None) => {
             let mut stmt = conn.prepare(
-                "SELECT ae.id, ae.agent_id, ae.step, ae.kind, ae.content, ae.created_at
+                "SELECT ae.id, ae.agent_id, ae.step, ae.kind, ae.content, ae.meta, ae.created_at
                  FROM agent_events ae
                  JOIN agents a ON a.id = ae.agent_id
                  JOIN tasks t ON t.id = a.task_id
@@ -651,7 +730,8 @@ pub fn list_agent_events(
                         step: row.get(2)?,
                         kind: row.get(3)?,
                         content: row.get(4)?,
-                        created_at: row.get(5)?,
+                        meta: row.get(5)?,
+                        created_at: row.get(6)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -659,7 +739,7 @@ pub fn list_agent_events(
         }
         (None, None) => {
             let mut stmt = conn.prepare(
-                "SELECT id, agent_id, step, kind, content, created_at
+                "SELECT id, agent_id, step, kind, content, meta, created_at
                  FROM agent_events ORDER BY created_at ASC LIMIT 500",
             )?;
             let rows = stmt
@@ -670,7 +750,8 @@ pub fn list_agent_events(
                         step: row.get(2)?,
                         kind: row.get(3)?,
                         content: row.get(4)?,
-                        created_at: row.get(5)?,
+                        meta: row.get(5)?,
+                        created_at: row.get(6)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;

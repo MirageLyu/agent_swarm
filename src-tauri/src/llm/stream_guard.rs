@@ -51,6 +51,19 @@ use super::{LlmProvider, LlmRequest, LlmResponse, StreamChunk};
 /// first token，180s 留 50% 余量。再长就大概率是 provider / 网络真挂了。
 pub const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// Single-Agent Uplift Phase 2.3: 用户**视觉**层面的"看起来卡住"门槛。
+///
+/// engine.rs 在 stream forwarder 旁边跑一个 heartbeat 任务，距上一个 chunk
+/// 超过这个秒数就向前端 emit 一条 `tool_progress` 事件（"Waiting for LLM... idle 30s"），
+/// 让用户感知到"agent 还活着，只是 LLM 在憋大招"。
+///
+/// 注意：plan.md 原定义为"30s 心跳 + 60s abort 两阶段"，**故意没把 abort 降到 60s**——
+/// thinking 模型（DeepSeek-R1 / V4-Pro / QwQ）的首 token / step 间静默常超过 60s，
+/// 砍下去会回归到老 issue：拉一个推理模型分分钟被 idle_timeout 杀。
+/// abort 阈值仍走 `DEFAULT_STREAM_IDLE_TIMEOUT (180s)`，只把"心理学层面的卡住"
+/// 提前到 30s 报给前端，用户感知 + 兼容性兼得。
+pub const DEFAULT_STREAM_IDLE_HEARTBEAT_SECS: u64 = 30;
+
 /// Watchdog 最大检查间隔。实际值 = `min(idle_timeout / 6, this)`，
 /// 让短阈值场景（如测试用的 100ms idle）也能及时响应而不至于一直 sleep。
 const IDLE_CHECK_INTERVAL_MAX: Duration = Duration::from_secs(10);

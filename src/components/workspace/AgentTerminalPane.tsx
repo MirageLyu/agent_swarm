@@ -1,20 +1,11 @@
 import { memo, useEffect, useRef, useCallback } from "react";
 import { useTranslation } from "react-i18next";
-import type { Agent, AgentEvent } from "../../stores/agent-store";
+import type { Agent } from "../../stores/agent-store";
 import styles from "./AgentTerminalPane.module.css";
+import { EventLine } from "./event-renderers";
+import { TodoListPanel } from "./TodoListPanel";
 
 const MAX_LINES = 1000;
-
-const KIND_CLASS: Record<string, string> = {
-  llm_call: styles.lineLlmCall,
-  tool_use: styles.lineToolUse,
-  tool_result: styles.lineToolResult,
-  message: styles.lineMessage,
-  error: styles.lineError,
-  checkpoint: styles.lineCheckpoint,
-  status_change: styles.lineStatusChange,
-  note_applied: styles.lineNoteApplied,
-};
 
 interface AgentTerminalPaneProps {
   agent: Agent;
@@ -23,25 +14,6 @@ interface AgentTerminalPaneProps {
   menuSlot?: React.ReactNode;
   compact?: boolean;
 }
-
-const TerminalLine = memo(function TerminalLine({
-  event,
-  isLast,
-  isRunning,
-}: {
-  event: AgentEvent;
-  isLast: boolean;
-  isRunning: boolean;
-}) {
-  const cls = KIND_CLASS[event.kind] ?? styles.lineMessage;
-  const cursorCls = isLast && isRunning ? ` ${styles.cursor}` : "";
-
-  return (
-    <div className={`${styles.line} ${cls}${cursorCls}`}>
-      {event.content}
-    </div>
-  );
-});
 
 export const AgentTerminalPane = memo(function AgentTerminalPane({
   agent,
@@ -97,6 +69,9 @@ export const AgentTerminalPane = memo(function AgentTerminalPane({
           {menuSlot}
         </div>
       </div>
+      {/* Single-Agent Uplift Phase 1.2: TodoListPanel 渲染在 header 与事件流之间，
+          固定不滚动；Agent 没用过 TodoWriteTool 时返回 null 不占空间。 */}
+      <TodoListPanel todos={agent.todos} />
       <div
         className={styles.terminal}
         ref={scrollRef}
@@ -109,7 +84,7 @@ export const AgentTerminalPane = memo(function AgentTerminalPane({
         ) : (
           <>
             {trimmedEvents.map((evt, i) => (
-              <TerminalLine
+              <EventLine
                 key={evt.id}
                 event={evt}
                 isLast={

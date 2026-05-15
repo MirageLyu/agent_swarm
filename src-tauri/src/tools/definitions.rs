@@ -6,7 +6,16 @@ use serde_json::json;
 /// runtime 上下文，由 Phase 2 的 dispatch_task 在装载 ToolExecutor
 /// 时通过 `with_artifact_publisher` 注入。当前函数只返回纯文件系统
 /// 工具（保持单元测试不依赖 DB）。
+///
+/// Single-Agent Uplift Phase 1.4: 实际实现已经迁到 `tools::registry::TOOLS`，
+/// 这里保留入口名是为了 backward compatibility（多处调用方在用）。
 pub fn builtin_tools() -> Vec<ToolDefinition> {
+    super::registry::all_definitions()
+}
+
+/// 旧实现，保留作为参照——`registry::TOOLS` 是新的事实源。改 schema 在 registry 改即可。
+#[allow(dead_code)]
+fn builtin_tools_legacy() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "read_file".to_string(),
@@ -77,12 +86,173 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
             }),
             cache_control: None,
         },
+        // Single-Agent Uplift Phase 1.1: 精确字符串替换。比 write_file 整文件改更安全，
+        // context 也更省（不需要把整个文件原样回 push 给 LLM）。
+        // - old_string 必须唯一，否则结构化报错；要批量替换走 replace_all=true。
+        // - 必须先 read_file 同一路径再 edit；否则报错（防 LLM 凭空臆造）。
+        ToolDefinition {
+            name: "edit_file".to_string(),
+            description: "Replace exact text in an existing file. Safer than write_file for \
+                          small changes — it preserves the rest of the file untouched. \
+                          REQUIREMENTS:\n\
+                          - You MUST call read_file on the same path at least once in this \
+                          session before edit_file works (so the model has seen the real content).\n\
+                          - `old_string` must occur EXACTLY once in the file unless \
+                          `replace_all` is true; otherwise the call fails with a uniqueness error \
+                          and you should add more surrounding context to old_string and retry.\n\
+                          - `old_string` must match exactly (whitespace, indentation, line endings).\n\
+                          - On success, returns { path, replacements, lines_added, lines_removed }."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File path relative to workspace root" },
+                    "old_string": {
+                        "type": "string",
+                        "description": "Exact text to find. Must be unique unless replace_all=true."
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "Text to substitute. Pass empty string to delete."
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "Replace every occurrence (default false). Useful for renames."
+                    }
+                },
+                "required": ["path", "old_string", "new_string"]
+            }),
+            cache_control: None,
+        },
+        // Single-Agent Uplift Phase 1.3: 文件名通配。`search_files` 内容搜索擅长，
+        // 但找文件用 rg 很别扭。glob 用 globwalk 直接按 mtime 排序返回前 N 条，
+        // 对应 innerCC GlobTool 的核心用例。
+        ToolDefinition {
+            name: "glob".to_string(),
+            description: "Find files by name/path glob pattern, sorted by recency (most-recently \
+                          modified first). Examples: `**/*.rs`, `src/**/test_*.ts`, \
+                          `**/migrations/*.sql`. Use this when you know the filename shape; use \
+                          `search_files` (ripgrep) for content search."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern (e.g. `**/*.rs`, `src/components/**/*.tsx`)."
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Root directory to search under (default: workspace root)."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results (default 100, max 500)."
+                    }
+                },
+                "required": ["pattern"]
+            }),
+            cache_control: None,
+        },
     ]
 }
 
 /// 完成检测的"标记"工具名（FM-15 FR-09.3）。Coding Agent 调用此工具表示任务完成；
 /// AgentEngine 拦截后跳出主循环并执行 guardrails。
 pub const TASK_COMPLETE_TOOL: &str = "task_complete";
+
+/// Single-Agent Uplift Phase 1.2: TodoWriteTool 工具名常量。
+pub const TODO_WRITE_TOOL: &str = "todo_write";
+
+/// Single-Agent Uplift Phase 2.4: EnterPlanMode 工具名常量。
+pub const ENTER_PLAN_MODE_TOOL: &str = "enter_plan_mode";
+
+/// Single-Agent Uplift Phase 2.4: EnterPlanMode 工具定义。
+///
+/// 为什么和 TodoWrite 同时提供：TodoWrite 是一个迭代的 in-flight 状态机
+/// （pending → in_progress → completed），适合执行过程中追踪进度；
+/// EnterPlanMode 是一次性的"我打算这样做"声明，发生在动手前，输出整段 markdown
+/// 计划方便用户/guardrail 一眼审阅。两者职能不同——
+///   - `enter_plan_mode`：在第一次写盘之前调用，把整体方案讲清楚
+///   - `todo_write`：跟踪具体步骤进度
+///
+/// 落地：LLM 调它后，后端 emit `tool_use` 事件携带 plan 文本（meta.plan），
+/// 工具返回值是简短确认。前端 ToolUseLine 已经能解析 meta 渲染出来——故意复用
+/// 现有 renderer 而不是新造一个 plan UI，以最小化 Phase 2 的改动面。
+pub fn enter_plan_mode_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: ENTER_PLAN_MODE_TOOL.to_string(),
+        description: "Declare an end-to-end plan BEFORE making any code changes. Use this for \
+                      tasks with non-trivial scope (3+ files, architectural choices, or risky \
+                      changes). Writing the plan down lets the user/guardrail catch \
+                      mis-direction early instead of waiting for 30 wasted steps. \
+                      Skip this for trivial single-file edits — overhead would slow the \
+                      feedback loop. After calling this, proceed with the implementation; \
+                      use `todo_write` to track step-by-step progress."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "plan": {
+                    "type": "string",
+                    "description": "Concise markdown plan: goal, approach, files to touch, risks."
+                }
+            },
+            "required": ["plan"]
+        }),
+        cache_control: None,
+    }
+}
+
+/// Single-Agent Uplift Phase 1.2: TodoWrite 工具定义。
+///
+/// 让 Agent 把"待办清单"作为外显状态——相比把 todo 混进 message 流，前端能独立
+/// 渲染 panel，用户一眼看到进度。语义对齐 Cursor / Claude Code：
+///   - 每次调用都是"我现在的清单是这样"——后端**全量替换**。
+///   - 同一时间最多一个 in_progress，pending → in_progress → completed。
+///   - 所有 pending/in_progress 完成 → completed。
+pub fn todo_write_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: TODO_WRITE_TOOL.to_string(),
+        description:
+            "Maintain a structured todo list for the current task. Each call replaces the entire \
+             list — pass the FULL current state, not just the new item. Mark exactly one item as \
+             in_progress when actively working on it; mark items completed as soon as they finish. \
+             Use this for tasks with 3+ steps so the user can see progress in real time. Skip it \
+             for trivial single-step requests."
+                .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "description": "Full ordered list of todos for this task.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": "Stable id for this item (any unique string within the list)."
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Short, action-oriented description (imperative)."
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed", "cancelled"],
+                                "description": "Current state. At most ONE item should be in_progress."
+                            }
+                        },
+                        "required": ["id", "content", "status"]
+                    }
+                }
+            },
+            "required": ["todos"]
+        }),
+        cache_control: None,
+    }
+}
 
 /// FM-15 FR-09.3: 完成检测工具定义。Agent 调用 `task_complete(summary)` 显式声明完成；
 /// AgentEngine 拦截 tool_use → 跑 guardrails → 决定是否真正进入 Completed 状态。
@@ -115,6 +285,8 @@ pub fn task_complete_tool_definition() -> ToolDefinition {
 pub fn coding_agent_tools_with_artifact_support() -> Vec<ToolDefinition> {
     let mut tools = builtin_tools();
     tools.push(crate::agent::artifacts::publish_artifact_tool_definition());
+    tools.push(todo_write_tool_definition());
+    tools.push(enter_plan_mode_tool_definition());
     tools.push(task_complete_tool_definition());
     tools
 }

@@ -13,7 +13,7 @@ import {
 import type { AgentEventPayload, AgentStreamPayload } from "../ipc";
 import type { TaskStatus, MissionStatus, MissionCostSummary } from "../ipc/commands";
 import { useAgentStore } from "../stores/agent-store";
-import type { Agent, AgentEvent, AgentStatus } from "../stores/agent-store";
+import type { Agent, AgentEvent, AgentStatus, AgentTodo } from "../stores/agent-store";
 import { useTaskStore } from "../stores/task-store";
 import { useUiStore } from "../stores/ui-store";
 import { AgentStreamList } from "../components/workspace/AgentStreamList";
@@ -25,6 +25,18 @@ import { MissionNoteBar } from "../components/workspace/MissionNoteBar";
 import styles from "./WorkspaceView.module.css";
 
 let eventCounter = 0;
+
+/// Single-Agent Uplift Phase 0.2: 解析后端 hydrate 时的 meta 字符串。
+/// agent_events.meta 在 SQLite 是 TEXT，commands 透传成 string；事件 push 路径
+/// 已经是 JSON value。解析失败 → undefined，下游 renderer 走 raw fallback。
+function parseMeta(meta: string | null | undefined): unknown {
+  if (!meta) return undefined;
+  try {
+    return JSON.parse(meta);
+  } catch {
+    return undefined;
+  }
+}
 
 function parseCheckpointCost(content: string): { inputTokens: number; outputTokens: number; cost: number } | null {
   const tokensMatch = content.match(/tokens:\s*(\d+)in\/(\d+)out/);
@@ -111,6 +123,7 @@ export function WorkspaceView() {
           events: [],
           streamBuffer: "",
           shellBuffer: "",
+          todos: [],
         }));
         hydrateAgents(hydrated);
       } catch {}
@@ -138,6 +151,7 @@ export function WorkspaceView() {
           step: e.step,
           kind: e.kind as AgentEvent["kind"],
           content: e.content,
+          meta: parseMeta(e.meta),
           timestamp: e.created_at,
         }));
         hydrateEvents(activeAgentId, mapped);
@@ -163,6 +177,7 @@ export function WorkspaceView() {
             step: e.step,
             kind: e.kind as AgentEvent["kind"],
             content: e.content,
+            meta: parseMeta(e.meta),
             timestamp: e.created_at,
           }));
           hydrateEvents(agent.id, mapped);
@@ -170,6 +185,36 @@ export function WorkspaceView() {
       }
     }
   }, [agents, hydrateEvents]);
+
+  /// Single-Agent Uplift Phase 1.2: hydrate agent_todos。
+  /// 第一次见到一个 agent 就拉一遍快照（完成态 agent 也要拉，否则刷新后 panel 是空）。
+  /// 实时变化通过 todo_update 事件流增量推过来，所以这里不做轮询。
+  const hydratedTodoAgentIdsRef = useRef(new Set<string>());
+  useEffect(() => {
+    const agentList = Object.values(agents);
+    const setAgentTodos = useAgentStore.getState().setAgentTodos;
+    for (const agent of agentList) {
+      if (hydratedTodoAgentIdsRef.current.has(agent.id)) continue;
+      hydratedTodoAgentIdsRef.current.add(agent.id);
+      commands
+        .listAgentTodos(agent.id)
+        .then((records) => {
+          const sanitized: AgentTodo[] = records
+            .filter((r): r is typeof r =>
+              ["pending", "in_progress", "completed", "cancelled"].includes(r.status),
+            )
+            .map((r) => ({
+              id: r.id,
+              content: r.content,
+              status: r.status as AgentTodo["status"],
+            }));
+          if (sanitized.length > 0) {
+            setAgentTodos(agent.id, sanitized);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [agents]);
 
   useEffect(() => {
     const unlistenEvent = onAgentEvent((payload: AgentEventPayload) => {
@@ -191,6 +236,7 @@ export function WorkspaceView() {
           events: [],
           streamBuffer: "",
           shellBuffer: "",
+          todos: [],
         });
       }
 
@@ -200,9 +246,32 @@ export function WorkspaceView() {
         step: payload.step,
         kind: payload.kind as AgentEvent["kind"],
         content: payload.content,
+        meta: payload.meta,
         timestamp: new Date().toISOString(),
       };
       appendEvent(agentId, evt);
+
+      // Single-Agent Uplift Phase 1.2: todo_update 事件携带完整 todos 数组，
+      // 直接全量替换前端状态——和后端 replace_agent_todos 语义一致。
+      if (payload.kind === "todo_update" && payload.meta) {
+        const meta = payload.meta as { todos?: AgentTodo[] };
+        if (Array.isArray(meta.todos)) {
+          // 后端 status 是字符串，先做一遍粗校验保留合法值。
+          const sanitized: AgentTodo[] = meta.todos
+            .filter(
+              (t): t is AgentTodo =>
+                typeof t === "object" &&
+                t !== null &&
+                typeof (t as AgentTodo).id === "string" &&
+                typeof (t as AgentTodo).content === "string" &&
+                ["pending", "in_progress", "completed", "cancelled"].includes(
+                  (t as AgentTodo).status,
+                ),
+            )
+            .map((t) => ({ id: t.id, content: t.content, status: t.status }));
+          useAgentStore.getState().setAgentTodos(agentId, sanitized);
+        }
+      }
 
       const currentAgent = useAgentStore.getState().agents[agentId];
       const updates: Partial<Agent> = { currentStep: payload.step };
@@ -274,6 +343,7 @@ export function WorkspaceView() {
           events: [],
           streamBuffer: "",
           shellBuffer: "",
+          todos: [],
         });
       }
       if (!store.activeAgentId) {
@@ -344,6 +414,7 @@ export function WorkspaceView() {
           step: e.step,
           kind: e.kind as AgentEvent["kind"],
           content: e.content,
+          meta: parseMeta(e.meta),
           timestamp: e.created_at,
         };
         const list = byAgent.get(e.agent_id) || [];

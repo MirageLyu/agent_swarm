@@ -243,7 +243,20 @@ export interface AgentEventRecord {
   step: number;
   kind: string;
   content: string;
+  /// Single-Agent Uplift Phase 0.2: 结构化 payload（JSON 字符串）。前端按 kind 解析。
+  meta?: string | null;
   created_at: string;
+}
+
+/// Single-Agent Uplift Phase 1.2: 后端 list_agent_todos 返回结构。
+/// status 字段限定于 pending/in_progress/completed/cancelled（migration CHECK 强制）。
+export interface AgentTodoRecord {
+  id: string;
+  agent_id: string;
+  order_idx: number;
+  content: string;
+  status: string;
+  updated_at: string;
 }
 
 export interface AgentDetail {
@@ -1014,6 +1027,10 @@ export const commands = {
   // FM-04: Activity stream & cost tracking
   listAgentEvents: (request: ListAgentEventsRequest) =>
     invoke<AgentEventRecord[]>("list_agent_events", { request }),
+
+  // Single-Agent Uplift Phase 1.2: TodoListPanel 初次 hydrate；实时刷新走 todo_update 事件
+  listAgentTodos: (agentId: string) =>
+    invoke<AgentTodoRecord[]>("list_agent_todos", { agentId }),
 
   getMissionCostSummary: (missionId: string) =>
     invoke<MissionCostSummary>("get_mission_cost_summary", { missionId }),

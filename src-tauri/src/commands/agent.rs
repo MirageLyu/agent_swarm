@@ -58,6 +58,9 @@ pub struct AgentEventRecord {
     pub step: u32,
     pub kind: String,
     pub content: String,
+    /// Single-Agent Uplift Phase 0.2: structured payload (JSON string) for tool_use /
+    /// tool_result / guardrail_* / tool_progress 等结构化事件。前端按 kind 解析后渲染。
+    pub meta: Option<String>,
     pub created_at: String,
 }
 
@@ -172,7 +175,7 @@ pub fn get_agent_events(
     let db = app.state::<Database>();
     db.with_conn(|conn| {
         let mut stmt = conn.prepare(
-            "SELECT id, agent_id, step, kind, content, created_at
+            "SELECT id, agent_id, step, kind, content, meta, created_at
              FROM agent_events WHERE agent_id = ?1 ORDER BY created_at ASC",
         )?;
         let rows = stmt
@@ -183,7 +186,8 @@ pub fn get_agent_events(
                     step: row.get(2)?,
                     kind: row.get(3)?,
                     content: row.get(4)?,
-                    created_at: row.get(5)?,
+                    meta: row.get(5)?,
+                    created_at: row.get(6)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -283,7 +287,45 @@ pub fn list_agent_events(
                 step: r.step as u32,
                 kind: r.kind,
                 content: r.content,
+                meta: r.meta,
                 created_at: r.created_at,
+            })
+            .collect())
+    })
+    .map_err(|e| e.to_string())
+}
+
+// ---- Single-Agent Uplift Phase 1.2: agent_todos 读接口 ----
+
+#[derive(Debug, Serialize, Clone)]
+pub struct AgentTodoRecord {
+    pub id: String,
+    pub agent_id: String,
+    pub order_idx: i64,
+    pub content: String,
+    pub status: String,
+    pub updated_at: String,
+}
+
+/// 列出某 agent 的 todo 清单（TodoListPanel 初次 hydrate 用）。
+/// 实时更新走 `agent-event` 流的 todo_update 事件，前端不需要轮询。
+#[tauri::command]
+pub fn list_agent_todos(
+    app: tauri::AppHandle,
+    agent_id: String,
+) -> Result<Vec<AgentTodoRecord>, String> {
+    let db = app.state::<Database>();
+    db.with_conn(|conn| {
+        let rows = queries::list_agent_todos(conn, &agent_id)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| AgentTodoRecord {
+                id: r.id,
+                agent_id: r.agent_id,
+                order_idx: r.order_idx,
+                content: r.content,
+                status: r.status,
+                updated_at: r.updated_at,
             })
             .collect())
     })

@@ -10,7 +10,8 @@ interface AgentTimelineProps {
   onBack: () => void;
 }
 
-const KIND_BADGE_VARIANT = {
+/// Badge variant per event kind. 不在表里的 kind 会落到 'default'，新加 kind 不会编译失败。
+const KIND_BADGE_VARIANT: Partial<Record<AgentEvent["kind"], "default" | "info" | "success" | "warning" | "error">> = {
   error: "error",
   checkpoint: "warning",
   tool_use: "info",
@@ -18,7 +19,18 @@ const KIND_BADGE_VARIANT = {
   status_change: "default",
   llm_call: "default",
   message: "success",
-} as const;
+  // Single-Agent Uplift Phase 0 新增的 kind 在 timeline 视图里使用更轻的视觉
+  system_hint: "warning",
+  guardrail_pass: "success",
+  guardrail_fail: "error",
+  guardrail_summary: "default",
+  note_applied: "warning",
+  tool_progress: "default",
+  tool_summary: "default",
+  compact: "default",
+  todo_update: "info",
+  review: "default",
+};
 
 const ERROR_KINDS = new Set(["error"]);
 const HIGHLIGHT_KINDS = new Set(["error", "status_change"]);

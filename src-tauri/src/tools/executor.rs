@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -66,6 +67,13 @@ impl ToolOutput {
 
 pub struct ToolExecutor {
     workspace_root: PathBuf,
+    /// Single-Agent Uplift Phase 1.1: 跟踪本 ToolExecutor 实例上 `read_file` 过的路径，
+    /// 用于 `edit_file` 的"必须先读"前置条件——避免 LLM 在没看过文件的情况下臆造修改
+    /// 然后把无关代码改坏（这是不开 read precondition 时最常见的失败模式）。
+    ///
+    /// 用 canonical 绝对路径作为 key，保持与 `resolve_path` / `read_file` 一致；
+    /// 一个 ToolExecutor 绑定一个 agent，故 in-memory set 足够，不需要持久化。
+    read_paths: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl ToolExecutor {
@@ -73,7 +81,10 @@ impl ToolExecutor {
         let workspace_root = workspace_root
             .canonicalize()
             .unwrap_or(workspace_root);
-        Self { workspace_root }
+        Self {
+            workspace_root,
+            read_paths: Arc::new(Mutex::new(HashSet::new())),
+        }
     }
 
     pub fn workspace_display(&self) -> String {
@@ -84,7 +95,9 @@ impl ToolExecutor {
         match tool_name {
             "read_file" => self.read_file(input).await,
             "write_file" => self.write_file(input).await,
+            "edit_file" => self.edit_file(input).await,
             "search_files" => self.search_files(input).await,
+            "glob" => self.glob_files(input).await,
             "shell_exec" => self.shell_exec(input, None).await,
             "list_files" => self.list_files(input).await,
             _ => ToolOutput::error("unknown_tool", &format!("Unknown tool: {tool_name}")),
@@ -125,12 +138,138 @@ impl ToolExecutor {
             Err(e) => return ToolOutput::error("sandbox_violation", &e.to_string()),
         };
         match tokio::fs::read_to_string(&full_path).await {
-            Ok(content) => ToolOutput::ok(content),
+            Ok(content) => {
+                // 用 canonicalize 后的绝对路径登记，保持和 edit_file 的检查一致。
+                let canonical = full_path.canonicalize().unwrap_or(full_path);
+                self.read_paths.lock().unwrap().insert(canonical);
+                ToolOutput::ok(content)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 ToolOutput::error("file_not_found", &format!("File not found: {rel_path}"))
             }
             Err(e) => ToolOutput::error("io_error", &e.to_string()),
         }
+    }
+
+    /// Single-Agent Uplift Phase 1.1: 精确字符串替换。比 write_file 更安全 + 更省 context。
+    ///
+    /// 不变量（任意一条违反就 is_error=true，不写盘）：
+    /// - 必须先 read_file 同一路径（防止 LLM 凭空臆造）
+    /// - old_string 在文件中出现 == 1 次（除非 replace_all=true 时 ≥ 1 次）
+    /// - replace_all=true 时 old_string 至少 1 次
+    /// - 写盘前 new_string 替换不能让文件变成完全空白（误删兜底）
+    async fn edit_file(&self, input: &serde_json::Value) -> ToolOutput {
+        let rel_path = match input["path"].as_str() {
+            Some(p) => p,
+            None => return ToolOutput::error(
+                "parameter_error",
+                &format!("Missing 'path' parameter. Received keys: {:?}",
+                    input.as_object().map(|o| o.keys().collect::<Vec<_>>())),
+            ),
+        };
+        let old_string = match input["old_string"].as_str() {
+            Some(s) => s,
+            None => return ToolOutput::error(
+                "parameter_error",
+                "Missing 'old_string' parameter (the exact text to replace).",
+            ),
+        };
+        let new_string = match input["new_string"].as_str() {
+            Some(s) => s,
+            None => return ToolOutput::error(
+                "parameter_error",
+                "Missing 'new_string' parameter (pass empty string to delete).",
+            ),
+        };
+        let replace_all = input
+            .get("replace_all")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let full_path = match self.resolve_path(rel_path) {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error("sandbox_violation", &e.to_string()),
+        };
+        let canonical = full_path.canonicalize().unwrap_or_else(|_| full_path.clone());
+
+        if !self.read_paths.lock().unwrap().contains(&canonical) {
+            return ToolOutput::error(
+                "edit_without_read",
+                &format!(
+                    "edit_file refused: you must call read_file on `{rel_path}` first so you can \
+                     see the exact contents. Read the file, then retry edit_file with old_string \
+                     copied verbatim from the read output."
+                ),
+            );
+        }
+
+        let original = match tokio::fs::read_to_string(&full_path).await {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return ToolOutput::error("file_not_found", &format!("File not found: {rel_path}"));
+            }
+            Err(e) => return ToolOutput::error("io_error", &e.to_string()),
+        };
+
+        let occurrences = original.matches(old_string).count();
+        if occurrences == 0 {
+            return ToolOutput::error(
+                "edit_no_match",
+                &format!(
+                    "old_string not found in {rel_path}. Did the file change since you last read \
+                     it? Re-run read_file and adjust old_string to match the current bytes \
+                     exactly (whitespace, indentation, line endings)."
+                ),
+            );
+        }
+        if !replace_all && occurrences > 1 {
+            return ToolOutput::error(
+                "edit_not_unique",
+                &format!(
+                    "old_string is not unique in {rel_path}: matched {occurrences} times. \
+                     Either expand old_string to include more surrounding context (2-4 adjacent \
+                     lines is usually enough) or pass replace_all=true if you really want to \
+                     change every occurrence."
+                ),
+            );
+        }
+
+        let updated = if replace_all {
+            original.replace(old_string, new_string)
+        } else {
+            // 只替换第一处——前面已经验证 occurrences == 1，所以 first vs all 等价。
+            original.replacen(old_string, new_string, 1)
+        };
+
+        if updated.trim().is_empty() && !original.trim().is_empty() {
+            return ToolOutput::error(
+                "edit_would_blank_file",
+                &format!(
+                    "edit_file refused: the resulting {rel_path} would be empty. If you intended \
+                     to delete the file, use a shell_exec with `rm` instead."
+                ),
+            );
+        }
+
+        // diff 行数估算：旧/新 lines 计数差。LLM 看 + 前端 badge 都好用。
+        // 真精确 diff 留给 review 视图，这里不引入额外依赖。
+        let old_lines = original.lines().count() as i64;
+        let new_lines = updated.lines().count() as i64;
+        let lines_added = (new_lines - old_lines).max(0) as u64;
+        let lines_removed = (old_lines - new_lines).max(0) as u64;
+
+        if let Err(e) = tokio::fs::write(&full_path, &updated).await {
+            return ToolOutput::error("io_error", &e.to_string());
+        }
+
+        let payload = serde_json::json!({
+            "path": rel_path,
+            "replacements": occurrences,
+            "lines_added": lines_added,
+            "lines_removed": lines_removed,
+            "replace_all": replace_all,
+        });
+        ToolOutput::ok(payload.to_string())
     }
 
     async fn write_file(&self, input: &serde_json::Value) -> ToolOutput {
@@ -161,6 +300,96 @@ impl ToolExecutor {
         match tokio::fs::write(&full_path, content).await {
             Ok(()) => ToolOutput::ok(format!("Written {} bytes to {rel_path}", content.len())),
             Err(e) => ToolOutput::error("io_error", &e.to_string()),
+        }
+    }
+
+    /// Single-Agent Uplift Phase 1.3: 文件名 glob 匹配。
+    ///
+    /// 设计要点：
+    /// - 用 `glob` crate 的 `**` 支持，足以覆盖 innerCC GlobTool 90% 用例；不引入 globwalk 依赖。
+    /// - 结果按 mtime 降序（最新改的在前），符合用户在大 repo 里"改过的文件最相关"的直觉。
+    /// - 默认 limit=100，最大 500——避免 LLM 被几万个文件淹没 context。
+    /// - sandbox：路径必须落在 workspace 内，绝对路径前缀防穿越。
+    async fn glob_files(&self, input: &serde_json::Value) -> ToolOutput {
+        let pattern = match input["pattern"].as_str() {
+            Some(p) => p,
+            None => return ToolOutput::error(
+                "parameter_error",
+                "Missing 'pattern' parameter (e.g. `**/*.rs`).",
+            ),
+        };
+        let base_rel = input["path"].as_str().unwrap_or(".");
+        let base = match self.resolve_path(base_rel) {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error("sandbox_violation", &e.to_string()),
+        };
+        let limit = input
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(100)
+            .min(500) as usize;
+
+        // 拼接 base/pattern。glob 接受任何路径形式，绝对相对都行。
+        let full_pattern = base.join(pattern);
+        let pattern_str = match full_pattern.to_str() {
+            Some(s) => s,
+            None => return ToolOutput::error(
+                "parameter_error",
+                "Pattern path contains non-UTF8 bytes",
+            ),
+        };
+
+        let walk = match glob::glob(pattern_str) {
+            Ok(it) => it,
+            Err(e) => return ToolOutput::error(
+                "parameter_error",
+                &format!("invalid glob pattern: {e}"),
+            ),
+        };
+
+        let workspace_canonical = self
+            .workspace_root
+            .canonicalize()
+            .unwrap_or_else(|_| self.workspace_root.clone());
+
+        let mut entries: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+        for path in walk.flatten() {
+            // sandbox 兜底：glob 不会自己越界，但符号链接可能；显式校验。
+            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+            if !canonical.starts_with(&workspace_canonical) {
+                continue;
+            }
+            // 只列文件，不列目录——和 GlobTool 语义一致；LLM 列目录用 list_files。
+            let mtime = match tokio::fs::metadata(&path).await {
+                Ok(meta) if meta.is_file() => meta
+                    .modified()
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                _ => continue,
+            };
+            entries.push((mtime, path));
+        }
+        // 按 mtime 降序——最新动过的排前。
+        entries.sort_by(|a, b| b.0.cmp(&a.0));
+        let truncated = entries.len() > limit;
+        let total = entries.len();
+        entries.truncate(limit);
+
+        // 输出相对路径让 LLM 可以直接喂给 read_file/edit_file。
+        let mut lines: Vec<String> = entries
+            .iter()
+            .map(|(_, path)| {
+                path.strip_prefix(&workspace_canonical)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| path.display().to_string())
+            })
+            .collect();
+        if truncated {
+            lines.push(format!("... ({} matches; showing newest {})", total, limit));
+        }
+        if lines.is_empty() {
+            ToolOutput::ok(format!("No files matched `{pattern}` under `{base_rel}`."))
+        } else {
+            ToolOutput::ok(lines.join("\n"))
         }
     }
 
@@ -691,5 +920,198 @@ mod tests {
         assert!(!out.is_error);
         let content = fs::read_to_string(dir.path().join("test.txt")).unwrap();
         assert_eq!(content, "hello world");
+    }
+
+    // ---- Single-Agent Uplift Phase 1.1: edit_file 单测 ----
+
+    /// 没读过文件就 edit → 拒绝。这是 edit_without_read 不变量的回归测试。
+    #[tokio::test]
+    async fn edit_without_prior_read_is_rejected() {
+        let (dir, exec) = setup();
+        fs::write(dir.path().join("a.txt"), "hello world").unwrap();
+        let out = exec
+            .execute(
+                "edit_file",
+                &serde_json::json!({
+                    "path": "a.txt",
+                    "old_string": "world",
+                    "new_string": "rust",
+                }),
+            )
+            .await;
+        assert!(out.is_error);
+        let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+        assert_eq!(v["error"], "edit_without_read");
+        // 文件没被改
+        assert_eq!(fs::read_to_string(dir.path().join("a.txt")).unwrap(), "hello world");
+    }
+
+    /// 读过 → 唯一替换 → 成功并落盘 + 返回结构化 payload。
+    #[tokio::test]
+    async fn edit_after_read_unique_replacement_succeeds() {
+        let (dir, exec) = setup();
+        fs::write(dir.path().join("a.txt"), "hello world").unwrap();
+
+        let _ = exec
+            .execute("read_file", &serde_json::json!({"path": "a.txt"}))
+            .await;
+
+        let out = exec
+            .execute(
+                "edit_file",
+                &serde_json::json!({
+                    "path": "a.txt",
+                    "old_string": "world",
+                    "new_string": "rust",
+                }),
+            )
+            .await;
+        assert!(!out.is_error, "got error: {}", out.content);
+        let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+        assert_eq!(v["replacements"], 1);
+        assert_eq!(fs::read_to_string(dir.path().join("a.txt")).unwrap(), "hello rust");
+    }
+
+    /// 多处匹配 + replace_all=false → 拒绝，让 LLM 加 context 重试。
+    #[tokio::test]
+    async fn edit_non_unique_without_replace_all_is_rejected() {
+        let (dir, exec) = setup();
+        fs::write(dir.path().join("b.txt"), "x x x").unwrap();
+        let _ = exec
+            .execute("read_file", &serde_json::json!({"path": "b.txt"}))
+            .await;
+
+        let out = exec
+            .execute(
+                "edit_file",
+                &serde_json::json!({
+                    "path": "b.txt",
+                    "old_string": "x",
+                    "new_string": "y",
+                }),
+            )
+            .await;
+        assert!(out.is_error);
+        let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+        assert_eq!(v["error"], "edit_not_unique");
+        assert!(v["message"].as_str().unwrap().contains("3 times"));
+        // 文件未改
+        assert_eq!(fs::read_to_string(dir.path().join("b.txt")).unwrap(), "x x x");
+    }
+
+    /// replace_all=true → 全部替换。
+    #[tokio::test]
+    async fn edit_replace_all_replaces_every_occurrence() {
+        let (dir, exec) = setup();
+        fs::write(dir.path().join("c.txt"), "foo foo foo").unwrap();
+        let _ = exec
+            .execute("read_file", &serde_json::json!({"path": "c.txt"}))
+            .await;
+
+        let out = exec
+            .execute(
+                "edit_file",
+                &serde_json::json!({
+                    "path": "c.txt",
+                    "old_string": "foo",
+                    "new_string": "bar",
+                    "replace_all": true,
+                }),
+            )
+            .await;
+        assert!(!out.is_error);
+        let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+        assert_eq!(v["replacements"], 3);
+        assert_eq!(fs::read_to_string(dir.path().join("c.txt")).unwrap(), "bar bar bar");
+    }
+
+    /// old_string 不存在 → 拒绝。
+    #[tokio::test]
+    async fn edit_no_match_is_rejected() {
+        let (dir, exec) = setup();
+        fs::write(dir.path().join("d.txt"), "hello").unwrap();
+        let _ = exec
+            .execute("read_file", &serde_json::json!({"path": "d.txt"}))
+            .await;
+
+        let out = exec
+            .execute(
+                "edit_file",
+                &serde_json::json!({
+                    "path": "d.txt",
+                    "old_string": "world",
+                    "new_string": "rust",
+                }),
+            )
+            .await;
+        assert!(out.is_error);
+        let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+        assert_eq!(v["error"], "edit_no_match");
+    }
+
+    /// edit 让文件变空 → 拒绝（防误删兜底）。
+    #[tokio::test]
+    async fn edit_that_blanks_the_file_is_rejected() {
+        let (dir, exec) = setup();
+        fs::write(dir.path().join("e.txt"), "content").unwrap();
+        let _ = exec
+            .execute("read_file", &serde_json::json!({"path": "e.txt"}))
+            .await;
+
+        let out = exec
+            .execute(
+                "edit_file",
+                &serde_json::json!({
+                    "path": "e.txt",
+                    "old_string": "content",
+                    "new_string": "",
+                }),
+            )
+            .await;
+        assert!(out.is_error);
+        let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+        assert_eq!(v["error"], "edit_would_blank_file");
+        // 原文件保留
+        assert_eq!(fs::read_to_string(dir.path().join("e.txt")).unwrap(), "content");
+    }
+
+    // ---- Single-Agent Uplift Phase 1.3: glob 单测 ----
+
+    #[tokio::test]
+    async fn glob_finds_files_by_extension() {
+        let (dir, exec) = setup();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/a.rs"), "x").unwrap();
+        fs::write(dir.path().join("src/b.rs"), "x").unwrap();
+        fs::write(dir.path().join("src/c.txt"), "x").unwrap();
+
+        let out = exec
+            .execute("glob", &serde_json::json!({"pattern": "**/*.rs"}))
+            .await;
+        assert!(!out.is_error, "got error: {}", out.content);
+        assert!(out.content.contains("a.rs"));
+        assert!(out.content.contains("b.rs"));
+        assert!(!out.content.contains("c.txt"));
+    }
+
+    #[tokio::test]
+    async fn glob_empty_match_returns_friendly_message() {
+        let (_dir, exec) = setup();
+        let out = exec
+            .execute("glob", &serde_json::json!({"pattern": "**/*.nonexistent"}))
+            .await;
+        assert!(!out.is_error);
+        assert!(out.content.contains("No files matched"));
+    }
+
+    #[tokio::test]
+    async fn glob_invalid_pattern_returns_parameter_error() {
+        let (_dir, exec) = setup();
+        let out = exec
+            .execute("glob", &serde_json::json!({"pattern": "[unclosed"}))
+            .await;
+        assert!(out.is_error);
+        let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+        assert_eq!(v["error"], "parameter_error");
     }
 }

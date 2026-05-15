@@ -1,0 +1,271 @@
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 2px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  animation: lineIn 120ms ease-out forwards;
+}
+
+@keyframes lineIn {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.icon {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 1;
+  margin-top: 2px;
+  color: var(--color-text-tertiary);
+}
+
+.iconOk { color: var(--color-success); }
+.iconError { color: var(--color-error); }
+.iconWarn { color: var(--color-warning); }
+.iconAccent { color: var(--color-accent); }
+
+.body {
+  flex: 1;
+  min-width: 0;
+}
+
+.headLine {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.toolName {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.params {
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 60ch;
+}
+
+.badge {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+
+.badgeOk { color: var(--color-success); background: rgba(52, 199, 89, 0.1); }
+.badgeError { color: var(--color-error); background: rgba(255, 59, 48, 0.1); }
+.badgeWarn { color: var(--color-warning); background: rgba(255, 159, 10, 0.1); }
+.badgeMuted { color: var(--color-text-tertiary); background: var(--color-bg-tertiary); }
+
+.duration {
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+  margin-left: auto;
+}
+
+.preview {
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* Hard cap on preview height — full content available via expand button */
+  max-height: 8em;
+  overflow: hidden;
+  position: relative;
+}
+
+.previewExpanded {
+  max-height: none;
+}
+
+.previewFade::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1.6em;
+  background: linear-gradient(to bottom, transparent, var(--color-bg-primary));
+  pointer-events: none;
+}
+
+.expandBtn {
+  margin-top: 2px;
+  font-size: 10px;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  color: var(--color-accent);
+  background: none;
+  border: none;
+  padding: 1px 4px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.expandBtn:hover {
+  background: var(--color-bg-hover);
+}
+
+/* SystemHint — yellow border, sticks out */
+.systemHint {
+  margin: 4px 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--color-warning);
+  background: rgba(255, 159, 10, 0.08);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: var(--color-text-primary);
+}
+
+.systemHintLabel {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--color-warning);
+  margin-right: 6px;
+}
+
+/* Guardrail */
+.guardrailHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.guardrailReports {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.guardrailReport {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-secondary);
+  font-size: var(--text-xs);
+}
+
+.guardrailReportFail {
+  background: rgba(255, 59, 48, 0.08);
+  color: var(--color-error);
+}
+
+.guardrailReportPass {
+  background: rgba(52, 199, 89, 0.06);
+  color: var(--color-text-secondary);
+}
+
+.guardrailDetail {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 6em;
+  overflow: hidden;
+}
+
+/* Tool progress (LLM idle heartbeat) */
+.progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: rgba(10, 132, 255, 0.06);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  font-style: italic;
+}
+
+.progressDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  animation: progressPulse 1.4s ease-in-out infinite;
+}
+
+@keyframes progressPulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.2); }
+}
+
+/* Note applied */
+.note {
+  margin: 4px 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--color-warning);
+  background: rgba(255, 159, 10, 0.06);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.noteHeader {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--color-warning);
+  margin-bottom: 2px;
+}
+
+.noteBody {
+  color: var(--color-text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Plain fallback line — keep behavior of old AgentTerminalPane */
+.plain {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.plainLlmCall { color: var(--color-accent); }
+.plainCheckpoint { color: var(--color-text-tertiary); }
+.plainStatusChange { color: var(--color-warning); }
+.plainMessage { color: var(--color-text-primary); }
+.plainError { color: var(--color-error); }
+
+/* Cursor — match AgentTerminalPane behavior */
+.cursor::after {
+  content: '\2588';
+  color: var(--color-accent);
+  animation: blink 1s step-end infinite;
+  font-size: 10px;
+  margin-left: 1px;
+}
+
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row { animation: none; }
+  .cursor::after { animation: none; }
+  .progressDot { animation: none; }
+}

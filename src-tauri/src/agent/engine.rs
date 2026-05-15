@@ -21,7 +21,8 @@ use uuid::Uuid;
 use crate::db::{queries, Database};
 use crate::llm::{
     stream_chat_with_idle_guard, ContentBlock, LlmProvider, LlmRequest, Message, MessageRole,
-    StreamChunk, StreamChunkKind, StreamGuardError, DEFAULT_STREAM_IDLE_TIMEOUT,
+    StreamChunk, StreamChunkKind, StreamGuardError, DEFAULT_STREAM_IDLE_HEARTBEAT_SECS,
+    DEFAULT_STREAM_IDLE_TIMEOUT,
 };
 use crate::tools::{coding_agent_tools_with_artifact_support, ToolExecutor, TASK_COMPLETE_TOOL};
 
@@ -80,12 +81,176 @@ fn is_read_only_tool(name: &str) -> bool {
     matches!(name, "read_file" | "search_files" | "list_files")
 }
 
+// ---- Single-Agent Uplift Phase 2.2: 上下文瘦身 ----
+
+/// 单个 tool_result 内容超过 8KB chars 就触发截断。
+/// 之所以用 chars 而非 bytes：tokenizer 对字符敏感而非字节，且 8KB chars ≈ 2K tokens
+/// ——一条 result 占 2K tokens 已经是"开始挤垮 prompt"的临界值。
+const TOOL_RESULT_BUDGET_CHARS: usize = 8 * 1024;
+/// 截断后保留尾部 N chars——尾部往往是错误堆栈 / 最终输出，比头部更重要。
+const TOOL_RESULT_TAIL_CHARS: usize = 1024;
+/// "已经截过的"哨兵串前缀，避免重复截断把 sentinel 自己当原内容再截一次。
+const TRUNCATED_SENTINEL_PREFIX: &str = "[result truncated to keep context lean.";
+/// 整个 prompt 的 token 预算（粗估）。超过就 microcompact。
+/// 50K 是大多数 chat completion 模型 (Claude / GPT-4o / DeepSeek) 安全区的下沿。
+const MICROCOMPACT_TOKEN_THRESHOLD: usize = 50_000;
+/// chars-to-tokens 粗估常数。代码 / JSON 大约 3.5 chars/token，取 4 偏保守
+/// (略高估 → 提前触发压缩，宁可早一步也别超 ctx)。
+const CHARS_PER_TOKEN_ESTIMATE: usize = 4;
+
+/// 把 messages 里所有 ToolResult 的 content 截短到 TOOL_RESULT_BUDGET_CHARS 以内。
+/// 对已经截过的 result 幂等（看 sentinel 前缀）。
+///
+/// 为什么 in-place 改：之前以为前端展开按钮要看原文，所以不能动 messages。
+/// 实际原文已经在 agent_events.content 里持久化（emit_event_with_meta 走的是原 ToolOutput.content），
+/// 改 messages 只影响下次 LLM 请求 —— 用户视角无感。
+fn apply_tool_result_budget(messages: &mut [Message]) {
+    for msg in messages.iter_mut() {
+        for block in msg.content.iter_mut() {
+            if let ContentBlock::ToolResult { content, .. } = block {
+                if content.starts_with(TRUNCATED_SENTINEL_PREFIX) {
+                    continue;
+                }
+                let total = content.chars().count();
+                if total <= TOOL_RESULT_BUDGET_CHARS {
+                    continue;
+                }
+                let tail: String = content
+                    .chars()
+                    .skip(total - TOOL_RESULT_TAIL_CHARS)
+                    .collect();
+                let total_kb = total / 1024;
+                *content = format!(
+                    "{TRUNCATED_SENTINEL_PREFIX} Original size: {total_kb}KB. Last {} chars:\n{tail}]",
+                    TOOL_RESULT_TAIL_CHARS,
+                );
+            }
+        }
+    }
+}
+
+/// 用 chars / 4 粗估 prompt 的 token 数。包含 system 之外的 messages（system 一般固定，
+/// microcompact 不动它）。仅作为触发阈值，不要求精确。
+fn approximate_tokens(messages: &[Message]) -> usize {
+    let mut chars = 0usize;
+    for msg in messages {
+        for block in &msg.content {
+            chars += match block {
+                ContentBlock::Text { text } => text.len(),
+                ContentBlock::Reasoning { text } => text.len(),
+                ContentBlock::ToolUse { input, .. } => {
+                    serde_json::to_string(input).map(|s| s.len()).unwrap_or(0)
+                }
+                ContentBlock::ToolResult { content, .. } => content.len(),
+            };
+        }
+    }
+    chars / CHARS_PER_TOKEN_ESTIMATE
+}
+
+#[derive(Debug, Clone)]
+struct CompactReport {
+    dropped_messages: usize,
+    tools_seen: Vec<String>,
+    tokens_before: usize,
+    tokens_after: usize,
+}
+
+impl CompactReport {
+    fn human_readable(&self) -> String {
+        format!(
+            "Compacted {} earlier message(s) to free context. ~{}K → ~{}K tokens. \
+             Earlier tool calls: {}.",
+            self.dropped_messages,
+            self.tokens_before / 1000,
+            self.tokens_after / 1000,
+            if self.tools_seen.is_empty() {
+                "(none)".to_string()
+            } else {
+                self.tools_seen.join(", ")
+            },
+        )
+    }
+
+    fn to_meta(&self) -> serde_json::Value {
+        serde_json::json!({
+            "dropped_messages": self.dropped_messages,
+            "tokens_before": self.tokens_before,
+            "tokens_after": self.tokens_after,
+            "tools_seen": self.tools_seen,
+        })
+    }
+}
+
+/// 把最早 ~1/3 messages 折叠成一条 "earlier explored: ..." 摘要，整体压缩。
+///
+/// 设计考虑：
+/// - 不动 system prompt（caller 把它放在 LlmRequest::system，不在 messages 里）
+/// - 不动最近 ⅔ messages —— 通常 LLM 当前正在看的上下文都在尾部，截尾就直接退化
+/// - 折叠出来的摘要插在最前面（user role）—— LLM 看到一段历史综述比直接断片更不会乱
+/// - 只在 messages 数 ≥ 8 时才动手，太少消息折叠收益小且容易丢上下文
+/// - 返回 `None` 表示什么也没做（caller 别 emit `compact` 事件）
+fn microcompact(messages: &mut Vec<Message>) -> Option<CompactReport> {
+    if messages.len() < 8 {
+        return None;
+    }
+    let before = approximate_tokens(messages);
+    let drop_count = messages.len() / 3;
+    let dropped: Vec<Message> = messages.drain(0..drop_count).collect();
+
+    // 从被丢的 messages 里抽出工具名做 summary —— "你之前用了哪些工具" 比 "你之前讲了啥"
+    // 更能帮 LLM 判断"还需不需要重做某事"。
+    let mut tools_seen: Vec<String> = Vec::new();
+    for msg in &dropped {
+        for block in &msg.content {
+            if let ContentBlock::ToolUse { name, .. } = block {
+                if !tools_seen.contains(name) {
+                    tools_seen.push(name.clone());
+                }
+            }
+        }
+    }
+
+    let summary = format!(
+        "[context-compact] {} earlier message(s) have been compacted to keep the prompt small. \
+         The full event history is still visible to the user in the workspace timeline. \
+         Tools you ran earlier: {}. Continue from the latest user/tool messages below.",
+        drop_count,
+        if tools_seen.is_empty() {
+            "(none)".to_string()
+        } else {
+            tools_seen.join(", ")
+        },
+    );
+
+    messages.insert(
+        0,
+        Message {
+            role: MessageRole::User,
+            content: vec![ContentBlock::Text { text: summary }],
+            cache_control: None,
+        },
+    );
+
+    let after = approximate_tokens(messages);
+    Some(CompactReport {
+        dropped_messages: drop_count,
+        tools_seen,
+        tokens_before: before,
+        tokens_after: after,
+    })
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 struct AgentEventPayload {
     agent_id: String,
     step: u32,
     kind: String,
     content: String,
+    /// Single-Agent Uplift Phase 0.2: 结构化 payload。前端按 kind 解析渲染（diff、todo
+    /// 列表、guardrail report）。`None` 表示纯文本事件，前端走 fallback 行为。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    meta: Option<serde_json::Value>,
 }
 
 /// AgentEngine 运行时配置（FR-09 / FR-11）。
@@ -308,6 +473,23 @@ impl AgentEngine {
             step += 1;
             self.update_agent_step(agent_id, step);
 
+            // Single-Agent Uplift Phase 2.2: prompt 进 LLM 之前先做两层瘦身。
+            //   ① tool_result 大单元截断（>8KB chars 替换成头尾 sentinel）—— DB 仍存原文
+            //   ② 整体 token 估算超 50K → microcompact，丢最早 1/3 messages 换一段 summary
+            // 触发任一动作都 emit `compact` 事件让用户知情，避免 LLM 行为突变无解释。
+            apply_tool_result_budget(&mut messages);
+            if approximate_tokens(&messages) > MICROCOMPACT_TOKEN_THRESHOLD {
+                if let Some(report) = microcompact(&mut messages) {
+                    self.emit_event_with_meta(
+                        agent_id,
+                        step,
+                        "compact",
+                        &report.human_readable(),
+                        Some(report.to_meta()),
+                    );
+                }
+            }
+
             let call_summary = Self::describe_llm_call(step, &messages);
             self.emit_event(agent_id, step, "llm_call", &call_summary);
 
@@ -323,8 +505,18 @@ impl AgentEngine {
             let agent_id_owned = agent_id.to_string();
             let app_handle = self.app_handle.clone();
             let stream_step = step;
+            // Single-Agent Uplift Phase 0.4: shared 活动计时器。
+            // 用 AtomicU64 存自 step 开始以来的毫秒数；每收到一个 chunk 更新它。
+            // heartbeat 任务读它来判断是否进入"看起来卡住"状态。
+            let step_started_at = std::time::Instant::now();
+            let last_chunk_at = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let last_chunk_at_fwd = last_chunk_at.clone();
             let forwarder = tokio::spawn(async move {
                 while let Some(chunk) = rx.recv().await {
+                    last_chunk_at_fwd.store(
+                        step_started_at.elapsed().as_millis() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     if let StreamChunkKind::TextDelta = chunk.kind {
                         let _ = app_handle.emit(
                             "agent-stream",
@@ -333,8 +525,71 @@ impl AgentEngine {
                                 step: stream_step,
                                 kind: "text_delta".to_string(),
                                 content: chunk.content,
+                                meta: None,
                             },
                         );
+                    }
+                }
+            });
+
+            // Single-Agent Uplift Phase 0.4: Heartbeat。
+            // LLM stream 静默 ≥ HEARTBEAT_IDLE_SECS 时往前端推一条 tool_progress，
+            // 让用户实时看到"⏳ 等待 LLM 已 30s..."而不是干瞪着空 terminal。
+            //
+            // 抢先于 stream_chat_with_idle_guard 的 180s abort —— 这条事件不杀流，
+            // 只是知会用户。状态的真正终止仍由 idle_guard 决定。
+            let heartbeat_cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+            let heartbeat_cancel_for_task = heartbeat_cancel.clone();
+            let heartbeat_app = self.app_handle.clone();
+            let heartbeat_agent_id = agent_id.to_string();
+            let heartbeat_step = step;
+            let heartbeat_last_chunk_at = last_chunk_at.clone();
+            let heartbeat_handle = tokio::spawn(async move {
+                /// 静默多少秒触发第一次 heartbeat。从 llm::stream_guard 单源取值，
+                /// 避免两边阈值漂移。30s 是用户开始疑神疑鬼的临界点。
+                const HEARTBEAT_IDLE_SECS: u64 = DEFAULT_STREAM_IDLE_HEARTBEAT_SECS;
+                /// 之后每 N 秒再推一次。频率太高刷屏，太低不及时。
+                const HEARTBEAT_REPEAT_SECS: u64 = 15;
+                let mut last_emitted_at_ms: Option<u64> = None;
+                loop {
+                    tokio::select! {
+                        _ = heartbeat_cancel_for_task.notified() => break,
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                            let now_ms = step_started_at.elapsed().as_millis() as u64;
+                            let last_ms = heartbeat_last_chunk_at.load(std::sync::atomic::Ordering::Relaxed);
+                            let idle_ms = now_ms.saturating_sub(last_ms);
+                            let idle_secs = idle_ms / 1000;
+                            if idle_secs < HEARTBEAT_IDLE_SECS {
+                                continue;
+                            }
+                            // 距离上次 emit 不到 HEARTBEAT_REPEAT_SECS 时不重复
+                            if let Some(prev) = last_emitted_at_ms {
+                                if now_ms.saturating_sub(prev) < HEARTBEAT_REPEAT_SECS * 1000 {
+                                    continue;
+                                }
+                            }
+                            last_emitted_at_ms = Some(now_ms);
+                            let content = format!(
+                                "Waiting for LLM... idle for {idle_secs}s",
+                            );
+                            let meta = serde_json::json!({
+                                "kind": "llm_idle",
+                                "idle_secs": idle_secs,
+                                "step": heartbeat_step,
+                            });
+                            // heartbeat 只 emit 推送，不持久化 —— 持久化后每个 step 都
+                            // 会留一堆"还在等"事件，污染 timeline。前端"实时"足矣。
+                            let _ = heartbeat_app.emit(
+                                "agent-event",
+                                AgentEventPayload {
+                                    agent_id: heartbeat_agent_id.clone(),
+                                    step: heartbeat_step,
+                                    kind: "tool_progress".to_string(),
+                                    content,
+                                    meta: Some(meta),
+                                },
+                            );
+                        }
                     }
                 }
             });
@@ -355,6 +610,8 @@ impl AgentEngine {
             )
             .await;
             let _ = forwarder.await;
+            heartbeat_cancel.notify_waiters();
+            let _ = heartbeat_handle.await;
             let response = match stream_outcome {
                 Ok(r) => r,
                 Err(StreamGuardError::IdleTimeout { idle_secs, threshold_secs })
@@ -495,11 +752,15 @@ impl AgentEngine {
                     .unwrap_or("")
                     .to_string();
 
-                self.emit_event(
+                self.emit_event_with_meta(
                     agent_id,
                     step,
                     "tool_use",
                     &format!("task_complete({{\"summary\": ...}})"),
+                    Some(serde_json::json!({
+                        "tool": TASK_COMPLETE_TOOL,
+                        "input": { "summary": &summary },
+                    })),
                 );
 
                 let outcome = self
@@ -617,9 +878,30 @@ impl AgentEngine {
                 });
             }
 
-            let mut tool_results: Vec<ContentBlock> = Vec::new();
+            // Single-Agent Uplift Phase 2.1: 并发安全的工具批量并行执行。
+            //
+            // 之前所有 tool_use 严格串行 → 一个 step 跑 3 个 read_file 等于 3× IO 延迟。
+            // 现在按 ToolSpec.is_concurrency_safe 分桶：
+            //   - safe  (read_file / list_files / search_files / glob): 并行跑
+            //   - unsafe(write_file / edit_file / shell_exec / publish_artifact /
+            //            todo_write): 串行跑（防写盘冲突 / approval gate 顺序错乱）
+            //
+            // tool_use 事件全部前置一次性 emit，让用户立即看到"这一批要做这些"；
+            // tool_result 事件在每个 future 完成时 emit（顺序按完成时间，不按 tool_use_blocks
+            // 顺序），用户能感知到"X 已经回来了，Y 还在跑"。
+            //
+            // tool_results vec 仍按原顺序填回 messages，因为 Anthropic 要求 ToolResult
+            // 序与同 turn 的 ToolUse 严格一一对应。
+            //
+            // 注意：approval_gate 只拦截 unsafe 工具（write 类 / shell 类），所以 safe
+            // 桶不会因为 approval 等待造成相互阻塞 → 真正能并行。
             for (id, name, input) in &tool_use_blocks {
-                self.emit_event(
+                let tool_use_meta = serde_json::json!({
+                    "tool": name,
+                    "tool_use_id": id,
+                    "input": input,
+                });
+                self.emit_event_with_meta(
                     agent_id,
                     step,
                     "tool_use",
@@ -627,12 +909,106 @@ impl AgentEngine {
                         "{name}({})",
                         serde_json::to_string(input).unwrap_or_default()
                     ),
+                    Some(tool_use_meta),
                 );
-                let output = self
-                    .dispatch_tool(agent_id, name, input)
-                    .await;
+            }
+
+            // 计算每个 block 是否 concurrency-safe。未知工具（registry 没注册的）
+            // 默认按 unsafe 处理——保守。task_complete / publish_artifact / todo_write
+            // 不在 registry，自然落 unsafe。
+            let safe_flags: Vec<bool> = tool_use_blocks
+                .iter()
+                .map(|(_, name, _)| {
+                    crate::tools::lookup_tool_spec(name)
+                        .map(|s| s.is_concurrency_safe)
+                        .unwrap_or(false)
+                })
+                .collect();
+
+            // 预分配结果 slot；按原 index 填回。Vec<Option<...>> 是常见的"并行下沉
+            // 后保持顺序"模式，比 HashMap 省一次哈希且 cache friendly。
+            let mut tool_outputs: Vec<Option<crate::tools::ToolOutput>> =
+                (0..tool_use_blocks.len()).map(|_| None).collect();
+
+            // 1) 并行跑 safe 桶。futures::future::join_all 不要求 'static，
+            //    每个 future 借 &self，到 .await 结束借用归还。
+            let safe_futures: Vec<_> = tool_use_blocks
+                .iter()
+                .enumerate()
+                .filter_map(|(i, blk)| {
+                    if safe_flags[i] {
+                        let (id, name, input) = blk;
+                        Some(async move {
+                            let started_at = std::time::Instant::now();
+                            let output =
+                                self.dispatch_tool(agent_id, name, input).await;
+                            let duration_ms = started_at.elapsed().as_millis() as u64;
+                            (i, id.clone(), name.clone(), output, duration_ms)
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if !safe_futures.is_empty() {
+                let results = futures::future::join_all(safe_futures).await;
+                for (i, id, name, output, duration_ms) in results {
+                    let event_kind = if output.is_error { "error" } else { "tool_result" };
+                    let result_meta = serde_json::json!({
+                        "tool": name,
+                        "tool_use_id": id,
+                        "is_error": output.is_error,
+                        "duration_ms": duration_ms,
+                        "size_chars": output.content.chars().count(),
+                        "concurrent": true,
+                    });
+                    self.emit_event_with_meta(
+                        agent_id,
+                        step,
+                        event_kind,
+                        &output.content,
+                        Some(result_meta),
+                    );
+                    tool_outputs[i] = Some(output);
+                }
+            }
+
+            // 2) 串行跑 unsafe 桶。保留原 index 顺序。
+            for (i, blk) in tool_use_blocks.iter().enumerate() {
+                if safe_flags[i] {
+                    continue;
+                }
+                let (id, name, input) = blk;
+                let started_at = std::time::Instant::now();
+                let output = self.dispatch_tool(agent_id, name, input).await;
+                let duration_ms = started_at.elapsed().as_millis() as u64;
                 let event_kind = if output.is_error { "error" } else { "tool_result" };
-                self.emit_event(agent_id, step, event_kind, &output.content);
+                let result_meta = serde_json::json!({
+                    "tool": name,
+                    "tool_use_id": id,
+                    "is_error": output.is_error,
+                    "duration_ms": duration_ms,
+                    "size_chars": output.content.chars().count(),
+                    "concurrent": false,
+                });
+                self.emit_event_with_meta(
+                    agent_id,
+                    step,
+                    event_kind,
+                    &output.content,
+                    Some(result_meta),
+                );
+                tool_outputs[i] = Some(output);
+            }
+
+            // 3) 按原顺序拼 tool_results。Anthropic 要求 ToolResult 与 ToolUse 同 turn
+            //    严格按 tool_use_id 配对——顺序错了 API 会 400。
+            let mut tool_results: Vec<ContentBlock> = Vec::with_capacity(tool_use_blocks.len());
+            for ((id, _name, _input), output_opt) in
+                tool_use_blocks.iter().zip(tool_outputs.into_iter())
+            {
+                let output = output_opt
+                    .expect("dispatch_tool 必须为每个 tool_use_block 填回一个 ToolOutput");
                 tool_results.push(ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
                     content: output.content,
@@ -646,14 +1022,19 @@ impl AgentEngine {
                 let notes_text = Self::format_notes_for_injection(&queued_notes);
                 let note_ids: Vec<String> = queued_notes.iter().map(|(id, _)| id.clone()).collect();
                 self.mark_notes_applied(&note_ids);
-                let _ = self.app_handle.emit(
-                    "agent-event",
-                    AgentEventPayload {
-                        agent_id: agent_id.to_string(),
-                        step,
-                        kind: "note_applied".to_string(),
-                        content: format!("Applied {} note(s)", queued_notes.len()),
-                    },
+                // 走 emit_event_with_meta 可以把 note 实际内容也带过去，让前端把 directive
+                // 高亮渲染（之前 only ack 行为，content 太干）。
+                let notes_meta = serde_json::json!({
+                    "applied_count": queued_notes.len(),
+                    "note_ids": note_ids,
+                    "notes": queued_notes.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>(),
+                });
+                self.emit_event_with_meta(
+                    agent_id,
+                    step,
+                    "note_applied",
+                    &format!("Applied {} note(s)", queued_notes.len()),
+                    Some(notes_meta),
                 );
                 tool_results.push(ContentBlock::Text { text: notes_text });
             }
@@ -683,6 +1064,18 @@ impl AgentEngine {
     ) -> crate::tools::ToolOutput {
         if name == "publish_artifact" {
             return self.execute_publish_artifact(agent_id, input).await;
+        }
+        // Single-Agent Uplift Phase 1.2: todo_write 需要 DB（持久化到 agent_todos）+ emit
+        // todo_update 事件让前端 TodoListPanel 实时刷新。所以特例化在 dispatch 层处理，
+        // 与 publish_artifact 同模式，不污染 ToolExecutor 的 sandbox 边界。
+        if name == crate::tools::TODO_WRITE_TOOL {
+            return self.execute_todo_write(agent_id, input).await;
+        }
+        // Single-Agent Uplift Phase 2.4: enter_plan_mode 是纯"声明"工具——
+        // 没有副作用，只把 plan 文本作为结构化事件 echo 给前端。直接在 dispatch
+        // 层短路即可，不需要 ToolExecutor 沙箱、不需要 DB。
+        if name == crate::tools::ENTER_PLAN_MODE_TOOL {
+            return self.execute_enter_plan_mode(agent_id, input);
         }
 
         // FM-14 tool gate（write_file 到 protected_paths / shell_exec 到 destructive_commands）。
@@ -720,6 +1113,206 @@ impl AgentEngine {
         self.tool_executor
             .execute_with_stream(name, input, &self.app_handle, agent_id)
             .await
+    }
+
+    /// Single-Agent Uplift Phase 1.2: 执行 todo_write 工具。
+    ///
+    /// 行为：
+    ///   1. 解析 input.todos[]（{id, content, status}）；任何不合法格式都 is_error=true
+    ///      让 LLM 重试（保持工具一致的"结构化错误"哲学）。
+    ///   2. 调 queries::replace_agent_todos 全量替换 agent_todos 表。
+    ///   3. emit `todo_update` 事件携带 todos 数组，前端 TodoListPanel 直接消费。
+    ///   4. 工具返回值是简短文本（"Updated N todo(s)..."）让 LLM 不再啰嗦地把
+    ///      整个清单复述一遍——前端看不到也无所谓，反正它只显示 panel。
+    async fn execute_todo_write(
+        &self,
+        agent_id: &str,
+        input: &serde_json::Value,
+    ) -> crate::tools::ToolOutput {
+        use crate::tools::ToolOutput;
+
+        #[derive(serde::Deserialize)]
+        struct TodoIn {
+            id: String,
+            content: String,
+            status: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct TodoWriteInput {
+            todos: Vec<TodoIn>,
+        }
+
+        let parsed: TodoWriteInput = match serde_json::from_value(input.clone()) {
+            Ok(v) => v,
+            Err(e) => {
+                return ToolOutput {
+                    content: serde_json::json!({
+                        "error": "parameter_error",
+                        "message": format!("todo_write input parse failed: {e}"),
+                    })
+                    .to_string(),
+                    is_error: true,
+                };
+            }
+        };
+
+        // 校验 status 取值；invalid 直接拒绝并把允许的值告诉 LLM。
+        const ALLOWED: &[&str] = &["pending", "in_progress", "completed", "cancelled"];
+        for td in &parsed.todos {
+            if !ALLOWED.contains(&td.status.as_str()) {
+                return ToolOutput {
+                    content: serde_json::json!({
+                        "error": "parameter_error",
+                        "message": format!(
+                            "Invalid status `{}` for todo `{}`. Allowed: pending / in_progress / completed / cancelled.",
+                            td.status, td.id
+                        ),
+                    })
+                    .to_string(),
+                    is_error: true,
+                };
+            }
+        }
+        // 校验"最多一个 in_progress"——不强制（语义建议，不写进契约），
+        // 但触发时给 LLM 一个 hint 让它自己收敛。这条不阻塞写盘。
+        let in_progress_count = parsed
+            .todos
+            .iter()
+            .filter(|t| t.status == "in_progress")
+            .count();
+
+        let db = self.app_handle.state::<Database>();
+        let agent_owned = agent_id.to_string();
+        let inputs: Vec<(String, String, String)> = parsed
+            .todos
+            .iter()
+            .map(|t| (t.id.clone(), t.content.clone(), t.status.clone()))
+            .collect();
+
+        let write_result = db.with_conn(move |conn| {
+            let refs: Vec<crate::db::queries::TodoInput<'_>> = inputs
+                .iter()
+                .map(|(id, content, status)| crate::db::queries::TodoInput {
+                    id: id.as_str(),
+                    content: content.as_str(),
+                    status: status.as_str(),
+                })
+                .collect();
+            crate::db::queries::replace_agent_todos(conn, &agent_owned, &refs)
+        });
+
+        if let Err(e) = write_result {
+            return ToolOutput {
+                content: serde_json::json!({
+                    "error": "db_error",
+                    "message": format!("Failed to persist todos: {e}"),
+                })
+                .to_string(),
+                is_error: true,
+            };
+        }
+
+        // emit todo_update 事件。meta 是完整 todo 列表（按数组顺序），前端按它整体刷新。
+        let todos_meta: Vec<serde_json::Value> = parsed
+            .todos
+            .iter()
+            .map(|t| serde_json::json!({
+                "id": t.id,
+                "content": t.content,
+                "status": t.status,
+            }))
+            .collect();
+        self.emit_event_with_meta(
+            agent_id,
+            self.read_agent_step(agent_id),
+            "todo_update",
+            &format!("Updated {} todo(s)", parsed.todos.len()),
+            Some(serde_json::json!({ "todos": todos_meta })),
+        );
+
+        let mut summary = format!(
+            "todos updated: {} item(s); {} pending, {} in_progress, {} completed",
+            parsed.todos.len(),
+            parsed.todos.iter().filter(|t| t.status == "pending").count(),
+            in_progress_count,
+            parsed
+                .todos
+                .iter()
+                .filter(|t| t.status == "completed")
+                .count(),
+        );
+        if in_progress_count > 1 {
+            summary.push_str(
+                " (note: prefer at most one in_progress at a time so progress is unambiguous)",
+            );
+        }
+        ToolOutput {
+            content: summary,
+            is_error: false,
+        }
+    }
+
+    /// Single-Agent Uplift Phase 2.4: 执行 enter_plan_mode。
+    ///
+    /// 没有副作用：解析 input.plan 文本，emit 一条带结构化 meta 的 `system_hint`
+    /// 让前端醒目展示（黄色边框 + 多行 plan），返回简短确认字符串给 LLM。
+    /// 用 `system_hint` kind 是因为它已经接好了"突出展示"渲染（SystemHintLine），
+    /// 且不需要单独建一个新 kind 进 migration。
+    fn execute_enter_plan_mode(
+        &self,
+        agent_id: &str,
+        input: &serde_json::Value,
+    ) -> crate::tools::ToolOutput {
+        use crate::tools::ToolOutput;
+        let plan = match input.get("plan").and_then(|v| v.as_str()) {
+            Some(p) if !p.trim().is_empty() => p.to_string(),
+            _ => {
+                return ToolOutput {
+                    content: serde_json::json!({
+                        "error": "parameter_error",
+                        "message": "enter_plan_mode requires non-empty `plan` (markdown text).",
+                    })
+                    .to_string(),
+                    is_error: true,
+                };
+            }
+        };
+        let step = self.read_agent_step(agent_id);
+        // 用 system_hint kind 复用前端 SystemHintLine 渲染。meta 里带 plan_mode flag
+        // 让未来如果想拆出独立面板时可以前端查找。
+        self.emit_event_with_meta(
+            agent_id,
+            step,
+            "system_hint",
+            &format!("[plan-mode] {}", plan.lines().next().unwrap_or("")),
+            Some(serde_json::json!({
+                "kind": "plan_mode",
+                "plan": plan,
+            })),
+        );
+        ToolOutput {
+            content: format!(
+                "Plan recorded ({} lines). Proceed with implementation; use todo_write to track step progress.",
+                plan.lines().count()
+            ),
+            is_error: false,
+        }
+    }
+
+    /// Helper：从 DB 读 agent.current_step，给那些没有 step 上下文的代码路径用
+    /// （比如 todo_write 不在主循环 step 里被调用——其实在的，但这层封装让加点更随意）。
+    fn read_agent_step(&self, agent_id: &str) -> u32 {
+        let db = self.app_handle.state::<Database>();
+        db.with_conn(|conn| {
+            conn.query_row(
+                "SELECT current_step FROM agents WHERE id = ?1",
+                rusqlite::params![agent_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|v| v as u32)
+            .or_else(|_| Ok(0u32))
+        })
+        .unwrap_or(0)
     }
 
     /// 执行 publish_artifact 工具：基于 agent_id 反查 task_id / mission_id，
@@ -895,7 +1488,10 @@ impl AgentEngine {
 
         let result = guardrail::run_guardrails(&guardrails, &ctx, &db).await;
         let serialized = serde_json::to_string(&result.reports).unwrap_or_default();
-        self.emit_event(
+        // Single-Agent Uplift Phase 0.2: 把 reports 直接作为 meta，前端可按 array 渲染
+        // 每条 guardrail 的 pass/fail badge + 折叠 detail，不再让用户看一坨 JSON 串。
+        let reports_meta = serde_json::to_value(&result.reports).ok();
+        self.emit_event_with_meta(
             agent_id,
             step,
             if result.all_passed {
@@ -904,6 +1500,7 @@ impl AgentEngine {
                 "guardrail_fail"
             },
             &serialized,
+            reports_meta,
         );
         let _ = summary; // 仅用于事件层；持久化在 caller 处
         if result.all_passed {
@@ -943,6 +1540,20 @@ impl AgentEngine {
     }
 
     fn emit_event(&self, agent_id: &str, step: u32, kind: &str, content: &str) {
+        self.emit_event_with_meta(agent_id, step, kind, content, None);
+    }
+
+    /// Single-Agent Uplift Phase 0.2: emit + persist 一个带结构化 meta 的事件。
+    /// `meta` 不为 None 时同时进 `agent-event` 推送和 `agent_events.meta` 列。
+    /// 前端按 kind 决定如何解析（不同 kind 的 schema 各不一样，记得保持兼容）。
+    fn emit_event_with_meta(
+        &self,
+        agent_id: &str,
+        step: u32,
+        kind: &str,
+        content: &str,
+        meta: Option<serde_json::Value>,
+    ) {
         let _ = self.app_handle.emit(
             "agent-event",
             AgentEventPayload {
@@ -950,24 +1561,37 @@ impl AgentEngine {
                 step,
                 kind: kind.to_string(),
                 content: content.to_string(),
+                meta: meta.clone(),
             },
         );
 
-        self.persist_event(agent_id, step, kind, content);
+        self.persist_event(agent_id, step, kind, content, meta);
     }
 
-    fn persist_event(&self, agent_id: &str, step: u32, kind: &str, content: &str) {
+    fn persist_event(
+        &self,
+        agent_id: &str,
+        step: u32,
+        kind: &str,
+        content: &str,
+        meta: Option<serde_json::Value>,
+    ) {
         let db = self.app_handle.state::<Database>();
         let event_id = Uuid::new_v4().to_string();
+        let meta_str = meta.as_ref().map(|v| v.to_string());
 
         if let Err(e) = db.with_conn(|conn| {
-            conn.execute(
-                "INSERT INTO agent_events (id, agent_id, step, kind, content) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![event_id, agent_id, step as i64, kind, content],
-            )?;
-            Ok(())
+            crate::db::queries::insert_event_with_meta(
+                conn,
+                &event_id,
+                agent_id,
+                step as i64,
+                kind,
+                content,
+                meta_str.as_deref(),
+            )
         }) {
-            tracing::warn!("Failed to persist agent event: {e}");
+            tracing::warn!("Failed to persist agent event (kind={kind}): {e}");
         }
     }
 
@@ -1227,5 +1851,131 @@ mod idle_retry_budget_tests {
         // 这是合法配置，函数不应抛错或返回 surprising 值。
         assert_eq!(next_idle_retry_budget(false, 0, 0), 0);
         assert_eq!(next_idle_retry_budget(true, 0, 0), 0);
+    }
+}
+
+#[cfg(test)]
+mod context_compaction_tests {
+    //! Single-Agent Uplift Phase 2.2 回归测试。
+    //! 这两个不变量丢了用户立刻会感知到（要么 prompt 爆 ctx，要么 LLM 突然失忆）：
+    //!   ① apply_tool_result_budget 幂等 + 只截 >8KB 的 ToolResult
+    //!   ② microcompact 至少 8 messages 才动手；动手后总 token 一定下降
+    use super::*;
+
+    fn user_msg(text: &str) -> Message {
+        Message {
+            role: MessageRole::User,
+            content: vec![ContentBlock::Text { text: text.to_string() }],
+            cache_control: None,
+        }
+    }
+
+    fn assistant_with_tool_use(name: &str, tool_use_id: &str) -> Message {
+        Message {
+            role: MessageRole::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: tool_use_id.to_string(),
+                name: name.to_string(),
+                input: serde_json::json!({}),
+            }],
+            cache_control: None,
+        }
+    }
+
+    fn user_with_tool_result(tool_use_id: &str, content: &str) -> Message {
+        Message {
+            role: MessageRole::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: tool_use_id.to_string(),
+                content: content.to_string(),
+                is_error: false,
+            }],
+            cache_control: None,
+        }
+    }
+
+    /// 短 ToolResult（< 8KB）不应被截断。
+    #[test]
+    fn budget_keeps_small_results_intact() {
+        let mut messages = vec![user_with_tool_result("t1", "small content")];
+        apply_tool_result_budget(&mut messages);
+        if let ContentBlock::ToolResult { content, .. } = &messages[0].content[0] {
+            assert_eq!(content, "small content");
+        } else {
+            panic!("expected ToolResult");
+        }
+    }
+
+    /// 大 ToolResult 会被替换成 sentinel 字串，包含尾部内容。
+    #[test]
+    fn budget_truncates_large_results_with_tail() {
+        let big = "X".repeat(20_000); // ~20K chars > 8K budget
+        let mut messages = vec![user_with_tool_result("t1", &big)];
+        apply_tool_result_budget(&mut messages);
+        if let ContentBlock::ToolResult { content, .. } = &messages[0].content[0] {
+            assert!(content.starts_with(TRUNCATED_SENTINEL_PREFIX));
+            assert!(content.contains("Original size:"));
+            assert!(content.len() < big.len() / 2, "截断后必须显著变短");
+        } else {
+            panic!("expected ToolResult");
+        }
+    }
+
+    /// 截断幂等：连跑两次结果一致（不会把 sentinel 自己当原内容再截）。
+    #[test]
+    fn budget_is_idempotent() {
+        let big = "X".repeat(20_000);
+        let mut messages = vec![user_with_tool_result("t1", &big)];
+        apply_tool_result_budget(&mut messages);
+        let first = if let ContentBlock::ToolResult { content, .. } = &messages[0].content[0] {
+            content.clone()
+        } else {
+            unreachable!()
+        };
+        apply_tool_result_budget(&mut messages);
+        let second = if let ContentBlock::ToolResult { content, .. } = &messages[0].content[0] {
+            content.clone()
+        } else {
+            unreachable!()
+        };
+        assert_eq!(first, second, "幂等：第二次应保持不变");
+    }
+
+    /// messages 太少时 microcompact 不动手——避免短任务上下文丢失。
+    #[test]
+    fn microcompact_noop_for_short_history() {
+        let mut messages: Vec<Message> = (0..5).map(|i| user_msg(&format!("m{i}"))).collect();
+        let report = microcompact(&mut messages);
+        assert!(report.is_none(), "<8 messages 不该动手");
+        assert_eq!(messages.len(), 5);
+    }
+
+    /// 长历史压缩：丢 1/3，最前面插 summary，token 总数下降。
+    #[test]
+    fn microcompact_drops_oldest_third_and_inserts_summary() {
+        let mut messages: Vec<Message> = Vec::new();
+        // 12 条 user/assistant 交替，每条带些"内容"凑出非零 token 估算
+        for i in 0..6 {
+            messages.push(user_msg(&format!("user msg {i} ").repeat(20)));
+            messages.push(assistant_with_tool_use("read_file", &format!("tu_{i}")));
+        }
+        let before_count = messages.len();
+        let before_tokens = approximate_tokens(&messages);
+
+        let report = microcompact(&mut messages).expect("应当压缩");
+        assert!(report.dropped_messages >= 1);
+        // 摘要插到最前
+        assert!(matches!(messages[0].role, MessageRole::User));
+        if let ContentBlock::Text { text } = &messages[0].content[0] {
+            assert!(text.starts_with("[context-compact]"));
+            assert!(text.contains("read_file"), "summary 应汇总用过的工具名");
+        } else {
+            panic!("summary 必须是 Text block");
+        }
+        // 总数 = 原数 - drop + 1（summary）
+        assert_eq!(messages.len(), before_count - report.dropped_messages + 1);
+        // tokens 下降（用近似估算）
+        let after_tokens = approximate_tokens(&messages);
+        assert!(after_tokens < before_tokens, "压缩后 tokens 必须下降");
     }
 }
