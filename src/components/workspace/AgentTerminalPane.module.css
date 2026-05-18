@@ -135,6 +135,18 @@
   font-size: var(--text-xs);
   line-height: 1.6;
   color: var(--color-text-primary);
+
+  /* 显式允许选中复制。Tauri webview 默认 user-select: auto，但部分版本（macOS WKWebView）
+     在 `cursor: default` 父容器下会拒绝拖选；写死 `text` + cursor=text 避免黑盒行为。
+     ::selection 给个明显的高亮色，避免在深色背景下选区看不清。 */
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}
+
+.terminal *::selection {
+  background: rgba(10, 132, 255, 0.35);
+  color: inherit;
 }
 
 .terminal::-webkit-scrollbar { width: 5px; }
@@ -176,6 +188,9 @@
   animation: blink 1s step-end infinite;
   font-size: 10px;
   margin-left: 1px;
+  /* 防止 cursor 块被卷进文本选区 —— 用户复制时不希望看到 \u2588 */
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 @keyframes blink {

@@ -1,9 +1,14 @@
-import { memo, useEffect, useRef, useCallback } from "react";
+import { memo, useEffect, useMemo, useRef, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import type { Agent } from "../../stores/agent-store";
 import styles from "./AgentTerminalPane.module.css";
-import { EventLine } from "./event-renderers";
+import {
+  CollapsedReadGroup,
+  EventLine,
+  groupReadOnlyEvents,
+} from "./event-renderers";
 import { TodoListPanel } from "./TodoListPanel";
+import { ThinkingIndicator } from "./ThinkingIndicator";
 
 const MAX_LINES = 1000;
 
@@ -34,16 +39,50 @@ export const AgentTerminalPane = memo(function AgentTerminalPane({
       el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
   }, []);
 
+  // 用户正在拖选/已选中文本时，绝不能 auto-scroll —— 一滚动 selection 就丢，
+  // 这是终端"选不了字"的最常见根因（事件 1Hz+ 流入，每次都把选区清掉）。
+  // 检测 window.getSelection() 是否落在我们这个容器内且非空。
+  const hasActiveSelectionInTerminal = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el || typeof window === "undefined") return false;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
+    if (!sel.toString().trim()) return false;
+    // anchorNode 落在终端 DOM 内才算
+    const anchor = sel.anchorNode;
+    return anchor !== null && el.contains(anchor);
+  }, []);
+
   useEffect(() => {
-    if (isAtBottomRef.current && scrollRef.current) {
+    if (
+      isAtBottomRef.current &&
+      scrollRef.current &&
+      !hasActiveSelectionInTerminal()
+    ) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [agent.events.length, agent.streamBuffer, agent.shellBuffer]);
+  }, [
+    agent.events.length,
+    agent.streamBuffer,
+    agent.shellBuffer,
+    agent.reasoningStartedAt,
+    agent.reasoningBuffer.length,
+    hasActiveSelectionInTerminal,
+  ]);
 
-  const trimmedEvents =
-    agent.events.length > MAX_LINES
-      ? agent.events.slice(-MAX_LINES)
-      : agent.events;
+  const trimmedEvents = useMemo(
+    () =>
+      agent.events.length > MAX_LINES
+        ? agent.events.slice(-MAX_LINES)
+        : agent.events,
+    [agent.events],
+  );
+
+  // A3 collapseReadSearch: 把连续 ≥2 个只读 ops 折叠成单行 group
+  const eventGroups = useMemo(
+    () => groupReadOnlyEvents(trimmedEvents),
+    [trimmedEvents],
+  );
 
   const isRunning = agent.status === "running";
 
@@ -77,24 +116,48 @@ export const AgentTerminalPane = memo(function AgentTerminalPane({
         ref={scrollRef}
         onScroll={handleScroll}
       >
-        {trimmedEvents.length === 0 && !agent.streamBuffer && !agent.shellBuffer ? (
+        {trimmedEvents.length === 0 &&
+        !agent.streamBuffer &&
+        !agent.shellBuffer &&
+        agent.reasoningStartedAt === null ? (
           <div className={styles.empty}>
             {isRunning ? t("terminal.waitingForOutput") : t("terminal.noEventsYet")}
           </div>
         ) : (
           <>
-            {trimmedEvents.map((evt, i) => (
-              <EventLine
-                key={evt.id}
-                event={evt}
-                isLast={
-                  i === trimmedEvents.length - 1 &&
-                  !agent.streamBuffer &&
-                  !agent.shellBuffer
-                }
-                isRunning={isRunning}
+            {eventGroups.map((g, i) => {
+              const isLastGroup = i === eventGroups.length - 1;
+              if (g.kind === "group") {
+                // 折叠组：用第一个 event 的 id 做 key（稳定且唯一）
+                return (
+                  <CollapsedReadGroup
+                    key={`grp-${g.events[0].id}`}
+                    events={g.events}
+                  />
+                );
+              }
+              return (
+                <EventLine
+                  key={g.event.id}
+                  event={g.event}
+                  isLast={
+                    isLastGroup &&
+                    !agent.streamBuffer &&
+                    !agent.shellBuffer &&
+                    agent.reasoningStartedAt === null
+                  }
+                  isRunning={isRunning}
+                />
+              );
+            })}
+            {/* 推理模型 thinking 占位：放在 streamBuffer 之前——thinking 永远先于
+                正式 output 抵达，第一个 text_delta 来时 store 自动清空 reasoning。*/}
+            {agent.reasoningStartedAt !== null && (
+              <ThinkingIndicator
+                startedAt={agent.reasoningStartedAt}
+                chars={agent.reasoningBuffer.length}
               />
-            ))}
+            )}
             {agent.streamBuffer && (
               <div
                 className={`${styles.streamBlock} ${

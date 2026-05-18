@@ -75,6 +75,10 @@ impl LlmProvider for AnthropicProvider {
         "anthropic"
     }
 
+    fn endpoint_hint(&self) -> Option<String> {
+        Some("https://api.anthropic.com/v1/messages".to_string())
+    }
+
     async fn chat(&self, request: &LlmRequest) -> Result<LlmResponse> {
         let body = self.build_body(request, false);
         let resp = self
@@ -123,6 +127,15 @@ impl LlmProvider for AnthropicProvider {
         tx: mpsc::Sender<StreamChunk>,
     ) -> Result<LlmResponse> {
         let body = self.build_body(request, true);
+        let stream_started = std::time::Instant::now();
+        tracing::debug!(
+            provider = "anthropic",
+            model = %request.model,
+            msg_count = request.messages.len(),
+            tool_count = request.tools.len(),
+            max_tokens = request.max_tokens,
+            "stream_chat sending HTTP POST"
+        );
         let resp = self
             .client
             .post("https://api.anthropic.com/v1/messages")
@@ -133,11 +146,26 @@ impl LlmProvider for AnthropicProvider {
             .send()
             .await?;
 
+        let connect_ms = stream_started.elapsed().as_millis() as u64;
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                provider = "anthropic",
+                model = %request.model,
+                connect_ms,
+                http_status = %status,
+                body_excerpt = %text.chars().take(400).collect::<String>(),
+                "stream_chat HTTP error"
+            );
             bail!("Anthropic API error {status}: {text}");
         }
+        tracing::info!(
+            provider = "anthropic",
+            model = %request.model,
+            connect_ms,
+            "stream_chat HTTP connected, awaiting first chunk"
+        );
 
         let mut full_text = String::new();
         let mut usage = TokenUsage::default();
@@ -145,6 +173,8 @@ impl LlmProvider for AnthropicProvider {
 
         let mut stream = resp.bytes_stream();
         let mut buffer = String::new();
+        let mut first_byte_logged = false;
+        let mut total_bytes: u64 = 0;
         use futures::StreamExt;
 
         let idle_dur = if self.stream_idle_secs == 0 {
@@ -157,15 +187,61 @@ impl LlmProvider for AnthropicProvider {
             let next_res = match idle_dur {
                 Some(d) => match tokio::time::timeout(d, stream.next()).await {
                     Ok(v) => v,
-                    Err(_) => bail!(
-                        "stream_idle_timeout: no chunk for {}s",
-                        self.stream_idle_secs
-                    ),
+                    Err(_) => {
+                        // 与 openai_compat 同语义：已经吐过 text 就把 idle 当自然结束。
+                        // Anthropic 协议没有 reasoning_content 概念（它的 thinking 是单独
+                        // content_block_type），但目前我们解析 stream 只把 delta.text 写进
+                        // full_text，所以判定 full_text 非空足够覆盖"已有产物"场景。
+                        if !full_text.is_empty() {
+                            tracing::warn!(
+                                provider = "anthropic",
+                                model = %request.model,
+                                idle_secs = self.stream_idle_secs,
+                                text_chars = full_text.len(),
+                                "stream idle after receiving partial content; returning what we have"
+                            );
+                            break;
+                        }
+                        bail!(
+                            "stream_idle_timeout: no chunk for {}s",
+                            self.stream_idle_secs
+                        );
+                    }
                 },
                 None => stream.next().await,
             };
             let Some(chunk) = next_res else { break };
-            let chunk = chunk?;
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => {
+                    // SSE 协议适配：server-initiated close 在 SSE 标准里是合法的 stream end。
+                    // 已经吐过 text 就把 connection 错误当自然结束，让上层走 stop_reason=end_turn。
+                    // 详细动机见 openai_compat.rs 同位置注释（避免重复，此处简注）。
+                    if !full_text.is_empty() {
+                        tracing::info!(
+                            provider = "anthropic",
+                            model = %request.model,
+                            text_chars = full_text.len(),
+                            total_bytes,
+                            elapsed_ms = stream_started.elapsed().as_millis() as u64,
+                            error = %e,
+                            "SSE stream ended via connection close; treating as natural end-of-stream per SSE protocol"
+                        );
+                        break;
+                    }
+                    bail!("网络连接中断，请检查网络后重试 (stream error: {e})");
+                }
+            };
+            total_bytes += chunk.len() as u64;
+            if !first_byte_logged {
+                first_byte_logged = true;
+                tracing::info!(
+                    provider = "anthropic",
+                    model = %request.model,
+                    first_byte_ms = stream_started.elapsed().as_millis() as u64,
+                    "stream_chat first SSE bytes received"
+                );
+            }
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
             while let Some(pos) = buffer.find("\n\n") {
@@ -215,6 +291,19 @@ impl LlmProvider for AnthropicProvider {
                 content: String::new(),
             })
             .await;
+
+        let total_ms = stream_started.elapsed().as_millis() as u64;
+        tracing::info!(
+            provider = "anthropic",
+            model = %request.model,
+            total_ms,
+            total_bytes,
+            stop_reason = %stop_reason,
+            input_tokens = usage.input_tokens,
+            output_tokens = usage.output_tokens,
+            text_chars = full_text.len(),
+            "stream_chat finished"
+        );
 
         Ok(LlmResponse {
             content: vec![ContentBlock::Text { text: full_text }],

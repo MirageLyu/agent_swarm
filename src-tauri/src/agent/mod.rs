@@ -17,7 +17,9 @@ mod registry;
 pub mod report_generator;
 pub mod roles;
 pub mod scheduler;
+pub mod tool_summarizer;
 mod types;
+pub mod user_questions;
 
 pub use engine::AgentEngine;
 pub use evaluator::EvaluatorAgent;

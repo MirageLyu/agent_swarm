@@ -868,6 +868,7 @@ async fn enhance_with_llm(
         }],
         tools: vec![],
         max_tokens: 2048,
+        provider_extras: None,
     };
 
     let response = provider

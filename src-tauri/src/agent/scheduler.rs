@@ -802,7 +802,30 @@ impl Scheduler {
         let registry = app.state::<AgentRegistry>();
         let cancel_token = registry.register(&agent_id);
 
-        let engine = AgentEngine::new(provider, worktree_path, app.clone(), cancel_token);
+        let mut engine = AgentEngine::new(provider, worktree_path, app.clone(), cancel_token);
+        // Single-Agent Uplift B2: tool_summary 小模型挂载（与 commands::agent::run_agent 同逻辑）。
+        {
+            let cfg_mgr = app.state::<crate::commands::ConfigManager>();
+            let cfg = cfg_mgr.get_config_snapshot();
+            if !cfg.tool_summary_model.trim().is_empty() {
+                let key = cfg_mgr
+                    .get_api_key("deepseek")
+                    .or_else(|| cfg_mgr.get_api_key(&cfg.tool_summary_provider))
+                    .or_else(|| cfg_mgr.get_api_key("default"));
+                if let Some(k) = key {
+                    if let Some(s) = crate::agent::tool_summarizer::ToolSummarizer::try_openai_compat(
+                        k,
+                        cfg.tool_summary_base_url.clone(),
+                        cfg.tool_summary_model.clone(),
+                    ) {
+                        engine = engine.with_tool_summarizer(
+                            s,
+                            cfg.tool_summary_threshold_chars as usize,
+                        );
+                    }
+                }
+            }
+        }
 
         let _ = app.emit(
             "agent-started",
@@ -1009,6 +1032,9 @@ impl Scheduler {
             // Issue 3: 复用 Default 的 idle_retry_budget。未来如需用户级配置，
             // 这里读 cfg.idle_retry_budget 替换即可。
             idle_retry_budget: crate::agent::engine::AgentRunOptions::default().idle_retry_budget,
+            max_output_tokens: cfg.agent_max_output_tokens,
+            stream_network_retries: cfg.stream_network_retries,
+            stream_initial_retry_delay_ms: cfg.stream_initial_retry_delay_ms,
         })
     }
 
@@ -1114,10 +1140,17 @@ impl Scheduler {
         let rp = repo_path.clone();
         let app_clone = app.clone();
 
+        // 从 config 读 evaluator timeout，默认 600s。
+        // 老版本写死 30s，对 reasoning model + 大 diff 输入根本不够（dd68c400 案例）。
+        let timeout_secs = app
+            .state::<ConfigManager>()
+            .get_config_snapshot()
+            .evaluator_timeout_seconds;
+
         tokio::spawn(async move {
             let evaluator = EvaluatorAgent::new(provider, model, app_clone);
             let result = tokio::time::timeout(
-                tokio::time::Duration::from_secs(30),
+                tokio::time::Duration::from_secs(timeout_secs),
                 evaluator.evaluate(&aid, &mission_id, &rp),
             )
             .await;
@@ -1130,7 +1163,9 @@ impl Scheduler {
                     tracing::error!("Evaluator: failed for agent {aid}: {e}");
                 }
                 Err(_) => {
-                    tracing::warn!("Evaluator: timed out for agent {aid} (BT-05)");
+                    tracing::warn!(
+                        "Evaluator: timed out after {timeout_secs}s for agent {aid} (BT-05)"
+                    );
                 }
             }
         });

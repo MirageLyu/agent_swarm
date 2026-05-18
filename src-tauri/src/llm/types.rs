@@ -117,6 +117,22 @@ pub struct LlmRequest {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
     pub max_tokens: u32,
+    /// Provider-specific 顶层透传字段。
+    ///
+    /// 当 provider 是 OpenAI-compat 时，[`crate::llm::OpenAICompatProvider::build_body`]
+    /// 会把这个 JSON object 的所有顶层 key/value **merge** 进请求体。其它 provider
+    /// 暂时忽略。
+    ///
+    /// **典型用途**：DeepSeek-V4 系列 reasoning model 的"关 thinking" 适配 ——
+    /// `Some(json!({"thinking": {"type": "disabled"}}))` 传进去后，bitfun reseller
+    /// 实测延迟从 7s 降到 1.5s（2026-05-18 dial-test 数据），同时拿到完整 content。
+    /// 见 [`crate::llm::deepseek_adapter`]。
+    ///
+    /// 设计上故意做成"opaque JSON"而不是强类型枚举：每家 provider 的扩展参数
+    /// 都不一样（DeepSeek thinking、Anthropic thinking、Qwen enable_thinking、
+    /// vLLM chat_template_kwargs），强类型 union 会在每加一家就侵入到 LlmRequest。
+    /// 让适配逻辑各自管自家 json 拼装，types.rs 保持中立。
+    pub provider_extras: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------

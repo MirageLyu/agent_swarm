@@ -92,6 +92,22 @@ pub fn get_capabilities(provider: &str, model: &str) -> ModelCapabilities {
                     cache_control_syntax: Some("auto".into()),
                     context_window: 65536,
                 }
+            } else if lower_model.contains("v4") {
+                // 2026-04 发布的 DeepSeek V4 系列：1M context；hybrid attention；
+                // OpenAI-compat surface；支持 thinking/non-thinking 模式 + 并行工具调用。
+                // flash 与 pro 共享相同 capability set，按 model name 区分模型大小不影响 surface。
+                ModelCapabilities {
+                    supports_thinking: true,
+                    supports_tool_use: true,
+                    supports_prompt_caching: true,
+                    supports_prefill: false,
+                    supports_streaming: true,
+                    supports_parallel_tools: true,
+                    supports_logprobs: false,
+                    thinking_api_param: Some("enable_thinking".into()),
+                    cache_control_syntax: Some("auto".into()),
+                    context_window: 1_000_000,
+                }
             } else {
                 ModelCapabilities {
                     supports_thinking: false,

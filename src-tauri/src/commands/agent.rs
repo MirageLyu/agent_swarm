@@ -126,7 +126,25 @@ pub async fn run_agent(
     let registry = app.state::<AgentRegistry>();
     let cancel_token = registry.register(&agent_id);
 
-    let engine = AgentEngine::new(provider, workspace, app.app_handle().clone(), cancel_token);
+    let mut engine = AgentEngine::new(provider, workspace, app.app_handle().clone(), cancel_token);
+    // Single-Agent Uplift B2: 配置了 tool_summary_model + 有对应 api_key → 挂上小模型摘要。
+    // api_key 优先按 tool_summary_provider name 找（典型 "deepseek"）；缺则 "default"。
+    if !config.tool_summary_model.trim().is_empty() {
+        let summary_api_key = config_mgr
+            .get_api_key("deepseek")
+            .or_else(|| config_mgr.get_api_key(&config.tool_summary_provider))
+            .or_else(|| config_mgr.get_api_key("default"));
+        if let Some(key) = summary_api_key {
+            if let Some(s) = crate::agent::tool_summarizer::ToolSummarizer::try_openai_compat(
+                key,
+                config.tool_summary_base_url.clone(),
+                config.tool_summary_model.clone(),
+            ) {
+                engine = engine
+                    .with_tool_summarizer(s, config.tool_summary_threshold_chars as usize);
+            }
+        }
+    }
 
     let id = agent_id.clone();
     let desc = request.task_description.clone();
@@ -330,6 +348,20 @@ pub fn list_agent_todos(
             .collect())
     })
     .map_err(|e| e.to_string())
+}
+
+// ---- Single-Agent Uplift B1: ask_user_question 答复通道 ----
+
+/// 用户在前端 AskUserQuestionLine 卡片上选完点 Submit → 调本命令。
+/// 后端在 user_questions 全局表里找到等待中的 oneshot::Sender 投递答案；
+/// 没找到（session 已 timeout / agent 取消）→ 返回错误，前端 toast 提示。
+#[tauri::command]
+pub fn submit_user_question_answer(
+    session_id: String,
+    answers: std::collections::HashMap<String, Vec<String>>,
+) -> Result<(), String> {
+    let set = crate::agent::user_questions::UserAnswerSet { answers };
+    crate::agent::user_questions::deliver(&session_id, set).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -916,6 +916,27 @@ pub async fn stop_mission_execution(
         ));
     }
 
+    // 关键：取消 mission 循环之前，**先**取消所有正在跑的 agent 的 cancel_token。
+    // 否则 agent task 还会跑完整个 step（含 LLM stream，最坏 180s）才在 step 边界
+    // 检查到取消信号——用户体感"点了停止毫无反应"。
+    //
+    // scheduler.stop_mission 只取消调度循环，agent task 用的是 AgentRegistry 里
+    // 注册的独立 token；两套不联动是历史遗留。
+    let running_agents: Vec<String> = db
+        .with_conn(|conn| queries::list_running_agent_ids_for_mission(conn, &mission_id))
+        .unwrap_or_default();
+    if !running_agents.is_empty() {
+        let registry = app.state::<crate::agent::AgentRegistry>();
+        let cancelled_count = running_agents
+            .iter()
+            .filter(|aid| registry.cancel(aid))
+            .count();
+        tracing::info!(
+            "stop_mission_execution({mission_id}): cancelled {cancelled_count}/{} running agents",
+            running_agents.len()
+        );
+    }
+
     let scheduler = app.state::<Scheduler>();
     scheduler.stop_mission(&mission_id);
 

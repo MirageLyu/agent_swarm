@@ -319,6 +319,7 @@ impl ChatAgent {
                 messages: messages.clone(),
                 tools: tools.clone(),
                 max_tokens: 4096,
+                provider_extras: None,
             };
 
             let (tx, mut rx) = mpsc::channel::<StreamChunk>(256);

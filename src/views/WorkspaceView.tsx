@@ -14,6 +14,7 @@ import type { AgentEventPayload, AgentStreamPayload } from "../ipc";
 import type { TaskStatus, MissionStatus, MissionCostSummary } from "../ipc/commands";
 import { useAgentStore } from "../stores/agent-store";
 import type { Agent, AgentEvent, AgentStatus, AgentTodo } from "../stores/agent-store";
+import { enqueueStreamChunk, flushStreamNow, dropStreamQueue } from "../stores/stream-typewriter";
 import { useTaskStore } from "../stores/task-store";
 import { useUiStore } from "../stores/ui-store";
 import { AgentStreamList } from "../components/workspace/AgentStreamList";
@@ -67,7 +68,6 @@ export function WorkspaceView() {
     addAgent,
     updateAgent,
     appendEvent,
-    appendStream,
     appendShell,
     hydrateAgents,
     hydrateEvents,
@@ -123,6 +123,8 @@ export function WorkspaceView() {
           events: [],
           streamBuffer: "",
           shellBuffer: "",
+          reasoningBuffer: "",
+          reasoningStartedAt: null,
           todos: [],
         }));
         hydrateAgents(hydrated);
@@ -236,6 +238,8 @@ export function WorkspaceView() {
           events: [],
           streamBuffer: "",
           shellBuffer: "",
+          reasoningBuffer: "",
+          reasoningStartedAt: null,
           todos: [],
         });
       }
@@ -250,6 +254,20 @@ export function WorkspaceView() {
         timestamp: new Date().toISOString(),
       };
       appendEvent(agentId, evt);
+
+      // Single-Agent Uplift B1: 收到 ask_user_question_resolved 立刻把 session
+      // 标记为 resolved——AskUserQuestionLine 据此把卡片切到只读态。
+      // 注意：resolved 事件本身的 EventLine 渲染返回 null（见 EventLine.tsx），
+      // 但 appendEvent 仍然走过——保留事件流完整性供历史回放使用。
+      if (payload.kind === "system_hint" && payload.meta) {
+        const meta = payload.meta as { kind?: string; session_id?: string };
+        if (
+          meta.kind === "ask_user_question_resolved" &&
+          typeof meta.session_id === "string"
+        ) {
+          useAgentStore.getState().markQuestionResolved(meta.session_id);
+        }
+      }
 
       // Single-Agent Uplift Phase 1.2: todo_update 事件携带完整 todos 数组，
       // 直接全量替换前端状态——和后端 replace_agent_todos 语义一致。
@@ -292,9 +310,44 @@ export function WorkspaceView() {
         }
       }
 
+      // ✱ 修 bug：thinking 占位卡的 timer 一直累加 + streamBuffer 跨步累加。
+      //
+      // 同根问题——"step 边界清理"缺失。
+      //
+      // 1. reasoning timer 涨不停：旧实现只在 ① text_delta 抵达 ② agent 进终态
+      //    时清 reasoning。推理模型常见序列 reasoning_delta → 直接 tool_use（无
+      //    text_delta），这条路径下 clearReasoning 永远不被调；加上 store 里
+      //    startedAt 用了 `?? Date.now()`（已设置就不重置），导致 timer 从
+      //    "首次 thinking"开始单调累加到 agent 死亡。
+      //
+      // 2. streamBuffer 跨步粘连：每个 text_delta 直接拼到 streamBuffer，但只在
+      //    终态才清。step 1 文本"Let me check"+ step 2 文本"Now I'll write"会
+      //    连成"Let me checkNow I'll write"显示在 streamBlock 里。
+      //
+      // 修：checkpoint 是 LLM step 结束的**可靠信号**（每个 step 后端必 emit 一条
+      // 含 `tokens: ... | stop: ...`），error 是流出错的信号。两者到来时：
+      //   - 清 reasoning（下次 reasoning_delta 看到 null 会重新打时间戳）
+      //   - flush 打字机 pending → 清 streamBuffer（下一步从空白开始累计）
+      //
+      // streamBuffer 清掉的代价：上一步的临时回显文字会"消失"。但模型在 tool
+      // 调用前的 narration（"我先查一下文件"）本来就是过场对话，不属于关键产出；
+      // 真正的产出（文件改动、tool result）都在 events 里有持久化记录，影响最小。
+      if (payload.kind === "checkpoint" || payload.kind === "error") {
+        updates.reasoningBuffer = "";
+        updates.reasoningStartedAt = null;
+        flushStreamNow(agentId);
+        dropStreamQueue(agentId);
+        updates.streamBuffer = "";
+      }
+
       const terminalStatuses: AgentStatus[] = ["completed", "failed", "cancelled"];
       if (updates.status && terminalStatuses.includes(updates.status)) {
+        // 进终态前先 flush 打字机 pending，避免清空时遗失最后一段未吐字符。
+        flushStreamNow(agentId);
+        dropStreamQueue(agentId);
         updates.streamBuffer = "";
+        updates.reasoningBuffer = "";
+        updates.reasoningStartedAt = null;
       }
 
       updateAgent(agentId, updates);
@@ -305,7 +358,21 @@ export function WorkspaceView() {
     });
 
     const unlistenStream = onAgentStream((payload: AgentStreamPayload) => {
-      appendStream(payload.agent_id, payload.content);
+      // 推理模型 thinking 阶段：emit kind="reasoning_delta"。
+      // 我们不把它走打字机（thinking 内容一般很长且不直接展示），而是累计到
+      // reasoningBuffer，让 ThinkingIndicator 渲染一个轻量"💭 思考中..."占位卡。
+      if (payload.kind === "reasoning_delta") {
+        useAgentStore.getState().appendReasoning(payload.agent_id, payload.content);
+        return;
+      }
+      // 第一个 text_delta 抵达 → 思考结束，清掉占位卡再走打字机。
+      const agent = useAgentStore.getState().agents[payload.agent_id];
+      if (agent && (agent.reasoningBuffer || agent.reasoningStartedAt !== null)) {
+        useAgentStore.getState().clearReasoning(payload.agent_id);
+      }
+      // 智能打字机：小 chunk 同步零延迟（真流式 provider 不损体验），
+      // 大 chunk 按 RAF 节奏渐进吐——给假流式 reseller 一坨砸来时也"丝滑滑过"。
+      enqueueStreamChunk(payload.agent_id, payload.content);
     });
 
     // FM-15 follow-up：把 shell_exec 的 stdout/stderr/meta 拼到 shellBuffer，
@@ -343,6 +410,8 @@ export function WorkspaceView() {
           events: [],
           streamBuffer: "",
           shellBuffer: "",
+          reasoningBuffer: "",
+          reasoningStartedAt: null,
           todos: [],
         });
       }
@@ -367,7 +436,7 @@ export function WorkspaceView() {
       unlistenTask.then((fn) => fn());
       unlistenMission.then((fn) => fn());
     };
-  }, [addAgent, updateAgent, appendEvent, appendStream, appendShell, setActiveAgent, updateTaskLocal, updateMissionStatus]);
+  }, [addAgent, updateAgent, appendEvent, appendShell, setActiveAgent, updateTaskLocal, updateMissionStatus]);
 
   useEffect(() => {
     if (!filterMissionId) return;

@@ -20,8 +20,9 @@ use uuid::Uuid;
 
 use crate::db::{queries, Database};
 use crate::llm::{
-    stream_chat_with_idle_guard, ContentBlock, LlmProvider, LlmRequest, Message, MessageRole,
-    StreamChunk, StreamChunkKind, StreamGuardError, DEFAULT_STREAM_IDLE_HEARTBEAT_SECS,
+    stream_chat_with_idle_guard_full, ContentBlock, LlmProvider, LlmRequest, Message,
+    MessageRole, StreamChunk, StreamChunkKind, StreamGuardError, StreamRetryPolicy,
+    DEFAULT_STREAM_IDLE_HEARTBEAT_SECS,
     DEFAULT_STREAM_IDLE_TIMEOUT,
 };
 use crate::tools::{coding_agent_tools_with_artifact_support, ToolExecutor, TASK_COMPLETE_TOOL};
@@ -56,6 +57,10 @@ const STEPS_REMAINING_HINT: u32 = 5;
 /// 的 system_hint，无需再加任务级 budget。
 const DEFAULT_IDLE_RETRY_BUDGET: u32 = 2;
 
+/// 每步 LLM 请求的 max_tokens 默认值。
+/// 详细动机参见 [`AgentRunOptions::max_output_tokens`]。
+pub const DEFAULT_AGENT_MAX_OUTPUT_TOKENS: u32 = 16_384;
+
 /// Issue 3: 纯函数版的"idle-retry budget 转移"语义。
 ///
 /// 抽出来仅是为了写单测——loop 里实际还是 inline 状态机。**契约**：
@@ -79,6 +84,91 @@ fn next_idle_retry_budget(
 /// 只读工具集合（不会改变工作区状态）。L3 循环检测据此判断是否在原地探索。
 fn is_read_only_tool(name: &str) -> bool {
     matches!(name, "read_file" | "search_files" | "list_files")
+}
+
+/// **DeepSeek / OpenAI tool-call 协议适配器：tool_calls 之后唯一合规的 follow-up 回合。**
+///
+/// # 三家协议共用的硬约束
+///
+/// 含 `tool_calls`（OpenAI/DeepSeek）或 `tool_use`（Anthropic）的 assistant message
+/// 之后**必须紧接**一条 user 回合，且该回合内容须以与之配对的 tool_results 为主。
+/// 中间不能塞独立的 `[user text]` message，否则 DeepSeek/OpenAI 服务端会以
+/// `insufficient tool messages following tool_calls message` 直接 400 ——
+/// 这是确定性错误，stream-retry 5 次都救不回来（已在生产链路 f5866369 复现）。
+///
+/// # 为何要 builder 而非 inline 拼装
+///
+/// 早先的 inline 写法把 `read_only_loop_hint` / `queued_notes` / `max_tokens_hit_hint`
+/// 等各种"附带的提示文本"分散在主循环里，作者一不留神就会写出 `messages.push(user
+/// text)` 然后再 `messages.push(user tool_results)` 的两条独立 message，**编译期
+/// 看不出来**。本 builder 把这两类内容收敛进同一条 user `Message`，在类型层把
+/// "拆两条" 这条路堵死。
+///
+/// # OpenAI 协议下的最终序列
+///
+/// `convert_messages`（[`crate::llm::openai_compat`]）会把这条 Message 解构成：
+///
+/// ```text
+/// [role=tool, tool_call_id=A, content=...]
+/// [role=tool, tool_call_id=B, content=...]
+/// [role=user, content=hint_text]    ← 仅当 append_hint 被调用过才出现
+/// ```
+///
+/// `tool` messages 一定排在 `user` 文本之前，跟在 `assistant tool_calls` 后面，
+/// 完全符合 OpenAI/DeepSeek 协议的"tool_calls → tool_results → 下一回合输入"。
+///
+/// # Anthropic 协议下
+///
+/// 直接序列化为单条 `role=user`、内含 ToolResult* + Text 的 message ——
+/// Anthropic 协议本身就允许 ToolResult 与 Text 在同一 user message 内混用。
+struct ToolFollowupBuilder {
+    /// 严格按原 `tool_use_blocks` 顺序的 tool_results。Anthropic 协议要求
+    /// 顺序与同 turn 的 ToolUse 一一对应。
+    tool_results: Vec<ContentBlock>,
+    /// 本回合追加给 LLM 的提示文本片段（按 push 顺序拼接）。最终合并成
+    /// 单一 Text block 放在 tool_results 之后。
+    hints: Vec<String>,
+}
+
+impl ToolFollowupBuilder {
+    fn with_capacity(n: usize) -> Self {
+        Self {
+            tool_results: Vec::with_capacity(n),
+            hints: Vec::new(),
+        }
+    }
+
+    fn push_tool_result(&mut self, tool_use_id: String, content: String, is_error: bool) {
+        self.tool_results.push(ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        });
+    }
+
+    /// 追加一段提示文本到本回合 follow-up message。空串忽略。
+    fn append_hint(&mut self, hint: impl Into<String>) {
+        let s = hint.into();
+        if !s.is_empty() {
+            self.hints.push(s);
+        }
+    }
+
+    /// 构造最终 user Message。**tool_results 总是排在 hint Text 之前**——
+    /// 这是 OpenAI 协议合规的关键，convert 时 tool_call_id 的紧邻配对靠它保证。
+    fn build(self) -> Message {
+        let mut content = self.tool_results;
+        if !self.hints.is_empty() {
+            content.push(ContentBlock::Text {
+                text: self.hints.join("\n\n"),
+            });
+        }
+        Message {
+            role: MessageRole::User,
+            content,
+            cache_control: None,
+        }
+    }
 }
 
 // ---- Single-Agent Uplift Phase 2.2: 上下文瘦身 ----
@@ -108,7 +198,9 @@ fn apply_tool_result_budget(messages: &mut [Message]) {
     for msg in messages.iter_mut() {
         for block in msg.content.iter_mut() {
             if let ContentBlock::ToolResult { content, .. } = block {
-                if content.starts_with(TRUNCATED_SENTINEL_PREFIX) {
+                if content.starts_with(TRUNCATED_SENTINEL_PREFIX)
+                    || content.starts_with("[tool_summary]")
+                {
                     continue;
                 }
                 let total = content.chars().count();
@@ -265,6 +357,14 @@ pub struct AgentRunOptions {
     pub expected_output: Option<String>,
     /// Issue 3: stream idle timeout 时给 LLM 发"continue"重试的次数预算。
     pub idle_retry_budget: u32,
+    /// 每步 LLM 请求的 `max_tokens`。从 AppConfig.agent_max_output_tokens 读取；
+    /// 旧实现固定 4096 → 一次生成大文档时 tool_use args 被截断为非法 JSON。
+    pub max_output_tokens: u32,
+    /// stream "未收到首 chunk" 时网络错误的指数退避重试次数。
+    /// 0 = 不重试；3 = 1s/2s/4s 三次。
+    pub stream_network_retries: u32,
+    /// 网络重试首次退避毫秒数。
+    pub stream_initial_retry_delay_ms: u64,
 }
 
 impl Default for AgentRunOptions {
@@ -278,6 +378,9 @@ impl Default for AgentRunOptions {
             produces: Vec::new(),
             expected_output: None,
             idle_retry_budget: DEFAULT_IDLE_RETRY_BUDGET,
+            max_output_tokens: DEFAULT_AGENT_MAX_OUTPUT_TOKENS,
+            stream_network_retries: 5,
+            stream_initial_retry_delay_ms: 1000,
         }
     }
 }
@@ -288,6 +391,12 @@ pub struct AgentEngine {
     workspace_root: PathBuf,
     app_handle: tauri::AppHandle,
     cancel_token: CancellationToken,
+    /// Single-Agent Uplift B2: 可选的小模型 summarizer。
+    /// None 时 apply_tool_result_budget 退化到旧版"截尾保留 1KB"行为。
+    tool_summarizer: Option<crate::agent::tool_summarizer::ToolSummarizer>,
+    /// 摘要触发阈值（chars）。超过此值的 tool_result 才走摘要路径，
+    /// 减少没意义的小请求往返。
+    tool_summary_threshold_chars: usize,
 }
 
 impl AgentEngine {
@@ -299,11 +408,27 @@ impl AgentEngine {
     ) -> Self {
         Self {
             provider,
-            tool_executor: ToolExecutor::new(workspace_root.clone()),
+            tool_executor: ToolExecutor::new(workspace_root.clone())
+                .with_cancel_token(cancel_token.clone()),
             workspace_root,
             app_handle,
             cancel_token,
+            tool_summarizer: None,
+            tool_summary_threshold_chars: TOOL_RESULT_BUDGET_CHARS,
         }
+    }
+
+    /// Single-Agent Uplift B2: 注入 tool_summary 小模型。
+    /// 由 caller 从 ConfigManager 读 tool_summary_* 配置 + api_key 自行构造，
+    /// 这里只负责"挂上来"。caller 不传 = 关闭摘要。
+    pub fn with_tool_summarizer(
+        mut self,
+        summarizer: crate::agent::tool_summarizer::ToolSummarizer,
+        threshold_chars: usize,
+    ) -> Self {
+        self.tool_summarizer = Some(summarizer);
+        self.tool_summary_threshold_chars = threshold_chars.max(TOOL_RESULT_BUDGET_CHARS);
+        self
     }
 
     /// 兼容旧调用点：保留旧签名（max_steps），其它走 Default。
@@ -315,6 +440,19 @@ impl AgentEngine {
         model: &str,
         max_steps: u32,
     ) -> Result<AgentStatus> {
+        // 兼容入口：尝试从 ConfigManager 读相关字段；没有 ConfigManager 时（单测）落 Default。
+        let (max_output_tokens, stream_retries, stream_delay) = self
+            .app_handle
+            .try_state::<crate::commands::ConfigManager>()
+            .map(|m| {
+                let c = m.get_config_snapshot();
+                (
+                    c.agent_max_output_tokens,
+                    c.stream_network_retries,
+                    c.stream_initial_retry_delay_ms,
+                )
+            })
+            .unwrap_or((DEFAULT_AGENT_MAX_OUTPUT_TOKENS, 5, 1000));
         let opts = AgentRunOptions {
             model: model.to_string(),
             max_steps: if max_steps == 0 || max_steps == u32::MAX {
@@ -322,6 +460,9 @@ impl AgentEngine {
             } else {
                 max_steps
             },
+            max_output_tokens,
+            stream_network_retries: stream_retries,
+            stream_initial_retry_delay_ms: stream_delay,
             ..AgentRunOptions::default()
         };
         self.run_with_options(agent_id, task_description, &opts).await
@@ -359,6 +500,19 @@ impl AgentEngine {
         task_description: &str,
         opts: &AgentRunOptions,
     ) -> Result<AgentStatus> {
+        // Debug log：每条关键事件都显式带上 agent_id / step，避免 span 跨 await
+        // 的安全坑。日志格式 `agent={id} step={n} ...`，grep 即可拉单 agent 完整链路。
+        tracing::info!(
+            agent_id = %agent_id,
+            model = %opts.model,
+            max_steps = opts.max_steps,
+            timeout_secs = opts.timeout_secs,
+            max_output_tokens = opts.max_output_tokens,
+            stream_network_retries = opts.stream_network_retries,
+            task_desc_len = task_description.len(),
+            "agent_run start"
+        );
+
         let tools = coding_agent_tools_with_artifact_support();
         let workspace_dir = self.tool_executor.workspace_display();
         let guardrail_brief = render_guardrail_brief(&opts.guardrails);
@@ -472,12 +626,21 @@ impl AgentEngine {
 
             step += 1;
             self.update_agent_step(agent_id, step);
+            tracing::info!(
+                agent_id = %agent_id,
+                step,
+                msgs_in_context = messages.len(),
+                ctx_tokens_est = approximate_tokens(&messages),
+                "step begin"
+            );
 
-            // Single-Agent Uplift Phase 2.2: prompt 进 LLM 之前先做两层瘦身。
-            //   ① tool_result 大单元截断（>8KB chars 替换成头尾 sentinel）—— DB 仍存原文
-            //   ② 整体 token 估算超 50K → microcompact，丢最早 1/3 messages 换一段 summary
-            // 触发任一动作都 emit `compact` 事件让用户知情，避免 LLM 行为突变无解释。
-            apply_tool_result_budget(&mut messages);
+            // Single-Agent Uplift Phase 2.2 + B2: prompt 进 LLM 之前做三层瘦身。
+            //   ① tool_summary：tool_summarizer 配置在则先尝试 LLM 摘要（小模型）
+            //   ② tool_result 截尾：摘要失败/未启用的大块走传统 truncate
+            //   ③ microcompact：整体 token 估算超 50K → 丢最早 1/3 messages 换 summary
+            // 任一动作都 emit 对应事件让用户知情，避免 LLM 行为突变无解释。
+            self.apply_tool_result_budget_with_optional_summary(agent_id, step, &mut messages)
+                .await;
             if approximate_tokens(&messages) > MICROCOMPACT_TOKEN_THRESHOLD {
                 if let Some(report) = microcompact(&mut messages) {
                     self.emit_event_with_meta(
@@ -498,8 +661,18 @@ impl AgentEngine {
                 system: Some(system.clone()),
                 messages: messages.clone(),
                 tools: tools.clone(),
-                max_tokens: 4096,
+                max_tokens: opts.max_output_tokens,
+                provider_extras: None,
             };
+            tracing::info!(
+                agent_id = %agent_id,
+                step,
+                model = %opts.model,
+                msg_count = request.messages.len(),
+                tool_count = request.tools.len(),
+                max_tokens = request.max_tokens,
+                "llm_request dispatch"
+            );
 
             let (tx, mut rx) = mpsc::channel::<StreamChunk>(256);
             let agent_id_owned = agent_id.to_string();
@@ -511,25 +684,75 @@ impl AgentEngine {
             let step_started_at = std::time::Instant::now();
             let last_chunk_at = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
             let last_chunk_at_fwd = last_chunk_at.clone();
+            // Debug log：跟踪 chunk 抵达节奏。能区分"首 token 慢"vs"流中途变慢"vs
+            // "整体很快但量大"——三种用户感知都是"卡住"，但根因不同。
+            //
+            // chunks_seen 给 heartbeat 任务用：决定文案是"等首 token"还是"流式接收中"。
+            let trace_agent_id = agent_id.to_string();
+            let trace_step = step;
+            let chunks_seen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let chunks_seen_fwd = chunks_seen.clone();
             let forwarder = tokio::spawn(async move {
+                let mut text_chunks: u64 = 0;
+                let mut text_bytes: u64 = 0;
+                let mut reasoning_chunks: u64 = 0;
+                let mut reasoning_bytes: u64 = 0;
+                let mut first_chunk_logged = false;
                 while let Some(chunk) = rx.recv().await {
-                    last_chunk_at_fwd.store(
-                        step_started_at.elapsed().as_millis() as u64,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                    if let StreamChunkKind::TextDelta = chunk.kind {
-                        let _ = app_handle.emit(
-                            "agent-stream",
-                            AgentEventPayload {
-                                agent_id: agent_id_owned.clone(),
-                                step: stream_step,
-                                kind: "text_delta".to_string(),
-                                content: chunk.content,
-                                meta: None,
-                            },
+                    let elapsed_ms = step_started_at.elapsed().as_millis() as u64;
+                    last_chunk_at_fwd
+                        .store(elapsed_ms, std::sync::atomic::Ordering::Relaxed);
+                    chunks_seen_fwd.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if !first_chunk_logged {
+                        first_chunk_logged = true;
+                        tracing::info!(
+                            agent_id = %trace_agent_id,
+                            step = trace_step,
+                            first_chunk_ms = elapsed_ms,
+                            chunk_kind = ?chunk.kind,
+                            chunk_bytes = chunk.content.len(),
+                            "llm_stream first chunk arrived"
                         );
                     }
+                    // TextDelta：主回显流；ReasoningDelta：thinking 阶段，前端渲染成
+                    // "思考中..."占位卡，避免推理模型 thinking 期间用户看到长沉默。
+                    // 其他 kind（ToolUseDelta 等）当前不透传给前端，工具使用走 agent-event。
+                    let kind_str = match chunk.kind {
+                        StreamChunkKind::TextDelta => {
+                            text_chunks += 1;
+                            text_bytes += chunk.content.len() as u64;
+                            "text_delta"
+                        }
+                        StreamChunkKind::ReasoningDelta => {
+                            reasoning_chunks += 1;
+                            reasoning_bytes += chunk.content.len() as u64;
+                            "reasoning_delta"
+                        }
+                        _ => continue,
+                    };
+                    let _ = app_handle.emit(
+                        "agent-stream",
+                        AgentEventPayload {
+                            agent_id: agent_id_owned.clone(),
+                            step: stream_step,
+                            kind: kind_str.to_string(),
+                            content: chunk.content,
+                            meta: None,
+                        },
+                    );
                 }
+                let total_ms = step_started_at.elapsed().as_millis() as u64;
+                tracing::info!(
+                    agent_id = %trace_agent_id,
+                    step = trace_step,
+                    text_chunks,
+                    text_bytes,
+                    reasoning_chunks,
+                    reasoning_bytes,
+                    total_ms,
+                    avg_chunk_size = if text_chunks > 0 { text_bytes / text_chunks } else { 0 },
+                    "llm_stream forwarder done"
+                );
             });
 
             // Single-Agent Uplift Phase 0.4: Heartbeat。
@@ -544,6 +767,7 @@ impl AgentEngine {
             let heartbeat_agent_id = agent_id.to_string();
             let heartbeat_step = step;
             let heartbeat_last_chunk_at = last_chunk_at.clone();
+            let heartbeat_chunks_seen = chunks_seen.clone();
             let heartbeat_handle = tokio::spawn(async move {
                 /// 静默多少秒触发第一次 heartbeat。从 llm::stream_guard 单源取值，
                 /// 避免两边阈值漂移。30s 是用户开始疑神疑鬼的临界点。
@@ -569,12 +793,34 @@ impl AgentEngine {
                                 }
                             }
                             last_emitted_at_ms = Some(now_ms);
-                            let content = format!(
-                                "Waiting for LLM... idle for {idle_secs}s",
-                            );
+                            // 文案细分：还没收到任何 chunk → "等首 token"（推理模型 thinking 中）
+                            //          已经收到过 chunk → "流式接收中但暂停"（reseller 慢吞吞）
+                            // 两种场景用户都看到沉默，但根因和应对策略完全不同：
+                            //   - 等首 token：可能是 thinking 模型，正常；或网络握手卡，需要重启
+                            //   - 流中途暂停：通常是 reseller buffer 慢 flush，等等就会继续
+                            let chunks = heartbeat_chunks_seen.load(std::sync::atomic::Ordering::Relaxed);
+                            let (content, phase) = if chunks == 0 {
+                                (
+                                    format!(
+                                        "Waiting for LLM first token... {idle_secs}s elapsed \
+                                         (reasoning models can take 60+s; network/provider may be slow)"
+                                    ),
+                                    "awaiting_first_token",
+                                )
+                            } else {
+                                (
+                                    format!(
+                                        "LLM streaming paused — last chunk {idle_secs}s ago \
+                                         ({chunks} chunks received so far)"
+                                    ),
+                                    "stream_stalled",
+                                )
+                            };
                             let meta = serde_json::json!({
                                 "kind": "llm_idle",
+                                "phase": phase,
                                 "idle_secs": idle_secs,
+                                "chunks_seen": chunks,
                                 "step": heartbeat_step,
                             });
                             // heartbeat 只 emit 推送，不持久化 —— 持久化后每个 step 都
@@ -602,18 +848,47 @@ impl AgentEngine {
             // 重新发起 LLM 调用。这模拟用户在 Cursor / Claude Desktop 按 "continue"
             // 的体验，对偶发卡住的 reseller（DeepSeek-V4 / SiliconFlow Qwen）尤其有效。
             // 其他错误（Llm / Join）保持原失败路径。
-            let stream_outcome = stream_chat_with_idle_guard(
+            //
+            // Cancel 联动：把 self.cancel_token 传进 guard，用户点"停止"时 stream
+            // **立即** abort 而不是等当前 step 跑完——之前 cancel 只在 step 边界检查，
+            // 体感最坏要等 180s（一次 idle_timeout）才停。
+            let retry_policy = StreamRetryPolicy {
+                max_retries: opts.stream_network_retries,
+                initial_backoff: std::time::Duration::from_millis(opts.stream_initial_retry_delay_ms),
+                max_backoff: std::time::Duration::from_secs(16),
+            };
+            let stream_outcome = stream_chat_with_idle_guard_full(
                 self.provider.clone(),
                 request,
                 tx,
                 DEFAULT_STREAM_IDLE_TIMEOUT,
+                self.cancel_token.clone(),
+                retry_policy,
             )
             .await;
+            let stream_total_ms = step_started_at.elapsed().as_millis() as u64;
             let _ = forwarder.await;
             heartbeat_cancel.notify_waiters();
             let _ = heartbeat_handle.await;
             let response = match stream_outcome {
-                Ok(r) => r,
+                Ok(r) => {
+                    let tool_use_n = r
+                        .content
+                        .iter()
+                        .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
+                        .count();
+                    tracing::info!(
+                        agent_id = %agent_id,
+                        step,
+                        stop_reason = %r.stop_reason,
+                        input_tokens = r.usage.input_tokens,
+                        output_tokens = r.usage.output_tokens,
+                        stream_total_ms,
+                        tool_use_blocks = tool_use_n,
+                        "llm_response done"
+                    );
+                    r
+                }
                 Err(StreamGuardError::IdleTimeout { idle_secs, threshold_secs })
                     if idle_retries_left > 0 =>
                 {
@@ -646,6 +921,9 @@ impl AgentEngine {
                         cache_control: None,
                     });
                     continue;
+                }
+                Err(StreamGuardError::Cancelled) => {
+                    return self.finish_cancelled(agent_id, step);
                 }
                 Err(e) => return Err(anyhow::anyhow!(e.user_message_zh())),
             };
@@ -733,11 +1011,70 @@ impl AgentEngine {
                 ),
             );
 
-            // 判断本步是否调用了任何工具，以及是否调用了 task_complete
+            // 先解析 tool_use_blocks，因为下面 max_tokens hint 的注入路径要根据
+            // "本步有没有 tool_calls" 选择"独立 user message" 还是 "并入 follow-up"。
             let mut tool_use_blocks: Vec<(String, String, serde_json::Value)> = Vec::new();
             for block in &response.content {
                 if let ContentBlock::ToolUse { id, name, input } = block {
                     tool_use_blocks.push((id.clone(), name.clone(), input.clone()));
+                }
+            }
+
+            // 当 LLM 因为 max_tokens 被截断（stop_reason == "length"）时，
+            // tool_use 的 JSON arguments 几乎一定残缺——后续 dispatch_tool 会发出
+            // missing_or_invalid_arguments 错误。但单纯把工具错误丢回去 LLM 看不出
+            // 是 max_tokens 撞顶，会重试同样巨大的 output → 死循环。
+            // 这里**显式**告诉它"你被截断了"，并提示分段策略。
+            //
+            // 注入路径分两种：
+            //   ① 本步有 tool_calls → hint **必须** 并入 follow-up message（否则
+            //      DeepSeek/OpenAI 协议层会因为 [tool_calls][user_text][tool_results]
+            //      序列报 400 insufficient_tool_messages_following_tool_calls）。
+            //   ② 本步无 tool_calls → 独立 user message 合规。
+            let mut pending_max_tokens_hint: Option<String> = None;
+            if response.stop_reason == "length"
+                || response.stop_reason == "max_tokens"
+                || response.stop_reason == "max_output_tokens"
+            {
+                let hint = format!(
+                    "[System] Your previous response hit the {} max_tokens output budget and \
+                     was cut off mid-response. Any tool calls in that turn likely have truncated/\
+                     invalid arguments and will fail. \
+                     **Strategy**: Split large file content across multiple smaller tool calls. \
+                     For files > ~8KB, prefer one of:\n\
+                     1. Call write_file with a partial header first, then use edit_file with \
+                        anchor strings to append sections.\n\
+                     2. Use shell_exec with `cat <<EOF >> path` to append in chunks (each \
+                        heredoc must finish in one tool call).\n\
+                     3. For docs, write a short outline first; then fill each section in its own \
+                        tool call.\n\
+                     Avoid retrying the exact same large output — it will be truncated again.",
+                    opts.max_output_tokens
+                );
+                self.emit_event_with_meta(
+                    agent_id,
+                    step,
+                    "system_hint",
+                    &format!(
+                        "Output truncated at {} tokens — instructed agent to split into smaller calls",
+                        opts.max_output_tokens
+                    ),
+                    Some(serde_json::json!({
+                        "kind": "max_tokens_hit",
+                        "max_tokens": opts.max_output_tokens,
+                        "stop_reason": response.stop_reason,
+                    })),
+                );
+                if tool_use_blocks.is_empty() {
+                    // ① 没有 tool_calls 在前，独立 push 合规。
+                    messages.push(Message {
+                        role: MessageRole::User,
+                        content: vec![ContentBlock::Text { text: hint }],
+                        cache_control: None,
+                    });
+                } else {
+                    // ② 暂存，下面 follow-up 阶段并入。
+                    pending_max_tokens_hint = Some(hint);
                 }
             }
             let task_complete_call = tool_use_blocks
@@ -861,7 +1198,15 @@ impl AgentEngine {
                 consecutive_read_only = 0;
                 hinted_read_only_loop = false;
             }
-            if !hinted_read_only_loop && consecutive_read_only >= READ_ONLY_LOOP_THRESHOLD {
+            // L3 hint 不能 inline push 一条独立 user message——这一步 LLM 已经发了
+            // tool_calls，紧跟着必须是 tool_results follow-up。把 hint 延迟到 follow-up
+            // message 里再 append，避免触发 DeepSeek/OpenAI 协议层 400
+            // (insufficient tool messages following tool_calls message)。
+            //
+            // 详见 [`ToolFollowupBuilder`] 文档。
+            let pending_read_only_hint = if !hinted_read_only_loop
+                && consecutive_read_only >= READ_ONLY_LOOP_THRESHOLD
+            {
                 hinted_read_only_loop = true;
                 let hint = format!(
                     "[System] You have spent {} consecutive steps only reading / searching files \
@@ -871,12 +1216,10 @@ impl AgentEngine {
                     consecutive_read_only
                 );
                 self.emit_event(agent_id, step, "system_hint", &hint);
-                messages.push(Message {
-                    role: MessageRole::User,
-                    content: vec![ContentBlock::Text { text: hint }],
-                    cache_control: None,
-                });
-            }
+                Some(hint)
+            } else {
+                None
+            };
 
             // Single-Agent Uplift Phase 2.1: 并发安全的工具批量并行执行。
             //
@@ -1001,22 +1344,30 @@ impl AgentEngine {
                 tool_outputs[i] = Some(output);
             }
 
-            // 3) 按原顺序拼 tool_results。Anthropic 要求 ToolResult 与 ToolUse 同 turn
-            //    严格按 tool_use_id 配对——顺序错了 API 会 400。
-            let mut tool_results: Vec<ContentBlock> = Vec::with_capacity(tool_use_blocks.len());
+            // 3) 按原顺序拼 tool_results 到 follow-up builder。Anthropic 要求 ToolResult
+            //    与 ToolUse 同 turn 严格按 tool_use_id 配对——顺序错了 API 会 400。
+            let mut followup = ToolFollowupBuilder::with_capacity(tool_use_blocks.len());
             for ((id, _name, _input), output_opt) in
                 tool_use_blocks.iter().zip(tool_outputs.into_iter())
             {
                 let output = output_opt
                     .expect("dispatch_tool 必须为每个 tool_use_block 填回一个 ToolOutput");
-                tool_results.push(ContentBlock::ToolResult {
-                    tool_use_id: id.clone(),
-                    content: output.content,
-                    is_error: output.is_error,
-                });
+                followup.push_tool_result(id.clone(), output.content, output.is_error);
             }
 
-            // 处理 directive notes
+            // max_tokens-hit hint（仅当本步有 tool_calls 时才暂存到此）：
+            // 同样必须并入 follow-up，避免 [tool_calls][user_text][tool_results] 协议违例。
+            if let Some(hint) = pending_max_tokens_hint {
+                followup.append_hint(hint);
+            }
+
+            // L3 read-only-loop hint：必须叠在同一条 follow-up message 里，
+            // 不能拆成独立的 user text message——见 [`ToolFollowupBuilder`] 协议说明。
+            if let Some(hint) = pending_read_only_hint {
+                followup.append_hint(hint);
+            }
+
+            // 处理 directive notes —— 同样作为 follow-up hint 叠加。
             let queued_notes = self.poll_queued_notes(agent_id);
             if !queued_notes.is_empty() {
                 let notes_text = Self::format_notes_for_injection(&queued_notes);
@@ -1036,19 +1387,133 @@ impl AgentEngine {
                     &format!("Applied {} note(s)", queued_notes.len()),
                     Some(notes_meta),
                 );
-                tool_results.push(ContentBlock::Text { text: notes_text });
+                followup.append_hint(notes_text);
             }
 
-            messages.push(Message {
-                role: MessageRole::User,
-                content: tool_results,
-                cache_control: None,
-            });
+            messages.push(followup.build());
 
             if self.cancel_token.is_cancelled() {
                 return self.finish_cancelled(agent_id, step);
             }
         }
+    }
+
+    /// Single-Agent Uplift B2: tool_result 瘦身的统一入口，先摘要再 truncate。
+    ///
+    /// 行为：
+    ///   1. 扫所有 ToolResult content，挑出 chars > tool_summary_threshold_chars 的
+    ///   2. 如果 tool_summarizer 已配置 → 并发请求摘要，成功则原文替换为 `[summary] ...`
+    ///      并 emit `tool_summary` 事件供前端展示
+    ///   3. 仍然超阈值（摘要失败 / 未配置）→ fallback 到 apply_tool_result_budget 的截尾逻辑
+    ///   4. 摘要本身也走截尾兜底 —— 防止小模型不听话吐了 5K 字
+    async fn apply_tool_result_budget_with_optional_summary(
+        &self,
+        agent_id: &str,
+        step: u32,
+        messages: &mut [Message],
+    ) {
+        if let Some(summarizer) = &self.tool_summarizer {
+            // 收集需要摘要的 (msg_idx, block_idx, tool_name, content) 清单。
+            // 仅对 chars > threshold 的 content 走小模型，避免大量小 result 拖慢主循环。
+            let mut targets: Vec<(usize, usize, String, String)> = Vec::new();
+            for (mi, msg) in messages.iter().enumerate() {
+                for (bi, block) in msg.content.iter().enumerate() {
+                    if let ContentBlock::ToolResult {
+                        content,
+                        tool_use_id,
+                        ..
+                    } = block
+                    {
+                        if content.starts_with(TRUNCATED_SENTINEL_PREFIX)
+                            || content.starts_with("[tool_summary]")
+                        {
+                            continue;
+                        }
+                        if content.chars().count() <= self.tool_summary_threshold_chars {
+                            continue;
+                        }
+                        // tool_use_id 现在用作显示用——找回 tool 名要在主循环里查 tool_use 块，
+                        // 这里图省事直接用 id 当 tool 名占位（够 summarizer system prompt 提示用）。
+                        targets.push((mi, bi, tool_use_id.clone(), content.clone()));
+                    }
+                }
+            }
+
+            if !targets.is_empty() {
+                let futures = targets.iter().map(|(_, _, tool, content)| {
+                    let summarizer = summarizer.clone();
+                    let tool = tool.clone();
+                    let content = content.clone();
+                    async move {
+                        let started = std::time::Instant::now();
+                        let res = summarizer.summarize(&tool, &content).await;
+                        (res, started.elapsed())
+                    }
+                });
+                let results = futures::future::join_all(futures).await;
+
+                for ((mi, bi, tool_label, original), (res, dur)) in
+                    targets.iter().zip(results.into_iter())
+                {
+                    let original_chars = original.chars().count();
+                    match res {
+                        Ok(summary) => {
+                            // 兜底截尾，防摘要本身过长（小模型偶尔不听话）
+                            const SUMMARY_HARD_CAP: usize = 1500;
+                            let summary_trimmed: String = if summary.chars().count() > SUMMARY_HARD_CAP {
+                                summary.chars().take(SUMMARY_HARD_CAP).collect::<String>()
+                                    + "…[summary truncated]"
+                            } else {
+                                summary
+                            };
+                            let summary_chars = summary_trimmed.chars().count();
+                            let replacement = format!(
+                                "[tool_summary] (orig {}KB → ~{} chars; full output preserved in agent_events)\n{}",
+                                original_chars / 1024,
+                                summary_chars,
+                                summary_trimmed,
+                            );
+                            if let ContentBlock::ToolResult { content, .. } =
+                                &mut messages[*mi].content[*bi]
+                            {
+                                *content = replacement;
+                            }
+                            self.emit_event_with_meta(
+                                agent_id,
+                                step,
+                                "tool_summary",
+                                &format!(
+                                    "Summarized large tool_result: {} chars → {} chars ({} ms)",
+                                    original_chars,
+                                    summary_chars,
+                                    dur.as_millis()
+                                ),
+                                Some(serde_json::json!({
+                                    "tool": tool_label,
+                                    "from_chars": original_chars,
+                                    "to_chars": summary_chars,
+                                    "duration_ms": dur.as_millis() as u64,
+                                    "model": self.tool_summarizer.as_ref().map(|s| s.model().to_string()),
+                                })),
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "tool_summary failed for tool_use_id={}: {} — falling back to truncate",
+                                tool_label,
+                                e
+                            );
+                            // 不动 messages；下一步 apply_tool_result_budget 会做 truncate fallback
+                        }
+                    }
+                }
+            }
+        }
+
+        // 不论摘要是否启用都跑一遍 truncate：
+        // - 摘要成功 → content 已是 [tool_summary] 短串，starts_with sentinel，直接跳过
+        // - 摘要失败 / 未启用 → 在这里截尾兜底
+        apply_tool_result_budget(messages);
     }
 
     /// 派发工具：`publish_artifact` 由 artifacts 模块直接处理（需要 DB），其它走 ToolExecutor。
@@ -1062,6 +1527,84 @@ impl AgentEngine {
         name: &str,
         input: &serde_json::Value,
     ) -> crate::tools::ToolOutput {
+        let dispatch_started = std::time::Instant::now();
+        // input 直接 to_string 可能很大（write_file content）；只截 200 字给日志，
+        // 真正完整 input 还是在 agent-event payload 里有，用户回看可以拿到。
+        let input_excerpt = {
+            let s = serde_json::to_string(input).unwrap_or_default();
+            if s.len() > 200 {
+                format!("{}…[+{} bytes]", &s[..200], s.len() - 200)
+            } else {
+                s
+            }
+        };
+        tracing::info!(
+            agent_id = %agent_id,
+            tool = %name,
+            input_len = input_excerpt.len(),
+            input_excerpt = %input_excerpt,
+            "tool_dispatch begin"
+        );
+
+        let result = self
+            .dispatch_tool_inner(agent_id, name, input, dispatch_started)
+            .await;
+
+        tracing::info!(
+            agent_id = %agent_id,
+            tool = %name,
+            duration_ms = dispatch_started.elapsed().as_millis() as u64,
+            is_error = result.is_error,
+            output_len = result.content.len(),
+            "tool_dispatch done"
+        );
+        result
+    }
+
+    /// dispatch_tool 的实现体；分离出来只是为了让 dispatch_tool 包一层
+    /// "进/出 trace + 计时"，避免每个 return 分支都要复制日志代码。
+    async fn dispatch_tool_inner(
+        &self,
+        agent_id: &str,
+        name: &str,
+        input: &serde_json::Value,
+        _started: std::time::Instant,
+    ) -> crate::tools::ToolOutput {
+        // Single-Agent Uplift: 兜底解释 LLM 漏写 arguments 的情况。
+        // OpenAI-compat provider 在 args 字符串为空 / parse 失败时会塞 sentinel 进 input，
+        // 这里识别后给 LLM 一个**明确**的错误，让它理解是自己漏给参数（而不是 schema 错）。
+        if let Some(obj) = input.as_object() {
+            if let Some(err) = obj.get(crate::llm::ARG_PARSE_ERROR_KEY).and_then(|v| v.as_str()) {
+                let raw = obj
+                    .get(crate::llm::ARG_RAW_KEY)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let raw_excerpt = if raw.len() > 400 {
+                    format!("{}…[truncated]", &raw[..400])
+                } else {
+                    raw.to_string()
+                };
+                let msg = format!(
+                    "tool_use for `{name}` arrived without valid arguments ({err}). \
+                     Raw arguments string from the model: {:?}. \
+                     Likely cause: the previous response hit max_tokens before the JSON args \
+                     finished, or the arguments were emitted as an empty string. \
+                     Retry the call with all required parameters spelled out explicitly. \
+                     If you don't actually need to call this tool, skip it and continue.",
+                    raw_excerpt,
+                );
+                return crate::tools::ToolOutput {
+                    content: serde_json::json!({
+                        "error": "missing_or_invalid_arguments",
+                        "tool": name,
+                        "message": msg,
+                    })
+                    .to_string(),
+                    is_error: true,
+                };
+            }
+        }
+
         if name == "publish_artifact" {
             return self.execute_publish_artifact(agent_id, input).await;
         }
@@ -1076,6 +1619,10 @@ impl AgentEngine {
         // 层短路即可，不需要 ToolExecutor 沙箱、不需要 DB。
         if name == crate::tools::ENTER_PLAN_MODE_TOOL {
             return self.execute_enter_plan_mode(agent_id, input);
+        }
+        // Single-Agent Uplift B1: ask_user_question 阻塞等用户答 — 走专用路径。
+        if name == crate::tools::ASK_USER_QUESTION_TOOL {
+            return self.execute_ask_user_question(agent_id, input).await;
         }
 
         // FM-14 tool gate（write_file 到 protected_paths / shell_exec 到 destructive_commands）。
@@ -1295,6 +1842,199 @@ impl AgentEngine {
                 "Plan recorded ({} lines). Proceed with implementation; use todo_write to track step progress.",
                 plan.lines().count()
             ),
+            is_error: false,
+        }
+    }
+
+    /// Single-Agent Uplift B1: 执行 ask_user_question 工具。
+    ///
+    /// 行为：
+    ///   1. 解析 input.questions[]；任何 schema 偏差立即结构化报错，让 LLM 自己重试。
+    ///   2. 用 uuid 生成 session_id，注册到 user_questions 全局表拿到 oneshot::Receiver。
+    ///   3. emit 一条 `system_hint` 事件，meta.kind="ask_user_question"，meta.session_id
+    ///      + meta.questions 让前端 AskUserQuestionLine 渲染卡片。
+    ///   4. select! 等：
+    ///        - oneshot 完成 → 用户答了 → 返回 JSON answers 给 LLM
+    ///        - 30 分钟超时 → 撤销 session，返回 timed_out=true
+    ///        - cancel_token 触发 → 撤销 session，返回 cancelled
+    ///   5. 不论哪条分支结束都 emit 一条 `system_hint` (kind=`"ask_user_question_resolved"`)
+    ///      让前端从"等输入"UI 退回到"已回答"摘要。
+    async fn execute_ask_user_question(
+        &self,
+        agent_id: &str,
+        input: &serde_json::Value,
+    ) -> crate::tools::ToolOutput {
+        use crate::tools::ToolOutput;
+
+        enum AskOutcome {
+            Answered(crate::agent::user_questions::UserAnswerSet),
+            TimedOut,
+            Cancelled,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct OptionIn {
+            id: String,
+            label: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct QuestionIn {
+            id: String,
+            prompt: String,
+            options: Vec<OptionIn>,
+            #[serde(default)]
+            allow_multiple: bool,
+        }
+        #[derive(serde::Deserialize)]
+        struct AskInput {
+            questions: Vec<QuestionIn>,
+        }
+
+        let parsed: AskInput = match serde_json::from_value(input.clone()) {
+            Ok(v) => v,
+            Err(e) => {
+                return ToolOutput {
+                    content: serde_json::json!({
+                        "error": "parameter_error",
+                        "message": format!("ask_user_question input parse failed: {e}"),
+                    })
+                    .to_string(),
+                    is_error: true,
+                };
+            }
+        };
+        if parsed.questions.is_empty() {
+            return ToolOutput {
+                content: serde_json::json!({
+                    "error": "parameter_error",
+                    "message": "ask_user_question requires at least one question.",
+                })
+                .to_string(),
+                is_error: true,
+            };
+        }
+        for q in &parsed.questions {
+            if q.options.len() < 2 {
+                return ToolOutput {
+                    content: serde_json::json!({
+                        "error": "parameter_error",
+                        "message": format!(
+                            "Question `{}` has fewer than 2 options. Provide multiple choices \
+                             so the user has something to pick.", q.id
+                        ),
+                    })
+                    .to_string(),
+                    is_error: true,
+                };
+            }
+        }
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let rx = crate::agent::user_questions::register(&session_id);
+
+        let questions_meta = serde_json::json!(parsed
+            .questions
+            .iter()
+            .map(|q| serde_json::json!({
+                "id": q.id,
+                "prompt": q.prompt,
+                "allow_multiple": q.allow_multiple,
+                "options": q.options.iter().map(|o| serde_json::json!({
+                    "id": o.id,
+                    "label": o.label,
+                })).collect::<Vec<_>>(),
+            }))
+            .collect::<Vec<_>>());
+
+        let step = self.read_agent_step(agent_id);
+        self.emit_event_with_meta(
+            agent_id,
+            step,
+            "system_hint",
+            &format!(
+                "[ask-user] {} question(s) — waiting for your answer",
+                parsed.questions.len()
+            ),
+            Some(serde_json::json!({
+                "kind": "ask_user_question",
+                "session_id": session_id,
+                "agent_id": agent_id,
+                "questions": questions_meta,
+            })),
+        );
+
+        // 30 分钟兜底；和工具描述里的 timeout 一致。
+        let timeout = std::time::Duration::from_secs(30 * 60);
+
+        let outcome = tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => {
+                crate::agent::user_questions::drop_pending(&session_id);
+                AskOutcome::Cancelled
+            }
+            res = rx => {
+                match res {
+                    Ok(answers) => AskOutcome::Answered(answers),
+                    Err(_) => AskOutcome::Cancelled, // sender dropped
+                }
+            }
+            _ = tokio::time::sleep(timeout) => {
+                crate::agent::user_questions::drop_pending(&session_id);
+                AskOutcome::TimedOut
+            }
+        };
+
+        // 通知前端：不管哪条分支都让卡片切回"已结束"。
+        let resolution_meta = match &outcome {
+            AskOutcome::Answered(set) => serde_json::json!({
+                "kind": "ask_user_question_resolved",
+                "session_id": session_id,
+                "outcome": "answered",
+                "answers": set.answers,
+            }),
+            AskOutcome::TimedOut => serde_json::json!({
+                "kind": "ask_user_question_resolved",
+                "session_id": session_id,
+                "outcome": "timed_out",
+            }),
+            AskOutcome::Cancelled => serde_json::json!({
+                "kind": "ask_user_question_resolved",
+                "session_id": session_id,
+                "outcome": "cancelled",
+            }),
+        };
+        let summary_text = match &outcome {
+            AskOutcome::Answered(_) => "[ask-user] answers received",
+            AskOutcome::TimedOut => "[ask-user] timed out (no answer in 30 min)",
+            AskOutcome::Cancelled => "[ask-user] cancelled",
+        };
+        self.emit_event_with_meta(
+            agent_id,
+            step,
+            "system_hint",
+            summary_text,
+            Some(resolution_meta),
+        );
+
+        // 给 LLM 的返回值：保持简单 JSON。answered 时把 question id → option id 列表 echo 回去。
+        let payload = match outcome {
+            AskOutcome::Answered(set) => serde_json::json!({
+                "session_id": session_id,
+                "answers": set.answers,
+            }),
+            AskOutcome::TimedOut => serde_json::json!({
+                "session_id": session_id,
+                "timed_out": true,
+                "hint": "User did not answer in 30 minutes. Pick a sensible default and proceed, \
+                        or call task_complete to report you cannot continue.",
+            }),
+            AskOutcome::Cancelled => serde_json::json!({
+                "session_id": session_id,
+                "cancelled": true,
+            }),
+        };
+        ToolOutput {
+            content: payload.to_string(),
             is_error: false,
         }
     }
@@ -1977,5 +2717,139 @@ mod context_compaction_tests {
         // tokens 下降（用近似估算）
         let after_tokens = approximate_tokens(&messages);
         assert!(after_tokens < before_tokens, "压缩后 tokens 必须下降");
+    }
+}
+
+#[cfg(test)]
+mod tool_followup_protocol_tests {
+    //! **协议契约回归测试** —— DeepSeek/OpenAI tool-call 协议要求：
+    //! assistant message 含 tool_calls 之后，紧跟的 follow-up user message
+    //! **必须**先列 tool_results、再列任何附加 hint text。中间不允许独立的
+    //! user-text message。
+    //!
+    //! 任何在主循环里"忘了用 builder 而直接 push user message"的回归
+    //! 都会让生产环境再次撞上 `insufficient tool messages following tool_calls`
+    //! 400 错误（f5866369 复现链）。守住这一组小不变量就能让重构不至于
+    //! 摔进同一个坑。
+    use super::*;
+    use crate::llm::{LlmRequest, OpenAICompatProvider};
+
+    fn provider() -> OpenAICompatProvider {
+        OpenAICompatProvider::new("k".into(), "https://example.com".into())
+    }
+
+    /// builder 空时构造的 follow-up 等价于"只有 tool_results 的 user message"。
+    #[test]
+    fn followup_with_only_tool_results_yields_no_text_block() {
+        let mut b = ToolFollowupBuilder::with_capacity(2);
+        b.push_tool_result("id_a".into(), "ra".into(), false);
+        b.push_tool_result("id_b".into(), "rb".into(), false);
+        let m = b.build();
+
+        assert!(matches!(m.role, MessageRole::User));
+        assert_eq!(m.content.len(), 2, "无 hint 时不能凭空多出 Text block");
+        assert!(matches!(
+            &m.content[0],
+            ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "id_a"
+        ));
+        assert!(matches!(
+            &m.content[1],
+            ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "id_b"
+        ));
+    }
+
+    /// hint 必须排在 tool_results 之后——这是 OpenAI 协议合规的关键顺序。
+    #[test]
+    fn followup_appends_hints_after_tool_results() {
+        let mut b = ToolFollowupBuilder::with_capacity(1);
+        b.push_tool_result("id_a".into(), "ra".into(), false);
+        b.append_hint("[System] read-only loop hint");
+        b.append_hint("[directive] note 1 applied");
+        let m = b.build();
+
+        assert_eq!(m.content.len(), 2, "tool_result + 拼接的 Text block");
+        assert!(matches!(&m.content[0], ContentBlock::ToolResult { .. }));
+        match &m.content[1] {
+            ContentBlock::Text { text } => {
+                assert!(text.contains("read-only loop"));
+                assert!(text.contains("directive"));
+            }
+            _ => panic!("hint 必须落在 Text block"),
+        }
+    }
+
+    /// 空 hint 字符串不应污染 follow-up——保护调用方对边界条件的随手 push。
+    #[test]
+    fn empty_hint_is_skipped() {
+        let mut b = ToolFollowupBuilder::with_capacity(1);
+        b.push_tool_result("id_a".into(), "ra".into(), false);
+        b.append_hint("");
+        b.append_hint(String::new());
+        let m = b.build();
+        assert_eq!(m.content.len(), 1, "空 hint 不能造出空 Text block");
+    }
+
+    /// **协议合规端到端**：含 ToolResult+Text 的 user message 经
+    /// `OpenAICompatProvider::convert_messages` 转换后，role=tool 必须
+    /// **严格排在** role=user(text) 之前。如果顺序颠倒，DeepSeek 会以
+    /// `insufficient tool messages following tool_calls message` 直接 400。
+    #[test]
+    fn convert_messages_emits_tool_messages_before_user_text() {
+        let mut b = ToolFollowupBuilder::with_capacity(2);
+        b.push_tool_result("call_a".into(), "result_a".into(), false);
+        b.push_tool_result("call_b".into(), "result_b".into(), false);
+        b.append_hint("[System] do something different next");
+        let user_msg = b.build();
+
+        // 模拟一轮真实对话：assistant 先发 tool_calls，user 紧跟 follow-up。
+        let assistant_msg = Message {
+            role: MessageRole::Assistant,
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "call_a".into(),
+                    name: "read_file".into(),
+                    input: serde_json::json!({"path": "x"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_b".into(),
+                    name: "list_files".into(),
+                    input: serde_json::json!({"path": "."}),
+                },
+            ],
+            cache_control: None,
+        };
+        let req = LlmRequest {
+            model: "deepseek-v4-pro".into(),
+            system: None,
+            messages: vec![assistant_msg, user_msg],
+            tools: vec![],
+            max_tokens: 16,
+            provider_extras: None,
+        };
+
+        let oai = provider().convert_messages(&req);
+
+        // 期望序列：
+        //   [0] assistant tool_calls
+        //   [1] tool call_a
+        //   [2] tool call_b
+        //   [3] user text(hint)
+        assert_eq!(oai.len(), 4, "应当展开成 4 条 OpenAI 协议消息: {oai:?}");
+        assert_eq!(oai[0]["role"], "assistant");
+        assert!(oai[0].get("tool_calls").is_some());
+
+        assert_eq!(oai[1]["role"], "tool", "tool_results 必须紧跟 assistant");
+        assert_eq!(oai[1]["tool_call_id"], "call_a");
+        assert_eq!(oai[2]["role"], "tool");
+        assert_eq!(oai[2]["tool_call_id"], "call_b");
+
+        assert_eq!(
+            oai[3]["role"], "user",
+            "hint user message 必须排在所有 tool_results 之后（协议合规关键）"
+        );
+        assert!(oai[3]["content"]
+            .as_str()
+            .expect("user content 必须是 string")
+            .contains("do something different"));
     }
 }

@@ -31,12 +31,21 @@ fn builtin_tools_legacy() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "write_file".to_string(),
-            description: "Write content to a file, creating it if it doesn't exist".to_string(),
+            description: "Write content to a file, creating it if it doesn't exist. \
+                          \n\n**Size guidance**: Keep `content` under ~6KB per call. LLM API responses \
+                          have a per-response output token cap; generating one huge `content` string \
+                          risks the response being truncated mid-string, corrupting the JSON \
+                          arguments and failing the call. For large files, write a short skeleton \
+                          first then use edit_file with anchor strings to insert each section."
+                .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "File path relative to workspace root" },
-                    "content": { "type": "string", "description": "Content to write" }
+                    "content": {
+                        "type": "string",
+                        "description": "Content to write. Keep under ~6KB per call; split large files into skeleton + edit_file appends."
+                    }
                 },
                 "required": ["path", "content"]
             }),
@@ -167,6 +176,83 @@ pub const TODO_WRITE_TOOL: &str = "todo_write";
 /// Single-Agent Uplift Phase 2.4: EnterPlanMode 工具名常量。
 pub const ENTER_PLAN_MODE_TOOL: &str = "enter_plan_mode";
 
+/// Single-Agent Uplift B1: AskUserQuestion 工具名常量。
+pub const ASK_USER_QUESTION_TOOL: &str = "ask_user_question";
+
+/// Single-Agent Uplift B1: AskUserQuestion 工具定义。
+///
+/// 适用场景：当且仅当下列条件都满足，才该调用这个工具：
+///   - 多个等价/合理的实现路径，**没有客观标准**让 agent 自己挑（典型：UI 风格、API 命名风格）
+///   - 选错的代价**不可逆**或**昂贵**（写到主分支 / 推到生产 / 大量级联改动）
+///
+/// 反例（应当 agent 自己定）：
+///   - 编译错误怎么修——技术决定，自己查 / 试
+///   - 用 `Vec` 还是 `LinkedList`——查一下基准
+///   - 命名 i 还是 idx——别浪费用户时间
+///
+/// 行为：调用后 agent 暂停当前 LLM 步骤等用户答复（默认 30 分钟超时；
+/// 用户取消该 agent 也会唤醒）。返回值是 JSON `{ session_id, answers: { qid: [option_id, ...] } }`，
+/// 用户没回复时返回 `{ timed_out: true }`，agent 应据此自行决断或 task_complete 报告无法继续。
+pub fn ask_user_question_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: ASK_USER_QUESTION_TOOL.to_string(),
+        description:
+            "Ask the user one or more multiple-choice questions and pause until they answer. \
+             Use this VERY sparingly — only when (a) there are multiple equally-valid \
+             approaches with no objective tiebreaker, AND (b) picking wrong is expensive or \
+             irreversible. Do NOT use it for things you can decide yourself (build errors, \
+             naming choices, library benchmarks). \
+             Behavior: each question has labeled options; the user picks one (or several if \
+             allow_multiple=true) per question. The call blocks for up to 30 minutes; if no \
+             answer arrives, you'll get `{ timed_out: true }` and should pick a sensible \
+             default or call task_complete to report you cannot continue."
+                .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "description": "One or more questions to present together.",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": "Stable id used to key the answer back."
+                            },
+                            "prompt": {
+                                "type": "string",
+                                "description": "The question text shown to the user."
+                            },
+                            "options": {
+                                "type": "array",
+                                "description": "At least 2 options.",
+                                "minItems": 2,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string" },
+                                        "label": { "type": "string" }
+                                    },
+                                    "required": ["id", "label"]
+                                }
+                            },
+                            "allow_multiple": {
+                                "type": "boolean",
+                                "description": "If true, user can select multiple options. Default false."
+                            }
+                        },
+                        "required": ["id", "prompt", "options"]
+                    }
+                }
+            },
+            "required": ["questions"]
+        }),
+        cache_control: None,
+    }
+}
+
 /// Single-Agent Uplift Phase 2.4: EnterPlanMode 工具定义。
 ///
 /// 为什么和 TodoWrite 同时提供：TodoWrite 是一个迭代的 in-flight 状态机
@@ -287,6 +373,7 @@ pub fn coding_agent_tools_with_artifact_support() -> Vec<ToolDefinition> {
     tools.push(crate::agent::artifacts::publish_artifact_tool_definition());
     tools.push(todo_write_tool_definition());
     tools.push(enter_plan_mode_tool_definition());
+    tools.push(ask_user_question_tool_definition());
     tools.push(task_complete_tool_definition());
     tools
 }

@@ -2,12 +2,17 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::{Emitter, Manager};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::db::{queries, Database};
 use crate::git::{DiffFile, WorktreeManager};
-use crate::llm::{LlmProvider, LlmRequest, Message, MessageRole, ContentBlock};
+use crate::llm::{
+    stream_chat_with_idle_guard, ContentBlock, LlmProvider, LlmRequest, Message, MessageRole,
+    StreamChunk, StreamGuardError,
+};
 
 // ---- Evaluator output types ----
 
@@ -278,6 +283,11 @@ impl EvaluatorAgent {
     }
 
     async fn call_llm_for_evaluation(&self, system_prompt: &str) -> Result<EvaluationOutput> {
+        // **max_tokens 抬到 8192**：reseller 上的 deepseek-v4-pro / glm 等是 reasoning
+        // 模型，会先吞掉一大段 reasoning_tokens 才开始吐 final content。原先 4096 会
+        // 导致 finish_reason=length / content 空——见 deepseek-v4-flash dial-test 数据
+        // (max_tokens=600 → content="" 全被 reasoning 吃光)。8192 给 reasoning 留 4K
+        // 仍有 4K 给 JSON content，足够覆盖大多数 review。
         let request = LlmRequest {
             model: self.model.clone(),
             system: Some(system_prompt.to_string()),
@@ -289,7 +299,8 @@ impl EvaluatorAgent {
                 cache_control: None,
             }],
             tools: vec![],
-            max_tokens: 4096,
+            max_tokens: 8192,
+            provider_extras: None,
         };
 
         // First attempt
@@ -306,8 +317,62 @@ impl EvaluatorAgent {
             .context("Evaluator: LLM output parse failed after retry")
     }
 
+    /// **改流式 (Single-Agent Uplift, follow-up of f5866369 fix)**：原先用
+    /// `provider.chat()` 走非流式 + scheduler 30s wall-clock timeout，对
+    /// `deepseek-v4-pro`（reasoning model，先 thinking 再输出）+ 33KB 输入 + 4KB
+    /// JSON 输出的负载根本不够 —— BT-05 timeout 在生产稳定触发（dd68c400 案例）。
+    ///
+    /// 现在走 `stream_chat_with_idle_guard`：
+    /// - **idle 阈值 120s**：reasoning 阶段 LLM 可能很久不吐字节，给充裕预算；
+    ///   reseller 真挂掉时仍按 chunk 间隔精准杀。
+    /// - **不向前端转发** chunk：evaluator 是后台 review，UI 不需要看到流；
+    ///   downstream_rx 在本地任务里 drain。但 idle_guard 仍受益于流式语义
+    ///   ——chunked partial fallback 自动接住 reseller 的早断（见
+    ///   `openai_compat::stream_chat` SSE 协议适配段）。
+    /// - **整体 timeout 由 caller 控制**：scheduler.rs 的 wall-clock 改成可配置
+    ///   默认 600s（10 min），不再写死 30s。
     async fn try_parse_llm_response(&self, request: &LlmRequest) -> Result<EvaluationOutput> {
-        let response = self.provider.chat(request).await?;
+        // capacity=64：单步 review 字节数级别，但 chunk 相对小（reasoning 触发频繁
+        // 短 delta），64 够用且不至于因 backpressure 影响生产端。
+        let (tx, mut rx) = mpsc::channel::<StreamChunk>(64);
+
+        // 后台 drain，避免发送侧 backpressure。chunks 内容已经在 LlmResponse 里聚合
+        // 完整版本，这里 drain 仅为不阻塞流。
+        let drain_handle = tokio::spawn(async move {
+            while rx.recv().await.is_some() {
+                // 显式 drop chunk，让 mpsc 不积压
+            }
+        });
+
+        let response = match stream_chat_with_idle_guard(
+            self.provider.clone(),
+            request.clone(),
+            tx,
+            Duration::from_secs(120),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(StreamGuardError::IdleTimeout { idle_secs, .. }) => {
+                drain_handle.abort();
+                anyhow::bail!(
+                    "Evaluator: LLM stream idle for {idle_secs}s with no further chunks (\
+                     reseller stalled or reasoning loop too long)"
+                );
+            }
+            Err(StreamGuardError::Cancelled) => {
+                drain_handle.abort();
+                anyhow::bail!("Evaluator: LLM stream cancelled");
+            }
+            Err(e) => {
+                drain_handle.abort();
+                return Err(anyhow::anyhow!(e.user_message_zh()))
+                    .context("Evaluator: stream_chat failed");
+            }
+        };
+
+        // drain 任务正常情况下会因 tx drop 自动退出；但保险起见 await 完成。
+        let _ = drain_handle.await;
 
         let text = response
             .content

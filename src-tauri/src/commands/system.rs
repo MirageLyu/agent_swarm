@@ -148,6 +148,61 @@ pub fn open_in_terminal(path: String) -> Result<(), String> {
     }
 }
 
+/// 打开日志目录（系统 Finder/Explorer）。
+///
+/// 调试场景核心入口：用户报告"agent 卡住"时，让他们一键打开日志文件夹，
+/// 把最新一份 `miragenty.log.YYYY-MM-DD` 文件发给我们就能直接定位。
+///
+/// 路径与 `lib.rs::init_logging` 单源对齐：`<app_data_dir>/logs/`。
+#[tauri::command]
+pub fn open_log_directory(app: tauri::AppHandle) -> Result<String, String> {
+    let logs_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data dir: {e}"))?
+        .join("logs");
+
+    // 目录可能还没创建（init_logging fallback 到 stdout-only 时）；这里用 create_dir_all
+    // 兜底确保打开时不为空，用户体验一致。
+    if !logs_dir.exists() {
+        std::fs::create_dir_all(&logs_dir)
+            .map_err(|e| format!("Failed to create logs dir: {e}"))?;
+    }
+
+    let p_str = logs_dir.to_string_lossy().to_string();
+    let _ = open_path_in_system_explorer(&p_str)?;
+    Ok(p_str)
+}
+
+/// 内部 helper：跨平台打开目录到系统文件管理器。
+/// open_in_finder 和 open_log_directory 都用，避免重复 cfg 块。
+fn open_path_in_system_explorer(path: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Failed to open Finder: {e}"))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Failed to open file manager: {e}"))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Failed to open Explorer: {e}"))
+    }
+}
+
 #[tauri::command]
 pub fn open_in_finder(path: String) -> Result<(), String> {
     let p = validate_path(&path)?;

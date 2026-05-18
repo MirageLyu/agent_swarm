@@ -74,6 +74,15 @@ export interface Agent {
   /// FM-15 follow-up: shell_exec 实时输出，独立于 LLM streamBuffer。
   /// 由 `agent-tool-stream` 事件驱动，进入终态时清空，避免下次重启混淆。
   shellBuffer: string;
+  /// Reasoning 模型 thinking 阶段的累计输出。前端不展开渲染（thinking 内容
+  /// 通常很长且不直接给用户看），只用它的"是否非空 + 起始时间 + 字符长度"
+  /// 渲染一个轻量的"💭 思考中... (12s, 1.2k chars)" 占位卡，
+  /// 让用户在推理模型沉默期间看到"agent 还在工作"。
+  /// 收到第一个 text_delta 时清空 + 切回主 streamBuffer。
+  reasoningBuffer: string;
+  /// Reasoning 起始毫秒时间戳（performance.now() / Date.now() 任意一致即可）。
+  /// 收到第一个 reasoning_delta 时设置，收到 text_delta / 终态时重置 null。
+  reasoningStartedAt: number | null;
   /// Single-Agent Uplift Phase 1.2: agent 自维护的 todo 列表。
   /// 由后端 todo_update 事件 / list_agent_todos 命令同步刷新。
   /// 没用过 TodoWriteTool 的 agent 始终为 []，前端用空数组表示"不显示 panel"。
@@ -95,6 +104,11 @@ interface AgentState {
   viewMode: WorkspaceViewMode;
   filterMissionId: string | null;
   sidebarAgents: SidebarAgent[];
+  /// Single-Agent Uplift B1: 已完成（已答 / 超时 / 被取消）的 ask_user_question session 集合。
+  /// 由 system_hint 事件中 meta.kind="ask_user_question_resolved" 驱动添加；
+  /// AskUserQuestionLine 据此把卡片切换到只读"resolved"态。
+  /// 用 Set 而不是 boolean per-event，因为同一 agent 可能跨 session 多次问问题。
+  resolvedQuestionSessions: Set<string>;
 
   addAgent: (agent: Agent) => void;
   updateAgent: (id: string, updates: Partial<Agent>) => void;
@@ -102,6 +116,10 @@ interface AgentState {
   appendEvent: (agentId: string, event: AgentEvent) => void;
   appendStream: (agentId: string, content: string) => void;
   clearStream: (agentId: string) => void;
+  /// 累积 reasoning_delta；首次调用时同时记录 reasoningStartedAt。
+  appendReasoning: (agentId: string, content: string) => void;
+  /// 清空 reasoning（收到首 text_delta 时 / 进入终态时调）。
+  clearReasoning: (agentId: string) => void;
   appendShell: (agentId: string, content: string) => void;
   clearShell: (agentId: string) => void;
   setActiveAgent: (id: string | null) => void;
@@ -114,6 +132,8 @@ interface AgentState {
   /// 调用方：① WorkspaceView 启动时 list_agent_todos hydrate；
   /// ② 实时收到 `todo_update` 事件后 setAgentTodos(meta.todos)。
   setAgentTodos: (agentId: string, todos: AgentTodo[]) => void;
+  /// Single-Agent Uplift B1: 标记某个 ask_user_question session 已结算。
+  markQuestionResolved: (sessionId: string) => void;
 }
 
 export const useAgentStore = create<AgentState>((set) => ({
@@ -122,6 +142,7 @@ export const useAgentStore = create<AgentState>((set) => ({
   viewMode: "list",
   filterMissionId: null,
   sidebarAgents: [],
+  resolvedQuestionSessions: new Set<string>(),
 
   addAgent: (agent) =>
     set((s) => ({ agents: { ...s.agents, [agent.id]: agent } })),
@@ -172,6 +193,35 @@ export const useAgentStore = create<AgentState>((set) => ({
         agents: {
           ...s.agents,
           [agentId]: { ...agent, streamBuffer: "" },
+        },
+      };
+    }),
+
+  appendReasoning: (agentId, content) =>
+    set((s) => {
+      const agent = s.agents[agentId];
+      if (!agent) return s;
+      return {
+        agents: {
+          ...s.agents,
+          [agentId]: {
+            ...agent,
+            reasoningBuffer: agent.reasoningBuffer + content,
+            reasoningStartedAt: agent.reasoningStartedAt ?? Date.now(),
+          },
+        },
+      };
+    }),
+
+  clearReasoning: (agentId) =>
+    set((s) => {
+      const agent = s.agents[agentId];
+      if (!agent) return s;
+      if (!agent.reasoningBuffer && agent.reasoningStartedAt === null) return s;
+      return {
+        agents: {
+          ...s.agents,
+          [agentId]: { ...agent, reasoningBuffer: "", reasoningStartedAt: null },
         },
       };
     }),
@@ -228,6 +278,14 @@ export const useAgentStore = create<AgentState>((set) => ({
       };
     }),
 
+  markQuestionResolved: (sessionId) =>
+    set((s) => {
+      if (s.resolvedQuestionSessions.has(sessionId)) return s;
+      const next = new Set(s.resolvedQuestionSessions);
+      next.add(sessionId);
+      return { resolvedQuestionSessions: next };
+    }),
+
   hydrateEvents: (agentId, events) =>
     set((s) => {
       const agent = s.agents[agentId];
@@ -262,12 +320,19 @@ export const useAgentStore = create<AgentState>((set) => ({
             costUsd: Math.max(a.costUsd, existing.costUsd),
             streamBuffer: isTerminal ? "" : existing.streamBuffer,
             shellBuffer: isTerminal ? "" : existing.shellBuffer,
+            reasoningBuffer: isTerminal ? "" : existing.reasoningBuffer,
+            reasoningStartedAt: isTerminal ? null : existing.reasoningStartedAt,
             // todos 走 list_agent_todos / todo_update 单独 hydrate；这里保留 existing
             // 避免闪烁；新 agent 初始为空数组（来自上面构造）。
             todos: existing.todos,
           };
         } else {
-          merged[a.id] = { ...a, todos: a.todos ?? [] };
+          merged[a.id] = {
+            ...a,
+            todos: a.todos ?? [],
+            reasoningBuffer: a.reasoningBuffer ?? "",
+            reasoningStartedAt: a.reasoningStartedAt ?? null,
+          };
         }
       }
       return { agents: merged };

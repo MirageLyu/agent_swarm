@@ -56,6 +56,24 @@ export function DiagnosticsSection() {
     }
   };
 
+  const handleOpenLogs = async () => {
+    setMessage(null);
+    setError(null);
+    try {
+      const path = await commands.openLogDirectory();
+      setMessage(
+        t("openLogDirectorySuccess", { defaultValue: "Opened logs folder: {{path}}", path }),
+      );
+    } catch (e) {
+      setError(
+        t("openLogDirectoryError", {
+          defaultValue: "Failed to open logs folder: {{message}}",
+          message: e instanceof Error ? e.message : String(e),
+        }),
+      );
+    }
+  };
+
   return (
     <div className={styles.section}>
       <h3 className={styles.title}>{t("diagnosticsHeader")}</h3>
@@ -63,6 +81,11 @@ export function DiagnosticsSection() {
       <div className={styles.row}>
         <Button variant="secondary" onClick={handleExport} disabled={busy}>
           {busy ? t("exporting") : t("exportDiagnostics")}
+        </Button>
+        {/* 一键打开日志目录——用户报"agent 卡住"时让他们把最新 miragenty.log.* 文件
+            发回来即可定位。比 Export 包更轻量，适合在线调试场景。 */}
+        <Button variant="secondary" onClick={handleOpenLogs}>
+          {t("openLogDirectory", { defaultValue: "Open log folder" })}
         </Button>
       </div>
       {message && <p className={styles.success}>{message}</p>}

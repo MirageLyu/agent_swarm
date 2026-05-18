@@ -457,6 +457,7 @@ impl PlannerEngine {
                 messages: messages.clone(),
                 tools: tools.clone(),
                 max_tokens: PLANNER_MAX_OUTPUT_TOKENS,
+                provider_extras: None,
             };
 
             let response = self.call_llm_streaming(request).await?;

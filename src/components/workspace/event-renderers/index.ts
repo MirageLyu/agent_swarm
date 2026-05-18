@@ -20,3 +20,8 @@ export { SystemHintLine } from "./SystemHintLine";
 export { GuardrailLine } from "./GuardrailLine";
 export { ToolProgressLine } from "./ToolProgressLine";
 export { NoteAppliedLine } from "./NoteAppliedLine";
+export { CollapsedReadGroup } from "./CollapsedReadGroup";
+export { groupReadOnlyEvents } from "./groupReadOnlyEvents";
+export { ToolSummaryLine } from "./ToolSummaryLine";
+export { AskUserQuestionLine } from "./AskUserQuestionLine";
+export type { EventGroup } from "./groupReadOnlyEvents";

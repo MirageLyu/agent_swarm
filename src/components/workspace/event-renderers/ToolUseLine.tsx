@@ -27,6 +27,12 @@ function summarizeInput(tool: string, input: unknown): string {
   if (typeof input !== "object") return String(input);
   const obj = input as Record<string, unknown>;
 
+  // Sentinel：后端检测到 LLM 漏写 / 非法 JSON 时塞这两个 key。
+  // 前端给个明显标记，让用户一眼看到"模型这里偷工减料了"。
+  if (typeof obj.__arg_parse_error__ === "string") {
+    return `⚠ no/invalid arguments — ${obj.__arg_parse_error__}`;
+  }
+
   if (typeof obj.path === "string") return obj.path;
   if (typeof obj.command === "string") {
     const firstLine = obj.command.split("\n", 1)[0] ?? obj.command;

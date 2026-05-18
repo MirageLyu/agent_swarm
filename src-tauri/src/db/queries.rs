@@ -359,6 +359,28 @@ pub fn count_running_agents_for_mission(
     Ok(count)
 }
 
+/// 列出指定 mission 下所有 running agents 的 ID。
+///
+/// 用于 `stop_mission_execution`：scheduler 暂停 mission 调度循环后，必须把已
+/// spawn 的 agent task 主动 cancel 掉——否则它们会跑完当前 step（含 LLM stream，
+/// 最坏 180s）才检查 cancel_token，造成"点了停止毫无反应"的体验。
+pub fn list_running_agent_ids_for_mission(
+    conn: &Connection,
+    mission_id: &str,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.id FROM agents a
+         JOIN tasks t ON t.id = a.task_id
+         WHERE a.status = 'running' AND t.mission_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![mission_id], |row| row.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 /// FM-15 Phase 2 (FR-12): 读取 mission 已缓存的主分支名（NULL 表示未探测）。
 pub fn get_mission_main_branch(
     conn: &Connection,

@@ -7,6 +7,8 @@ import { SystemHintLine } from "./SystemHintLine";
 import { GuardrailLine } from "./GuardrailLine";
 import { ToolProgressLine } from "./ToolProgressLine";
 import { NoteAppliedLine } from "./NoteAppliedLine";
+import { AskUserQuestionLine } from "./AskUserQuestionLine";
+import { ToolSummaryLine } from "./ToolSummaryLine";
 
 interface EventLineProps {
   event: AgentEvent;
@@ -50,8 +52,18 @@ export const EventLine = memo(function EventLine({
         return <ToolResultLine event={event} />;
       }
       break;
-    case "system_hint":
+    case "system_hint": {
+      // B1: ask_user_question 卡片在 system_hint 之上分流。
+      // resolved 事件不渲染卡片（仅作为 store 副作用更新），返回 null。
+      const meta = event.meta as { kind?: string } | null | undefined;
+      if (meta && meta.kind === "ask_user_question") {
+        return <AskUserQuestionLine event={event} />;
+      }
+      if (meta && meta.kind === "ask_user_question_resolved") {
+        return null;
+      }
       return <SystemHintLine event={event} />;
+    }
     case "guardrail_pass":
     case "guardrail_fail":
     case "guardrail_summary":
@@ -60,8 +72,9 @@ export const EventLine = memo(function EventLine({
       return <ToolProgressLine event={event} />;
     case "note_applied":
       return <NoteAppliedLine event={event} />;
-    case "compact":
     case "tool_summary":
+      return <ToolSummaryLine event={event} />;
+    case "compact":
     case "todo_update":
     case "review":
       // Phase 1.2 / 2.x 接管。当前先走 plain 行展示，避免编译期 exhaustive 错。

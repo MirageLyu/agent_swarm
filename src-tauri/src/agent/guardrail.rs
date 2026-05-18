@@ -221,6 +221,7 @@ async fn check_llm_judge(
         }],
         tools: Vec::new(),
         max_tokens: 512,
+        provider_extras: None,
     };
 
     let resp = provider

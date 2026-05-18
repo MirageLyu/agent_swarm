@@ -712,6 +712,7 @@ async fn preflight_with_continuation(
                     messages: compact_msgs,
                     tools: vec![],
                     max_tokens: 1500,
+                    provider_extras: None,
                 };
 
                 // Compaction 是非流式 chat（要等完整 summary 一次性返回，没法用 idle watchdog），
@@ -1915,6 +1916,7 @@ mod reasoning_round_trip_tests {
             messages: history,
             tools: vec![],
             max_tokens: 100,
+            provider_extras: None,
         };
         let oai_messages = provider.convert_messages(&req);
 
@@ -1959,6 +1961,7 @@ mod reasoning_round_trip_tests {
             messages: history,
             tools: vec![],
             max_tokens: 100,
+            provider_extras: None,
         };
         let oai_messages = provider.convert_messages(&req);
         let assistant = oai_messages.iter().find(|m| m["role"] == "assistant").unwrap();

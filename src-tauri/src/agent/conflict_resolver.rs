@@ -97,6 +97,7 @@ impl LlmConflictResolver for LlmProviderResolver {
             }],
             tools: Vec::new(),
             max_tokens: self.max_tokens,
+            provider_extras: None,
         };
 
         let resp = self

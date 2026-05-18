@@ -37,6 +37,27 @@ pub struct AppConfig {
     #[serde(default = "default_agent_timeout_seconds")]
     pub agent_timeout_seconds: u64,
 
+    /// 主 LLM 请求 `max_tokens`（每步 output 上限）。
+    ///
+    /// 老版本写死 4096，对一次性生成大段 markdown / 多文件方案的 agent 步骤来说不够——
+    /// LLM 会在 tool_use 的 JSON 字符串里被截断，stream 给到我们的 arguments 是残缺 JSON，
+    /// 解析失败 → tool 调用失败 → LLM 重试同样大 output → 循环 → 看起来像"卡住"。
+    /// 16384 在 99% 场景够用且绝大多数 provider/model（Claude / DeepSeek-V4 / Qwen3）支持。
+    /// 用户在 settings 可改：DeepSeek-V4 上限 384K，Claude Sonnet 64K，本地模型按部署调。
+    #[serde(default = "default_agent_max_output_tokens")]
+    pub agent_max_output_tokens: u32,
+
+    /// LLM stream "建立连接前 / 收到首 chunk 前" 的网络错误重试次数。
+    /// 0 = 不重试（旧行为）。5 次（指数退避 1s/2s/4s/8s/16s 累计 31s）足够扛过
+    /// 地铁/电梯/WiFi 切流量这类持续 30s 内的网络黑洞。
+    /// 注意：一旦收到首个 chunk 还断网，**不重试**——重试会让用户看到重复内容；
+    /// 走 stream_chat 内部 partial-fallback（保留已收到内容当成功结束）。
+    #[serde(default = "default_stream_network_retries")]
+    pub stream_network_retries: u32,
+    /// 网络重试的首次退避毫秒数。指数退避：N、2N、4N、8N...
+    #[serde(default = "default_stream_initial_retry_delay_ms")]
+    pub stream_initial_retry_delay_ms: u64,
+
     // FM-15 follow-up: 多层超时看门狗。
     /// LLM 流式响应"相邻 chunk 静默"上限，秒。0 = 不启用 idle 检测，仅靠全局 timeout。
     /// Provider 启动时一次性读取，改完需要重启 app（或下一次任务）才生效。
@@ -52,6 +73,37 @@ pub struct AppConfig {
     // 后端不直接消费这个值（所有日志/error code 始终英文），仅作为前端偏好的真源（source of truth）。
     #[serde(default = "default_language")]
     pub language: String,
+
+    // ---- Single-Agent Uplift B2: tool_summary 小模型配置 ----
+    // 当 tool_result 字符数超过阈值时，引擎调一个独立的小模型（默认 deepseek-v4-flash）
+    // 把内容压成 ≤500 字结构化摘要塞回 messages，省 context。
+    // 缺省/留空 = 关闭摘要，回退到旧版"截尾保留 1KB"行为，安全等价。
+    /// 摘要小模型名。空字符串视为关闭。Defaults to deepseek-v4-flash（2026-04 发布）。
+    #[serde(default = "default_tool_summary_model")]
+    pub tool_summary_model: String,
+    /// 摘要小模型的 OpenAI-compat base URL。和 default base_url 解耦，
+    /// 因为多数用户的主模型走 dashscope，但 deepseek-v4-flash 在 deepseek 自家 endpoint 才有。
+    #[serde(default = "default_tool_summary_base_url")]
+    pub tool_summary_base_url: String,
+    /// 摘要 provider 类型。"openai_compat" / "anthropic"。当前所有 deepseek 走前者。
+    #[serde(default = "default_tool_summary_provider")]
+    pub tool_summary_provider: String,
+    /// 触发摘要的字符阈值。低于此值直接放行，高于此值才走摘要 → truncate fallback。
+    #[serde(default = "default_tool_summary_threshold_chars")]
+    pub tool_summary_threshold_chars: u32,
+
+    /// **Evaluator agent 的 wall-clock 超时**（秒）。
+    ///
+    /// 历史上这条值写死在 scheduler.rs 的 `spawn_evaluator` 里 = 30s，
+    /// 对 reasoning 模型（`deepseek-v4-pro` / `glm-5` 等）+ 大 diff 输入根本不够：
+    /// dd68c400 案例里 33KB 设计文档 + 17 条 acceptance criteria 的 review，
+    /// 30s 时模型还没开始吐 final content，被强杀。
+    ///
+    /// 改成可配置后默认 **600s（10 min）**——和主 agent 的 step idle watchdog
+    /// 配合 (`stream_chat_with_idle_guard` 默认 120s idle)，正常 review 1-3 分钟
+    /// 跑完，wall-clock 仅作为兜底防御 LLM 死循环。
+    #[serde(default = "default_evaluator_timeout_seconds")]
+    pub evaluator_timeout_seconds: u64,
 }
 
 /// FM-14: 审批策略；持久化到 config.json，前端在 Settings 里编辑。
@@ -92,6 +144,9 @@ fn default_planner_max_fetches() -> u32 { 10 }
 fn default_max_agent_steps() -> u32 { 80 }
 fn default_agent_timeout_seconds() -> u64 { 1800 }
 fn default_agent_step_idle_seconds() -> u64 { 60 }
+fn default_agent_max_output_tokens() -> u32 { 16384 }
+fn default_stream_network_retries() -> u32 { 5 }
+fn default_stream_initial_retry_delay_ms() -> u64 { 1000 }
 
 fn default_approval_timeout_seconds() -> u32 { 600 }
 fn default_protected_paths() -> Vec<String> {
@@ -125,6 +180,36 @@ fn default_chat_commit_soft_lines() -> u32 { 10 }
 
 fn default_language() -> String { "en-US".to_string() }
 
+/// 默认 tool_summary 小模型：`deepseek-v4-flash`。
+///
+/// # 与 reasoning 模式的关系
+///
+/// V4 系列是 reasoning 模型，**裸调用** max_tokens=600 时 reasoning_tokens 会
+/// 吞光所有预算，`content` 永远空。但 [`crate::llm::deepseek_adapter`] 已经
+/// 在 [`crate::agent::tool_summarizer::ToolSummarizer`] 内部自动注入
+/// `thinking: {"type": "disabled"}`——dial-test 验证（2026-05-18）：
+///
+/// | 模型 | 时延 | content | 备注 |
+/// |---|---|---|---|
+/// | v4-flash 裸 | ~7s | 含 reasoning 拖累 | 不可用 |
+/// | **v4-flash + thinking:disabled** | **1.5s** | 详细 | 当前默认 |
+/// | v3-2-251201 | 2.3s | 略简 | 备选 |
+///
+/// 即 v4-flash 在适配下**比 v3-2 快 35%、内容更详细**（更易抓到关键调用名/路由）。
+///
+/// 用户在 settings 里可以换成任何非 reasoning 小模型；reseller 切换或
+/// 模型升级出问题时，[`crate::commands::test_tool_summarizer_connection`]
+/// 命令可以一键 dial-test 看 health_check 结果。
+fn default_tool_summary_model() -> String { "deepseek-v4-flash".to_string() }
+/// 默认 base_url 跟随主 LLM 的 reseller（默认 bitfun）。原先写死
+/// `api.deepseek.com` 配 reseller key 必然 401（生产 ****zvdf 案例）。
+/// 用户实际部署里"主模型 reseller + summary 走官方"是少数派，让默认值
+/// 跟主 base_url 一致更不易出错。
+fn default_tool_summary_base_url() -> String { "https://api.openbitfun.com/v1".to_string() }
+fn default_tool_summary_provider() -> String { "openai_compat".to_string() }
+fn default_tool_summary_threshold_chars() -> u32 { 8 * 1024 }
+fn default_evaluator_timeout_seconds() -> u64 { 600 }
+
 impl Default for ApprovalPolicy {
     fn default() -> Self {
         Self {
@@ -152,8 +237,16 @@ impl Default for AppConfig {
             max_agent_steps: default_max_agent_steps(),
             agent_timeout_seconds: default_agent_timeout_seconds(),
             agent_step_idle_seconds: default_agent_step_idle_seconds(),
+            agent_max_output_tokens: default_agent_max_output_tokens(),
+            stream_network_retries: default_stream_network_retries(),
+            stream_initial_retry_delay_ms: default_stream_initial_retry_delay_ms(),
             approval_policy: ApprovalPolicy::default(),
             language: default_language(),
+            tool_summary_model: default_tool_summary_model(),
+            tool_summary_base_url: default_tool_summary_base_url(),
+            tool_summary_provider: default_tool_summary_provider(),
+            tool_summary_threshold_chars: default_tool_summary_threshold_chars(),
+            evaluator_timeout_seconds: default_evaluator_timeout_seconds(),
         }
     }
 }
@@ -442,6 +535,7 @@ pub async fn test_llm_connection(
         }],
         tools: vec![],
         max_tokens: 16,
+        provider_extras: None,
     };
 
     let started = Instant::now();
@@ -474,4 +568,82 @@ pub async fn test_llm_connection(
         sample_text,
         usage: response.usage,
     })
+}
+
+// ---- tool_summary 配置 dial-test ----
+//
+// 用户改完 tool_summary_model / tool_summary_base_url 后想"先验证再保存"。
+// tool_summary 比主 LLM 更挑剔——必须用**非 reasoning** 小模型，否则
+// max_tokens=600 会被 reasoning_tokens 全吞掉，content 永远空。
+// 主 LLM 用 reasoning model 没问题，但 tool_summary 不行。
+//
+// 这条命令的特殊价值：能区分"网络/认证错"与"reasoning model 误用"。
+
+#[derive(Debug, Deserialize)]
+pub struct TestToolSummarizerRequest {
+    /// 模型名。缺省回退到当前 config.tool_summary_model。
+    pub model: Option<String>,
+    /// base URL。缺省回退到当前 config.tool_summary_base_url。
+    pub base_url: Option<String>,
+    /// 用于查找 api_key 的 provider 名。缺省回退到 config.tool_summary_provider。
+    /// API key 永远从已保存的 config 读，不在 IPC 上传敏感串。
+    pub provider: Option<String>,
+}
+
+#[tauri::command]
+pub async fn test_tool_summarizer_connection(
+    app: tauri::AppHandle,
+    request: TestToolSummarizerRequest,
+) -> Result<crate::agent::tool_summarizer::HealthOutcome, String> {
+    let mgr = app.state::<ConfigManager>();
+    let snapshot = mgr.get_config_snapshot();
+
+    let model = request
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| snapshot.tool_summary_model.clone());
+    let base_url = request
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| snapshot.tool_summary_base_url.clone());
+    let provider_name = request
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| snapshot.tool_summary_provider.clone());
+
+    if model.is_empty() {
+        return Err(IpcError::no_api_key(
+            serde_json::Value::String("tool_summary".to_string()),
+        )
+        .with_detail("tool_summary_model is empty — set a non-reasoning model first")
+        .to_string());
+    }
+
+    // API key fallback：保持和 agent.rs 启动 summarizer 时一致的查找链——
+    // 先按 provider 名找（典型 "openai_compat"），fallback "deepseek"，再 fallback "default"。
+    let api_key = mgr
+        .get_api_key(&provider_name)
+        .or_else(|| mgr.get_api_key("deepseek"))
+        .or_else(|| mgr.get_api_key("default"))
+        .ok_or_else(|| IpcError::no_api_key(provider_name.clone()).to_string())?;
+
+    let summarizer = crate::agent::tool_summarizer::ToolSummarizer::try_openai_compat(
+        api_key, base_url, model,
+    )
+    .ok_or_else(|| {
+        IpcError::no_api_key(serde_json::Value::String("tool_summary".to_string()))
+            .with_detail("ToolSummarizer construction failed (empty model or key)")
+            .to_string()
+    })?;
+
+    Ok(summarizer.health_check().await)
 }

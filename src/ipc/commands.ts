@@ -1032,6 +1032,10 @@ export const commands = {
   listAgentTodos: (agentId: string) =>
     invoke<AgentTodoRecord[]>("list_agent_todos", { agentId }),
 
+  // Single-Agent Uplift B1: ask_user_question 答复回传通道
+  submitUserQuestionAnswer: (sessionId: string, answers: Record<string, string[]>) =>
+    invoke<void>("submit_user_question_answer", { sessionId, answers }),
+
   getMissionCostSummary: (missionId: string) =>
     invoke<MissionCostSummary>("get_mission_cost_summary", { missionId }),
 
@@ -1137,6 +1141,10 @@ export const commands = {
 
   openInFinder: (path: string) =>
     invoke<void>("open_in_finder", { path }),
+
+  /// 一键打开日志目录。返回值是被打开的目录绝对路径，调用方可用来 toast 提示。
+  /// 出现"agent 卡住"等问题时，让用户把最新的 miragenty.log.* 发回来即可定位。
+  openLogDirectory: () => invoke<string>("open_log_directory"),
 
   // FM-15 v2.2 P4-S5: Follow-up Chat
   listChatMessages: (missionId: string) =>

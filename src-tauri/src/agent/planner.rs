@@ -1420,6 +1420,7 @@ pub async fn preflight_chat(
         messages: history,
         tools,
         max_tokens: 4096,
+        provider_extras: None,
     };
 
     tracing::info!("Preflight: calling LLM (streaming) mode={mode} model={model}");
@@ -1433,6 +1434,7 @@ pub async fn preflight_chat(
         messages: request.messages.clone(),
         tools: request.tools.clone(),
         max_tokens: request.max_tokens,
+        provider_extras: None,
     };
 
     // 把 stream_chat 包进通用 idle 看门狗（llm::stream_guard）；
