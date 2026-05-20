@@ -24,29 +24,40 @@ P2-1 是 7 篇里**最重**的一条（~1370 行 + 5 个 commit + 横跨 trait/e
 
 测试结果：541 全过（+12 自 P1-2 Phase A 完成时的 529）。**0 行为变化**——`engine.rs` 还未接线，registry 永远空。
 
-### Phase B（独立 PR）—— Engine 接线 + Guardrail 包装
+### Phase B（已完成 ✅）—— Engine 接线 + Compound 测试
 
-剩余工作：
-1. `engine.rs` 加 `hook_registry: HookRegistry` 字段
-2. 7 处 phase 调用点（PreLlmCall / PostSampling / PostToolUse / PreCompact / PostCompact / Stop / TaskCompleted）插入 `registry.execute_phase`
-3. `PhaseResult::Injected` → push 消息 + emit `hook_inject` 事件
-4. `PhaseResult::Prevented { terminal: true }` → 立即 fail；`terminal: false` → 结束当前 step
-5. **`agent/hooks/builtin.rs`** 新建：`GuardrailHook` 把现有 `run_guardrails` 包装成 Stop hook（行为对等迁移）
-6. 3 个 integration test：hook inject 让 agent 继续 / prevent terminal 直接 fail / GuardrailHook 行为对等
+落地内容：
+1. **`engine.rs`** 加 `hook_registry: Arc<HookRegistry>` 字段 + `with_hooks()` builder
+2. **5 处 phase 调用点**接线：PreLlmCall / PostSampling / PreCompact / PostCompact / PostToolUse / Stop / TaskCompleted（实际写了 7 处覆盖 6 个 phase，PreCompact + PostCompact 围绕 microcompact 联动）
+3. **`dispatch_hook_phase` helper**：空 registry fast path（0 行为变化）；`Injected` 按注册顺序聚合成单条 user message 注入 + emit `hook_inject`；`Prevented` emit `hook_prevented` 后返回 `HookFatal::{Terminal,StepAborted}`
+4. **`build_hook_context` helper**：1KB 截前 last_assistant_text + 5 项 recent_tool_uses + DB 反查 mission_id
+5. **`HookFatal` enum**：Terminal → `mark_task_failed_with_reason` 后 `Ok(AgentStatus::Failed)`；StepAborted → 跳本 step 继续（TaskCompleted 上 StepAborted 视作 fail 避免 completed-but-not-finalized）
+6. **Migration 028**：`agent_events.kind` CHECK 加 `hook_executed` / `hook_inject` / `hook_prevented`；前端 `AgentEventKind` 同步
+7. **Compound integration tests**（hooks/mod.rs）：inject-then-prevent 短路语义 + multi-phase hook 行为 + Outcome JSON roundtrip + Phase serde 稳定性（4 个新增）
 
-风险：engine.rs 主循环本 sprint 已经被 P0-1/P0-3/P1-2/P1-3 改动多次，再加 7 处 phase 调用点会让 review 表面更大；隔离 Phase B 降低风险。
+测试结果：541 → 562 全过。默认空 registry 时 byte-identical 行为。
 
-### Phase C（更晚）—— Command Hook + Config + UI
+GuardrailHook 包装暂未做：现有 task_complete → guardrail 路径不动（行为对等），未来用户需要"Stop hook 跑 npm test"时再做包装迁移。
 
-剩余工作：
-1. **`agent/hooks/command.rs`**：`CommandHook` (`tokio::process::Command` + 60s timeout + stdin JSON / stdout HookOutcome 解析)
-2. **`agent/hooks/config.rs`**：`.miragenty/hooks.json` workspace 加载 + `~/Library/Application Support/com.miragenty.app/hooks.json` user-global 加载
-3. **`db/migrations.rs`** migration 28：`agent_events.kind` 加 `hook_executed` / `hook_inject` / `hook_prevented`
-4. **`commands/config.rs`** + AppConfig：`allow_command_hooks: bool` 默认 false
-5. **`src/views/SettingsView.tsx`**：Toggle + Workspace hooks review modal
-6. **`src/components/workspace/EventList.tsx`** + i18n：`hook_*` 事件渲染
+### Phase C（已完成 ✅）—— Command Hook + Config + UI
 
-为什么拆 C：Command hook 涉及**用户脚本执行的安全模型**（RCE 风险），需要独立设计 review + 安全 audit，不应混进 P2-1 核心 trait PR。
+落地内容：
+1. **`agent/hooks/command.rs`**：`CommandHook` impl AgentHook —— `sh -c <command>` + 60s timeout + stdin/stdout JSON 协议 + matcher 子串匹配。10 个单测覆盖 Pass / Inject / Prevent stdout / 非 0 exit 转 advisory inject / timeout / malformed JSON 退化为 Pass
+2. **`agent/hooks/config.rs`**：`load_workspace_hooks` 从 `workspace/.miragenty/hooks.json` 加载——`allow_command_hooks=false` 立即 short-circuit 不读文件；schema 校验（未知 phase / 空 command 整条丢）+ 7 个单测
+3. **`AppConfig.allow_command_hooks: bool`** 默认 false + ConfigResponse / UpdateConfigRequest 字段 + `update_config` 写入时 `tracing::info!` 记录开关变更（audit log）
+4. **`scheduler.rs`** 在 spawn engine 前调用 loader，仅在 `hook_count > 0` 时 `with_hooks`
+5. **`SettingsView.tsx` Developer 区块**：allow_command_hooks segmented control + i18n（en/zh）含 RCE 警告说明 + 即点即保存（无 dirty 二段式，避免幻觉成功）
+6. **前端 IPC 类型** `ConfigResponse.allow_command_hooks` / `UpdateConfigRequest.allow_command_hooks` 同步
+
+测试结果：562 全过（17 个新增：10 command + 7 config）。
+
+**安全模型**（必读，见 `hooks/config.rs` 模块文档）：
+- 默认禁用 → 完全等同 Phase B 行为
+- 仅读 workspace 内 hooks.json（不接受 user-global 路径，限制爆炸半径到单 repo）
+- JSON 解析失败 / 命令非 0 退出 → 退化为 Pass / advisory inject，**不让一个 hook 错误让 agent fail**
+- 60s timeout 兜底防恶意阻塞
+
+未做（留作未来 PR）：Workspace hooks review modal（mission 启动前列出已加载 hook 让用户二次确认）。当前依赖 Settings 的全局 toggle + workspace 范围限制 + 用户对自己 repo 内容的审计。
 
 ---
 

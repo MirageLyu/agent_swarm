@@ -132,6 +132,23 @@ pub struct AppConfig {
     ///   一次性 5xx"场景，但成本是每次都要重试一次主模型。
     #[serde(default = "default_agent_fallback_sticky")]
     pub agent_fallback_sticky: bool,
+
+    // ---- Single-Agent Uplift P2-1 Phase C: Command Hook 启用开关 ----
+    /// 是否允许加载 `<workspace>/.miragenty/hooks.json` 中定义的 CommandHook。
+    ///
+    /// **默认 false**——CommandHook 让 agent 经 `sh -c` 执行任意命令，是 RCE 入口。
+    /// 用户必须 explicit 在 Settings → Developer 打开此开关。
+    ///
+    /// 开启后仍受三层防护：
+    /// 1. 只读 workspace 内 `.miragenty/hooks.json`（不接受 user-global 路径，
+    ///    避免恶意 mission 指令引导改全局配置）
+    /// 2. 每个 command hook 60s timeout
+    /// 3. stdout JSON 解析失败 / 非 0 退出 → 退化为 InjectMessage(warning)，
+    ///    **不**让一个 hook 错误导致整 agent fail
+    ///
+    /// 详见 [`crate::agent::hooks::config`] 模块文档。
+    #[serde(default)]
+    pub allow_command_hooks: bool,
 }
 
 /// FM-14: 审批策略；持久化到 config.json，前端在 Settings 里编辑。
@@ -287,6 +304,7 @@ impl Default for AppConfig {
             agent_output_token_budget: default_agent_output_token_budget(),
             agent_fallback_model: String::new(),
             agent_fallback_sticky: default_agent_fallback_sticky(),
+            allow_command_hooks: false,
         }
     }
 }
@@ -345,6 +363,8 @@ pub struct ConfigResponse {
     pub agent_output_token_budget: u64,
     pub agent_fallback_model: String,
     pub agent_fallback_sticky: bool,
+    // Single-Agent Uplift P2-1 Phase C
+    pub allow_command_hooks: bool,
 }
 
 #[tauri::command]
@@ -366,6 +386,7 @@ pub fn get_config(app: tauri::AppHandle) -> Result<ConfigResponse, String> {
         agent_output_token_budget: config.agent_output_token_budget,
         agent_fallback_model: config.agent_fallback_model.clone(),
         agent_fallback_sticky: config.agent_fallback_sticky,
+        allow_command_hooks: config.allow_command_hooks,
     })
 }
 
@@ -400,6 +421,8 @@ pub struct UpdateConfigRequest {
     pub agent_output_token_budget: Option<u64>,
     pub agent_fallback_model: Option<String>,
     pub agent_fallback_sticky: Option<bool>,
+    // Single-Agent Uplift P2-1 Phase C
+    pub allow_command_hooks: Option<bool>,
 }
 
 #[tauri::command]
@@ -444,6 +467,16 @@ pub fn update_config(
         }
         if let Some(v) = request.agent_fallback_sticky {
             config.agent_fallback_sticky = v;
+        }
+        if let Some(v) = request.allow_command_hooks {
+            // 关键安全决策：用户必须 explicit set true 才启用。tracing 记录开关变更
+            // 让 audit log 有迹可循（哪个 mission 之前一刻被打开）。
+            tracing::info!(
+                allow_command_hooks_was = config.allow_command_hooks,
+                allow_command_hooks_now = v,
+                "AppConfig.allow_command_hooks toggled"
+            );
+            config.allow_command_hooks = v;
         }
         if let Some(lang) = request.language {
             // 仅接受白名单内的 BCP 47 tag，避免脏数据。

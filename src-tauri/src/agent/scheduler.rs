@@ -825,6 +825,27 @@ impl Scheduler {
                     }
                 }
             }
+            // P2-1 Phase C: 按 `allow_command_hooks` 加载 workspace 的
+            // `.miragenty/hooks.json`。flag 为 false 时 loader 立即返回空 outcome，
+            // **不读任何文件**——见 [`crate::agent::hooks::config`] 安全 doc。
+            let mut hook_registry = crate::agent::hooks::HookRegistry::new();
+            let outcome = crate::agent::hooks::config::load_workspace_hooks(
+                repo_path.as_path(),
+                cfg.allow_command_hooks,
+                &mut hook_registry,
+            );
+            if outcome.loaded > 0 || outcome.skipped > 0 || outcome.error.is_some() {
+                tracing::info!(
+                    workspace = %repo_path.display(),
+                    loaded = outcome.loaded,
+                    skipped = outcome.skipped,
+                    error = ?outcome.error,
+                    "workspace hooks.json load result"
+                );
+            }
+            if hook_registry.hook_count() > 0 {
+                engine = engine.with_hooks(hook_registry);
+            }
         }
 
         let _ = app.emit(

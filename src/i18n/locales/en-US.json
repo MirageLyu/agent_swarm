@@ -157,7 +157,11 @@
     "fallbackStickyLabel": "Sticky fallback",
     "fallbackStickyHint": "When on (default), subsequent steps stay on the fallback model after a switch — useful because upstream overload typically lasts several minutes. When off, the next step retries the primary model (and may switch again if the issue persists).",
     "fallbackStickyOn": "Stay on fallback after switching (recommended)",
-    "fallbackStickyOff": "Try primary again on next step"
+    "fallbackStickyOff": "Try primary again on next step",
+    "allowCommandHooksLabel": "Allow workspace command hooks (RCE risk)",
+    "allowCommandHooksHint": "When enabled, the agent will load `.miragenty/hooks.json` from each mission's workspace and execute the registered shell commands at phase boundaries (PostToolUse, Stop, etc). DEFAULT OFF — these commands run with your user privileges via `sh -c`, so anyone who can edit the workspace can execute arbitrary code. Only enable after auditing every hook command. Each hook is timeout-capped at 60s and failures degrade to advisory injections rather than killing the agent.",
+    "allowCommandHooksOn": "Allow (audited)",
+    "allowCommandHooksOff": "Block (default, safe)"
   },
   "mission": {
     "title": "Missions",

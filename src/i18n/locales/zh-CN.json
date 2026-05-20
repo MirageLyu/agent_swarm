@@ -157,7 +157,11 @@
     "fallbackStickyLabel": "粘性 Fallback",
     "fallbackStickyHint": "打开时（默认），切换后后续 step 继续用 fallback——因上游过载通常持续几分钟，频繁切回主模型等于反复撞墙。关闭时，下一 step 重新尝试主模型（若仍失败会再次切换）。",
     "fallbackStickyOn": "切换后保持使用 fallback（推荐）",
-    "fallbackStickyOff": "下一 step 重新尝试主模型"
+    "fallbackStickyOff": "下一 step 重新尝试主模型",
+    "allowCommandHooksLabel": "允许 workspace 命令钩子（RCE 风险）",
+    "allowCommandHooksHint": "开启后，agent 在每次 mission 启动时会加载该 workspace 下的 `.miragenty/hooks.json` 并在 phase 边界（PostToolUse / Stop 等）通过 `sh -c` 执行注册的 shell 命令。默认关闭——这些命令以你的用户权限运行，能编辑 workspace 的任何人都可触发任意代码执行。仅在审计过 hook 内容后打开。每个 hook 60s 超时，失败时仅降级为 advisory inject 而不会强杀 agent。",
+    "allowCommandHooksOn": "允许（已审计）",
+    "allowCommandHooksOff": "禁用（默认，安全）"
   },
   "mission": {
     "title": "任务",

@@ -53,6 +53,11 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+// P2-1 Phase C 子模块。仅在 `AppConfig.allow_command_hooks=true` 时由
+// scheduler 经 [`config::load_workspace_hooks`] 加载并注册到 registry。
+pub mod command;
+pub mod config;
+
 /// Agent 生命周期中的 hook 触发点。
 ///
 /// **添加新 phase 必须**：
@@ -649,5 +654,115 @@ mod tests {
             reg.execute_phase(&mock_ctx(phase)).await;
         }
         assert_eq!(h.calls(), 0, "hook 不应在未声明 phase 被调用");
+    }
+
+    // ============================================================================
+    // E2E-style: compound multi-hook scenarios
+    // ============================================================================
+    //
+    // 这些测试模拟现实场景：用户在 `.miragenty/hooks.json` 注册多个 hook（例如
+    // "tsc → eslint → npm test"），它们的组合行为必须可预测。
+
+    /// 场景：3 个 hook 在同 phase，前两个 Inject、第三个 Prevent → 第三个的 Prevent
+    /// 优先（短路），前两个的 Inject 全部丢弃。
+    ///
+    /// 这是用户 deploy 一个 "vetoing safety check" 时的核心需求：safety check 拦下，
+    /// 不应让前面的非阻塞 inject 还塞进 conversation 让 agent 误以为可以继续。
+    #[tokio::test]
+    async fn inject_then_prevent_discards_pending_injects() {
+        let mut reg = HookRegistry::new();
+        reg.register(MockHook::injecting(
+            "tsc",
+            vec![HookPhase::Stop],
+            "tsc passed",
+        ));
+        reg.register(MockHook::injecting(
+            "lint",
+            vec![HookPhase::Stop],
+            "lint passed",
+        ));
+        // 关键：safety check 在最后注册，前两个都跑了，但它 prevent 后整体结果是 Prevented
+        reg.register(MockHook::preventing(
+            "safety-check",
+            vec![HookPhase::Stop],
+            true,
+        ));
+
+        match reg.execute_phase(&mock_ctx(HookPhase::Stop)).await {
+            PhaseResult::Prevented { hook_name, .. } => assert_eq!(hook_name, "safety-check"),
+            other => panic!("expected Prevented, got {other:?}"),
+        }
+    }
+
+    /// 场景：1 个 hook 同时关心 PostToolUse + Stop。每次对应 phase 触发都 Inject，
+    /// 验证 phases() 数组形式的 hook 没有重复执行也没有遗漏。
+    #[tokio::test]
+    async fn hook_with_two_phases_inject_each() {
+        let mut reg = HookRegistry::new();
+        let h = MockHook::injecting(
+            "lint",
+            vec![HookPhase::PostToolUse, HookPhase::Stop],
+            "lint output",
+        );
+        reg.register(h.clone());
+
+        // PostToolUse → 1 次
+        match reg.execute_phase(&mock_ctx(HookPhase::PostToolUse)).await {
+            PhaseResult::Injected(injs) => assert_eq!(injs.len(), 1),
+            _ => panic!(),
+        }
+        // Stop → 1 次
+        match reg.execute_phase(&mock_ctx(HookPhase::Stop)).await {
+            PhaseResult::Injected(injs) => assert_eq!(injs.len(), 1),
+            _ => panic!(),
+        }
+        // 总共 2 次（不是 1 次也不是 4 次）
+        assert_eq!(h.calls(), 2);
+    }
+
+    /// 场景：HookOutcome JSON serde round-trip 稳定——这是 Phase C 引入 Command hook 后
+    /// hook 命令通过 stdout 传 Outcome 的协议契约。任何字段名变更都会导致用户的 hook
+    /// 脚本失效。**改一行就 break 兼容性的回归测试**。
+    #[test]
+    fn outcome_roundtrip_via_json_preserves_data() {
+        let cases = vec![
+            HookOutcome::Pass,
+            HookOutcome::InjectMessage {
+                content: "hello\nworld".into(),
+                severity: HookSeverity::Blocking,
+            },
+            HookOutcome::PreventContinuation {
+                reason: "exit non-zero".into(),
+                terminal: false,
+            },
+        ];
+        for original in cases {
+            let json = serde_json::to_string(&original).unwrap();
+            let decoded: HookOutcome = serde_json::from_str(&json).unwrap();
+            // 直接比对枚举不够（HookOutcome 没派生 PartialEq），用 JSON 二次序列化对比
+            let json2 = serde_json::to_string(&decoded).unwrap();
+            assert_eq!(json, json2, "roundtrip lossy: {json}");
+        }
+    }
+
+    /// 场景：HookPhase JSON serde 稳定——配置文件 `.miragenty/hooks.json` 里 phase 用
+    /// 字符串（"Stop"、"PostToolUse" 等），Phase C CommandHook 加载时按 from_str 解析。
+    /// 改名 = 用户配置失效。
+    #[test]
+    fn phase_serde_string_stable() {
+        for p in [
+            HookPhase::PreLlmCall,
+            HookPhase::PostSampling,
+            HookPhase::PostToolUse,
+            HookPhase::PreCompact,
+            HookPhase::PostCompact,
+            HookPhase::Stop,
+            HookPhase::TaskCompleted,
+        ] {
+            let json = serde_json::to_value(&p).unwrap();
+            // serde 默认枚举 unit variant 序列化为字符串
+            let s = json.as_str().expect("phase 必须序列化为字符串");
+            assert_eq!(HookPhase::from_str(s), Some(p));
+        }
     }
 }

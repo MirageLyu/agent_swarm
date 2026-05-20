@@ -199,6 +199,12 @@ export interface ConfigResponse {
   agent_fallback_model: string;
   /** P1-2：true（默认）= 切换后保持 fallback；false = 下一 step 重试主模型 */
   agent_fallback_sticky: boolean;
+  /**
+   * Single-Agent Uplift P2-1 Phase C：是否允许加载 workspace 的 `.miragenty/hooks.json`
+   * 中定义的 CommandHook。默认 false。**RCE 风险**，仅在开发者明确审计 hook 后才打开。
+   * 详见后端 AppConfig.allow_command_hooks 字段文档。
+   */
+  allow_command_hooks: boolean;
 }
 
 export interface SetApiKeyRequest {
@@ -222,6 +228,8 @@ export interface UpdateConfigRequest {
   agent_fallback_model?: string;
   /** P1-2 sticky flag */
   agent_fallback_sticky?: boolean;
+  /** P2-1 Phase C：开关 CommandHook 加载（RCE 风险，谨慎打开） */
+  allow_command_hooks?: boolean;
 }
 
 export interface TestLlmConnectionRequest {

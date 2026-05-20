@@ -494,6 +494,13 @@ feat(commands,ui): expose agent output token budget in Settings
 
 ---
 
+## 6.4 配置暴露（已完成 ✅）
+
+- `AppConfig.agent_output_token_budget: u64`，默认 0 = 关闭，update 时 clamp 至 200_000
+- `scheduler.rs` plumb 到 `AgentRunOptions.output_token_budget`
+- `SettingsView.tsx` Output Token Budget 输入框 + i18n（en/zh）
+- IPC `ConfigResponse` / `UpdateConfigRequest` 同步字段
+
 ## 7. 未来扩展
 
 1. **Provider-aware budget**：现在按全局 context_window 算，未来按 reseller 实际限速 / 模型类型差异化

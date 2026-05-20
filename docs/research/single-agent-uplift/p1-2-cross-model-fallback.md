@@ -28,17 +28,17 @@
 
 测试结果：529 全过（+14 自 P1-1 Phase A 完成时的 515）。0 行为变化（默认 `fallback_model=None` → 旧路径完全不变）。
 
-### Phase B（独立 PR，待落地）—— Settings UI / AppConfig / DB / Report
+### Phase B（已完成 ✅）—— Settings UI / AppConfig / DB / Report
 
-剩余工作：
-1. **`db/migrations.rs`** migration 27：agents 表加 `fallback_switches INTEGER DEFAULT 0` 列
-2. **`engine.rs` agent 完成/失败时**：`UPDATE agents SET fallback_switches = ?` 持久化计数
-3. **`report_generator.rs`**：mission report 渲染 `fallback_switches > 0` 时加一段"Model fallback occurred N times (X → Y)"
-4. **`commands/config.rs`** + **`AppConfig`**：加 `agent_fallback_model: Option<String>` + `agent_fallback_sticky: bool`
-5. **`scheduler.rs`** plumb 配置到 `AgentRunOptions`（替换当前的 `None`/`true` 默认）
-6. **`src/views/SettingsView.tsx`**：Fallback 模型 dropdown + sticky toggle + i18n keys
+落地内容：
+1. **Migration 027**：`agents.fallback_switches_total INTEGER NOT NULL DEFAULT 0`
+2. **`engine.rs::persist_fallback_switches`** helper：每次 fallback 切换发生时立即 write-through 持久化（非延后到 agent 结束，防 agent 在 fallback 后崩溃导致计数丢失）
+3. **`report_generator.rs`** `ReportMetrics.fallback_switches_total`：SUM(agents.fallback_switches_total) 聚合；markdown render 仅在 >0 时输出 `| Model fallbacks | N |` 行避免 0 值噪音
+4. **`AppConfig.agent_fallback_model: String` + `agent_fallback_sticky: bool`**：empty string = 关闭，默认 sticky=true。`update_config` clamp + trim
+5. **`scheduler.rs::build_agent_run_options`** plumb cfg → AgentRunOptions（取代 `None`/`true` 硬编码）
+6. **`SettingsView.tsx` Cross-Model Fallback section**：model input + sticky segmented control + i18n（en/zh），含 RCE/cost 警告说明
 
-为什么拆 Phase B：DB migration 和 UI 暴露是独立可发布的增量，单独 PR 便于回滚和 review。**Phase A 已经让 fallback 在测试场景下完全可用**——只要 caller 显式构造 `AgentRunOptions { fallback_model: Some(...), ...}`（例如集成测试），整条 fallback 链路立刻可工作。
+测试结果：541 → 562 全过；前端 MissionReportMetrics IPC 接口同步加 `fallback_switches_total: number` 字段。
 
 ---
 
