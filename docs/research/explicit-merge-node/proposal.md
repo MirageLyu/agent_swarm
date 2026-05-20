@@ -1,8 +1,31 @@
 # 显式 Merge 节点 方案（一页可评审版）
 
-> 状态：**v1 已拍板，进入实施**（决策见 §2 加粗结果）
+> 状态：**v1 已完成实施**（默认 toggle 关闭，需用户在 Settings 显式启用）
 > 范围：DAG 多前序节点的 worktree 合并，从隐式基础设施步骤升级为一等公民节点。
 > 关键词：FM-15（Worktree v2.2）、FM-01/07（Planning & DAG）、FM-02（Agent Execution）。
+
+## v1 实施落地清单
+
+| 组件 | 状态 | 位置 |
+|------|------|------|
+| Migration 029 | ✅ | `src-tauri/src/db/migrations.rs`（tasks.kind / merge_parents / missions.verify_command）|
+| `NodeKind` 枚举 | ✅ | `src-tauri/src/agent/planner.rs::NodeKind`（serde snake_case，default Work）|
+| `PlannerTask.{kind, merge_parents}` | ✅ | 同上；YAML/template 路径默认 Work |
+| `inject_merge_nodes` 二叉 reduction tree | ✅ | `src-tauri/src/agent/planner_merge_inject.rs`（11 个单测含集成式：N=1..6、validate_task_graph 不退化、闭包语义保持）|
+| Inject 接入 planner 流水线 | ✅ | `commands/preflight.rs` + `commands/mission.rs` 在 planner_output 落库前调用 |
+| `merge_prompt::build_merge_task_desc` | ✅ | `src-tauri/src/agent/merge_prompt.rs`（4 个单测：missing JSON / 错误 parent 数 / e2e with verify+conflicts / no verify+no conflicts）|
+| Scheduler dispatch_task kind 分支 | ✅ | `scheduler.rs::dispatch_task` 接收 `task_kind/merge_parents_json`，merge 节点用专用 task_desc |
+| Merge guardrail `CommandPasses` 注入 | ✅ | `scheduler.rs::build_agent_run_options` 对 kind=merge 自动 push CommandPasses，verify_command 优先 mission > AppConfig |
+| AppConfig 双开关 | ✅ | `enable_explicit_merge_node`（默认 false）+ `merge_verify_command` |
+| Settings UI（Developer 区） | ✅ | `DeveloperSection.tsx` + en/zh i18n |
+| TaskDAG merge 节点紫色描边 + ◇ badge | ✅ | `TaskNode.tsx` + `TaskNode.module.css` `data-kind=merge` 选择器 |
+| TaskNode tooltip 显示 merge_parents | ✅ | 同上 |
+| Mission report `merge_nodes_total` 指标 | ✅ | `report_generator.rs` SELECT COUNT + markdown render |
+| 前端 IPC 类型同步 | ✅ | `ipc/commands.ts`（TaskInfo.kind/merge_parents_json + ConfigResponse 字段 + MissionReportMetrics.merge_nodes_total）|
+
+**测试结果**：577 → 579 全过（+2 集成式断言，+15 本 v1 累计新增）。
+**前端 build**：通过。
+**默认行为**：toggle 关闭时与旧版字节对等，所有现有 mission 不受影响。
 
 ## 决策记录（用户拍板）
 

@@ -357,4 +357,104 @@ mod tests {
         assert!(merge.title.contains("Task B"));
         assert!(merge.title.starts_with("Merge:"));
     }
+
+    // ============================================================================
+    // 集成式断言：与 validate_task_graph + consumes 校验交互
+    // ============================================================================
+
+    /// 注入后调用 `validate_task_graph` 仍然通过（无环 / dep ref 全部命中 / role
+    /// 缺省合法）。这是 inject 的 critical safety invariant：算法不能因为加 merge
+    /// 节点改写 depends_on 而引入悬挂引用或环。
+    #[test]
+    fn injection_preserves_validate_task_graph_invariants() {
+        use crate::agent::planner::validate_task_graph;
+
+        for n_parents in 2..=6 {
+            let mut tasks: Vec<PlannerTask> = (0..n_parents)
+                .map(|i| work(&format!("P{i}"), &[]))
+                .collect();
+            let parent_ids: Vec<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+            // X 依赖全部 parent
+            tasks.push(work("X", &parent_ids));
+
+            // inject 前 validate 应通过
+            assert!(
+                validate_task_graph(&tasks).is_ok(),
+                "pre-inject N={n_parents} should validate"
+            );
+
+            inject_merge_nodes(&mut tasks, InjectOptions { enabled: true });
+
+            // inject 后 validate 仍要通过——这是核心安全保证
+            assert!(
+                validate_task_graph(&tasks).is_ok(),
+                "post-inject N={n_parents} must still validate (no cycles, no dangling refs)"
+            );
+
+            // X 的 depends_on 必须收敛到唯一 root merge
+            let x = tasks.iter().find(|t| t.id == "X").unwrap();
+            assert_eq!(
+                x.depends_on.len(),
+                1,
+                "post-inject X must depend on exactly 1 root merge, got {:?}",
+                x.depends_on
+            );
+
+            // merge 节点数量 = N - 1
+            let merges = tasks.iter().filter(|t| t.kind == NodeKind::Merge).count();
+            assert_eq!(merges, n_parents - 1, "N={n_parents} → expected N-1 merges");
+        }
+    }
+
+    /// inject 不破坏 consumes_artifacts 语义：下游 X 原本 `consumes` 一个 parent
+    /// 的 artifact，注入 merge 节点后 X.depends_on = [root_merge]，但 P1 仍在 X
+    /// 的**传递依赖闭包**内（X → root_merge → ... → P1）。
+    ///
+    /// 这里只做拓扑闭包的间接断言：从 X 出发 BFS 应该能走到原 parent。
+    #[test]
+    fn injection_preserves_transitive_closure_to_original_parents() {
+        use std::collections::{HashSet, VecDeque};
+
+        let mut tasks = vec![
+            work("P1", &[]),
+            work("P2", &[]),
+            work("P3", &[]),
+            work("P4", &[]),
+            work("X", &["P1", "P2", "P3", "P4"]),
+        ];
+        inject_merge_nodes(&mut tasks, InjectOptions { enabled: true });
+
+        // 反向邻接：task -> list of (dependency)
+        let mut deps_by: std::collections::HashMap<&str, Vec<&str>> =
+            std::collections::HashMap::new();
+        for t in &tasks {
+            deps_by.insert(
+                t.id.as_str(),
+                t.depends_on.iter().map(String::as_str).collect(),
+            );
+        }
+
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        queue.push_back("X");
+        while let Some(node) = queue.pop_front() {
+            if !visited.insert(node) {
+                continue;
+            }
+            if let Some(deps) = deps_by.get(node) {
+                for d in deps {
+                    queue.push_back(*d);
+                }
+            }
+        }
+
+        for orig_parent in ["P1", "P2", "P3", "P4"] {
+            assert!(
+                visited.contains(orig_parent),
+                "X's transitive closure must include original parent {orig_parent} \
+                 (otherwise consumes_artifacts validator would fail), \
+                 closure = {visited:?}"
+            );
+        }
+    }
 }

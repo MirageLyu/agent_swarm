@@ -39,6 +39,35 @@
   border-color: var(--color-error);
 }
 
+/* Explicit Merge Node v1：merge 节点用紫色描边 + 浅紫底色一眼可辨。
+   status 颜色仍能覆盖（completed=success / running=accent / failed=error），
+   merge 视觉信号只在 idle/pending/ready 状态下凸显——这是正确的，因为运行中
+   的颜色应该反映"正在干啥"而非"是什么类型"。 */
+.node[data-kind="merge"] {
+  border-color: #a855f7; /* purple-500，足够醒目又不像 status 那么强 */
+  background:
+    linear-gradient(
+      135deg,
+      rgba(168, 85, 247, 0.04) 0%,
+      var(--color-bg-elevated) 60%
+    );
+}
+
+.node[data-kind="merge"]:hover {
+  border-color: #9333ea; /* purple-600 */
+  box-shadow: 0 0 0 0.5px #a855f7, 0 2px 8px rgba(168, 85, 247, 0.18);
+}
+
+.mergeBadge {
+  font-size: 14px;
+  line-height: 1;
+  color: #9333ea;
+  flex-shrink: 0;
+  font-weight: 600;
+  /* ◇ 字符本身较窄，加点 letter-spacing 让它视觉占位更稳 */
+  letter-spacing: 0.5px;
+}
+
 .header {
   display: flex;
   align-items: center;

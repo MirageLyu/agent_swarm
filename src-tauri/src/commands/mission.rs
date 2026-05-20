@@ -55,6 +55,18 @@ pub struct TaskInfo {
     /// 最近一次失败时间（UTC ISO8601）。
     #[serde(default)]
     pub last_failed_at: Option<String>,
+    /// Explicit Merge Node v1：`"work"`（默认）或 `"merge"`。前端 TaskDAG 据此
+    /// 渲染菱形节点 + 不同颜色。老 mission 兜底 'work'。
+    #[serde(default = "default_task_kind")]
+    pub kind: String,
+    /// Explicit Merge Node v1：merge 节点的 2 个 parent task DB id（JSON 数组）。
+    /// `kind == "merge"` 时非空；UI 在 hover 时展开"合并了哪两个 task"。
+    #[serde(default)]
+    pub merge_parents_json: Option<String>,
+}
+
+fn default_task_kind() -> String {
+    "work".to_string()
 }
 
 fn default_task_role() -> String {
@@ -546,6 +558,8 @@ pub async fn plan_mission(
                     file_scope_hints_json: Some(file_scope_json.clone()),
                     last_error: None,
                     last_failed_at: None,
+                    kind: pt.kind.as_db_str().to_string(),
+                    merge_parents_json: merge_parents_json.clone(),
                 });
             }
 
@@ -631,7 +645,7 @@ pub fn get_mission_detail(
                     assigned_agent_id, created_at, completed_at,
                     role, expected_output, additional_skills, produces_artifacts,
                     consumes_artifacts, file_scope_hints,
-                    last_error, last_failed_at
+                    last_error, last_failed_at, kind, merge_parents
              FROM tasks WHERE mission_id = ? ORDER BY created_at ASC",
         )?;
         let tasks: Vec<TaskInfo> = task_stmt
@@ -654,6 +668,12 @@ pub fn get_mission_detail(
                     file_scope_hints_json: row.get(14).ok(),
                     last_error: row.get(15).ok(),
                     last_failed_at: row.get(16).ok(),
+                    kind: row
+                        .get::<_, Option<String>>(17)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| "work".to_string()),
+                    merge_parents_json: row.get::<_, Option<String>>(18).ok().flatten(),
                 })
             })?
             .filter_map(|r| r.ok())
@@ -833,6 +853,8 @@ pub fn add_task(app: tauri::AppHandle, request: AddTaskRequest) -> Result<TaskIn
             file_scope_hints_json: None,
             last_error: None,
             last_failed_at: None,
+            kind: "work".to_string(),
+            merge_parents_json: None,
         })
     })
     .map_err(|e| e.to_string())
@@ -1236,6 +1258,10 @@ pub fn export_mission_template(
                         // export 路径不关心失败信息，模板里也不应保留运行时状态
                         last_error: None,
                         last_failed_at: None,
+                        // export 模板不携带 merge 节点（merge 是运行时基础设施，
+                        // 重导入时由新 planner 重新决定是否注入）。
+                        kind: "work".to_string(),
+                        merge_parents_json: None,
                     })
                 })?
                 .filter_map(|r| r.ok())

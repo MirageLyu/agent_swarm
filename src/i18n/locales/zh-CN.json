@@ -330,7 +330,9 @@
       "consumes": "消费：",
       "skills": "技能：",
       "status": "状态：",
-      "lastError": "上次错误："
+      "lastError": "上次错误：",
+      "mergeNodeBadge": "Merge 节点（planner 自动插入以合并两个 parent）",
+      "mergeParents": "合并："
     },
     "plannerStream": {
       "thinking": "思考中…",

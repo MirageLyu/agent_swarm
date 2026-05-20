@@ -1807,6 +1807,8 @@ pub async fn sign_contract(
                     file_scope_hints_json: Some(file_scope_json.clone()),
                     last_error: None,
                     last_failed_at: None,
+                    kind: pt.kind.as_db_str().to_string(),
+                    merge_parents_json: merge_parents_json.clone(),
                 });
             }
 

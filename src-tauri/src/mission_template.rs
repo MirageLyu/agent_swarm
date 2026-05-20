@@ -244,6 +244,8 @@ mod tests {
                     file_scope_hints_json: None,
                     last_error: None,
                     last_failed_at: None,
+                    kind: "work".into(),
+                    merge_parents_json: None,
                 })
                 .collect(),
             dependencies: deps

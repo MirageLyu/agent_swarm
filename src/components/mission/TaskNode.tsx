@@ -179,6 +179,7 @@ export function TaskNode({ task, layout, onEdit, onDelete, onSelect, selected, o
         ref={nodeRef}
         className={`${styles.node} ${selected ? styles.selected : ""}`}
         data-status={task.status}
+        data-kind={task.kind ?? "work"}
         style={{ cursor: dragging ? "grabbing" : "default" }}
         onMouseEnter={() => {
           if (menuOpen) return;
@@ -196,6 +197,13 @@ export function TaskNode({ task, layout, onEdit, onDelete, onSelect, selected, o
       >
         <div className={styles.header}>
           <span className={styles.status}>{STATUS_ICONS[task.status] ?? "\u25CB"}</span>
+          {task.kind === "merge" && (
+            // ◇ U+25C7 white diamond：与 Work 节点视觉一眼可辨。
+            // 详见 docs/research/explicit-merge-node/proposal.md §3.3。
+            <span className={styles.mergeBadge} title={t("taskNode.mergeNodeBadge")}>
+              {"\u25C7"}
+            </span>
+          )}
           <span className={styles.title}>{task.title}</span>
           <button
             className={styles.menuTrigger}
@@ -277,6 +285,21 @@ export function TaskNode({ task, layout, onEdit, onDelete, onSelect, selected, o
             <p className={styles.tooltipTitle}>{task.title}</p>
           </div>
           <p className={styles.tooltipDesc}>{task.description || t("taskNode.noDescription")}</p>
+          {task.kind === "merge" && task.merge_parents_json && (
+            <p className={styles.tooltipExpected}>
+              <span className={styles.tooltipLabel}>{t("taskNode.mergeParents")}</span>{" "}
+              {(() => {
+                try {
+                  const parents = JSON.parse(task.merge_parents_json) as string[];
+                  return parents
+                    .map((p) => (p.length > 8 ? p.slice(0, 8) : p))
+                    .join("  +  ");
+                } catch {
+                  return task.merge_parents_json;
+                }
+              })()}
+            </p>
+          )}
           {task.expected_output && (
             <p className={styles.tooltipExpected}>
               <span className={styles.tooltipLabel}>{t("taskNode.expected")}</span>{" "}

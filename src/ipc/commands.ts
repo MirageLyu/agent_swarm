@@ -65,7 +65,25 @@ export interface TaskInfo {
   last_error?: string | null;
   /** 最近一次失败时间（UTC ISO8601） */
   last_failed_at?: string | null;
+  /**
+   * Explicit Merge Node v1：节点类型。
+   * - `"work"`（默认）：普通 task；老 mission 兜底也是 work
+   * - `"merge"`：planner 自动注入的 merge 节点，复用同一套 AgentEngine 跑
+   *   "合并两路 worktree + 跑 verify_command + task_complete" 流程
+   *
+   * TaskDAG 据此渲染菱形 icon + 紫色描边。
+   */
+  kind?: TaskKind;
+  /**
+   * Explicit Merge Node v1：仅 `kind === "merge"` 时非空；JSON 数组形式存的
+   * 2 个 parent task DB id（二叉 reduction tree 保证）。前端 hover merge 节点
+   * 时展开"合并了哪两个 task"。
+   */
+  merge_parents_json?: string | null;
 }
+
+/** Explicit Merge Node v1：与后端 NodeKind 枚举对齐。 */
+export type TaskKind = "work" | "merge";
 
 /**
  * FM-15 v2.3 边语义分类。
@@ -843,6 +861,12 @@ export interface MissionReportMetrics {
    * 0 = 主模型全程稳定（绝大多数 mission）。>0 时 Report 渲染 chip 提示用户。
    */
   fallback_switches_total: number;
+  /**
+   * Explicit Merge Node v1：本 mission 由 planner 自动注入的 merge 节点总数。
+   * 0 = 无多 parent 汇合 / 开关关闭。>0 时 Report 渲染"Merge events"段，
+   * 列出每个 merge agent 的两个 parent + verify 结果。
+   */
+  merge_nodes_total?: number;
 }
 
 export interface MissionReportSummary {

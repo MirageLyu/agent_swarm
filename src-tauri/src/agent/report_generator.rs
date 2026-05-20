@@ -88,6 +88,12 @@ pub struct ReportMetrics {
     /// 给前端用：渲染为 chip "fallback × N" 提示用户"过程中有切换，可能影响成本"。
     #[serde(default)]
     pub fallback_switches_total: i64,
+    /// Explicit Merge Node v1：本 mission 由 planner 自动注入的 merge 节点总数。
+    /// 0 = 没有多 parent 汇合（线性 DAG 或单 parent 多 fork）或开关关闭。
+    /// 仅当 >0 时 report 渲染 "Merge events" 段，列出每个 merge agent 的 parents
+    /// + 是否 verify 通过 + 总 step 数，让用户回顾"是哪几次合并、效果如何"。
+    #[serde(default)]
+    pub merge_nodes_total: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -428,6 +434,17 @@ fn aggregate_data(conn: &Connection, mission_id: &str) -> Result<AggregateData> 
         )
         .unwrap_or(0);
 
+    // Explicit Merge Node v1：本 mission 的 merge 节点数。0 = 无多 parent 汇合
+    // 或开关关闭；>0 → render "Merge events" 段。缺列时（migration 029 没跑）
+    // 回退 0 避免老 DB 报错。
+    let merge_nodes_total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM tasks WHERE mission_id = ?1 AND kind = 'merge'",
+            [mission_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+
     let metrics = ReportMetrics {
         tasks_total,
         tasks_completed,
@@ -438,6 +455,7 @@ fn aggregate_data(conn: &Connection, mission_id: &str) -> Result<AggregateData> 
         auto_fixes,
         review_reduction_rate,
         fallback_switches_total,
+        merge_nodes_total,
     };
 
     // ── cost breakdown
@@ -1142,6 +1160,13 @@ pub fn render_markdown(report: &MissionReport) -> String {
             report.summary.metrics.fallback_switches_total
         ));
     }
+    // Explicit Merge Node v1：仅在有 merge 节点时渲染，避免 0 值噪音。
+    if report.summary.metrics.merge_nodes_total > 0 {
+        md.push_str(&format!(
+            "| Merge nodes | {} (multi-parent joins reconciled by explicit merge agents) |\n",
+            report.summary.metrics.merge_nodes_total
+        ));
+    }
     md.push('\n');
 
     if !report.decisions.is_empty() {
@@ -1445,6 +1470,7 @@ mod tests {
                 auto_fixes: 1,
                 review_reduction_rate: Some(0.5),
                 fallback_switches_total: 0,
+                merge_nodes_total: 0,
             },
             evaluator_review: ReportEvaluatorReview {
                 rounds: vec![],

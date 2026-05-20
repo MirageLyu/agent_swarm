@@ -330,7 +330,9 @@
       "consumes": "Consumes:",
       "skills": "Skills:",
       "status": "Status:",
-      "lastError": "Last error:"
+      "lastError": "Last error:",
+      "mergeNodeBadge": "Merge node (auto-inserted by planner to reconcile two parents)",
+      "mergeParents": "Merges:"
     },
     "plannerStream": {
       "thinking": "Thinking…",
