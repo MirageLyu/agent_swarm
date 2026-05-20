@@ -1,36 +1,53 @@
 //! Explicit Merge Node v1 —— planner 后处理：为多 parent 汇合点自动插入 merge 节点。
 //!
-//! ## 算法
+//! ## 算法（v1.1 修正）
 //!
-//! 对每个 `depends_on.len() >= 2` 的 task X，按"二叉 reduction tree"展开：
+//! 对每个 `depends_on.len() >= 2` 的 task X，插入**恰好 1 个** merge 节点：
 //!
 //! ```text
-//! N=2:  A,B → M(A,B) → X
-//! N=3:  A,B → M1(A,B); M1,C → M2 → X
-//! N=4:  A,B → M1; C,D → M2; M1,M2 → M3 → X
-//! N=5:  A,B → M1; C,D → M2; M1,M2 → M3; M3,E → M4 → X
+//! N=2:  A,B           → M(A,B)        → X
+//! N=3:  A,B,C         → M(A,B,C)      → X
+//! N=4:  A,B,C,D       → M(A,B,C,D)    → X
+//! N=8:  P1..P8        → M(P1..P8)     → X    (1 merge node, not 7)
 //! ```
 //!
-//! N parents 产生 **N-1** 个 merge node，深度 `ceil(log2(N))`。
-//! X 最终只依赖**唯一** root merge node（X.depends_on = [root_merge_id]）。
+//! N parents → **1 个** merge node（不是 N-1）。X 最终只依赖该 merge node。
+//! merge node 的 `depends_on` 与 `merge_parents` 都等于原 parents 全集。
 //!
-//! ## 为什么二叉
+//! ## 为什么不再用二叉 reduction tree（设计动机修正）
 //!
-//! 每个 merge agent 永远只看 **2 个** parent 的 diff，token 上下文小、可调试。
-//! 用户原话："想要这个步骤有一个显式的节点来做 merge，有独立的 LLM 上下文和质量保证"。
+//! v1 初稿用了二叉 reduction tree（N parents → N-1 merge nodes，深度 log2 N），
+//! 模仿 MPI_Reduce / parallel sort 的"分层合并"。**这是误判**：
+//!
+//! 1. **没有并行收益**：reduction tree 的核心卖点是并行（worker 同时合并各对），
+//!    但 merge agent 必须等 parents 全部 completed 才能跑，单 agent 内部又是串行
+//!    LLM session——分层只会让端到端**时延变长**（log2 N 个串行 LLM session
+//!    vs 单 session）。
+//! 2. **DAG 视觉膨胀**：N=8 → 7 个紫色 ◇ 节点，UI 拓扑爆炸。
+//! 3. **Token 总成本更高**：每个 merge agent 都有 system prompt + 工具表
+//!    overhead，N-1 个 agent 重复这部分；单 agent 一次性看完通常更省。
+//! 4. **调试反而更难**：用户要在 N-1 个 sub-merge timeline 之间跳转，而不是
+//!    在一个 timeline 里读完整推理。
+//! 5. **失败语义没差**：leaf merge 失败 → 上层全白做，重试要从 leaf 重启；
+//!    单 merge 失败 → 直接重试该 merge。重试代价一样。
+//!
+//! 二叉树**唯一**有边际价值的场景：N 极大（比如 N≥10）时单 merge 的 prompt
+//! 超出 token budget。这种情况在真实 DAG 中极罕见（多数汇合 N≤4），未来如果
+//! 实测有需要可以加 fallback：N <= threshold 用单 merge，N > threshold 才退化
+//! 为 reduction tree。
 //!
 //! ## 为什么不动 consumes_artifacts
 //!
 //! 下游 X 原本 `consumes_artifacts = ["P1.foo"]`，P1 是其中一个 parent。
-//! 注入 merge 节点后 X.depends_on 改成 [root_merge]，但 P1 仍在 X 的**传递依赖闭包**
-//! 内（X → root_merge → ... → P1），所以 `planner_state::validate_consumes_artifacts`
+//! 注入 merge 节点后 X.depends_on 改成 [M]，但 P1 仍在 X 的**传递依赖闭包**
+//! 内（X → M → P1），所以 `planner_state::validate_consumes_artifacts`
 //! 仍然通过——不需要重写 X 的 consumes_artifacts。
 //!
 //! ## 顺序敏感性
 //!
-//! parent 配对顺序按 `depends_on` 出现顺序保持稳定（不按完成时间，避免运行时
-//! 拓扑因调度顺序漂移）。两个相邻 parent (i, i+1) 配成同一对，便于 UI 渲染
-//! reduction tree 时的视觉一致性。
+//! merge node 的 `depends_on` / `merge_parents` 按 X 原 `depends_on` 出现顺序
+//! 保持稳定（不按完成时间，避免运行时拓扑因调度顺序漂移）。LLM prompt 中
+//! parent 段落也按此顺序渲染。
 //!
 //! ## 接入点
 //!
@@ -38,7 +55,6 @@
 //! 校验 DAG（新增节点 + 改边可能形成环——理论上算法保证无环，但双保险）。
 
 use crate::agent::planner::{NodeKind, PlannerTask};
-use std::collections::VecDeque;
 
 /// 注入选项；当前 v1 只暴露一个开关（避免硬切换：默认 false 保持旧行为）。
 #[derive(Debug, Clone, Copy, Default)]
@@ -47,11 +63,12 @@ pub struct InjectOptions {
     pub enabled: bool,
 }
 
-/// 对 `tasks` 原地注入 merge 节点。返回新增的 merge node 数量（含分层）。
+/// 对 `tasks` 原地注入 merge 节点。返回新增的 merge node 数量。
 ///
 /// 行为：
 /// - 跳过 `kind == Merge` 的任务（避免对已注入的 plan 二次处理，幂等性）
 /// - 跳过 `depends_on.len() < 2` 的任务（单 parent / 根节点不需要 merge）
+/// - 每个多 parent 任务产生**恰好 1 个** merge node
 /// - 新增的 merge node 追加到 `tasks` 末尾（不影响原有任务顺序）
 ///
 /// 如果 `opts.enabled == false`，直接返回 0，不做任何改动。
@@ -80,21 +97,48 @@ pub fn inject_merge_nodes(tasks: &mut Vec<PlannerTask>, opts: InjectOptions) -> 
     }
 
     let mut new_nodes: Vec<PlannerTask> = Vec::new();
-    let mut counter: usize = 0;
 
-    // 给定 parent 列表，构造 reduction tree，返回 root merge node id。
     for (task_idx, parents) in plan {
         let downstream_id = tasks[task_idx].id.clone();
         let downstream_title = tasks[task_idx].title.clone();
-        let root_id = build_reduction_tree(
-            &downstream_id,
-            &downstream_title,
-            &parents,
-            &mut counter,
-            &mut new_nodes,
-            tasks,
-        );
-        tasks[task_idx].depends_on = vec![root_id];
+        let parent_titles: Vec<String> = parents
+            .iter()
+            .map(|pid| {
+                tasks
+                    .iter()
+                    .find(|t| &t.id == pid)
+                    .map(|t| t.title.clone())
+                    .unwrap_or_else(|| pid.clone())
+            })
+            .collect();
+
+        let merge_id = format!("merge-{downstream_id}");
+        let merge_title = build_merge_title(&parent_titles, &downstream_title);
+        let merge_desc = build_merge_description(&parents, &downstream_id, &downstream_title);
+
+        let merge_task = PlannerTask {
+            id: merge_id.clone(),
+            title: merge_title,
+            description: merge_desc,
+            complexity: "low".to_string(),
+            depends_on: parents.clone(),
+            expected_output: Some(
+                "A merged worktree where conflicts (if any) are resolved with intent \
+                 preserved from all parents, and `verify_command` (if configured) passes \
+                 with exit code 0."
+                    .to_string(),
+            ),
+            role: None,
+            additional_skills: Vec::new(),
+            produces_artifacts: Vec::new(),
+            consumes_artifacts: Vec::new(),
+            file_scope_hints: Default::default(),
+            kind: NodeKind::Merge,
+            merge_parents: parents,
+        };
+
+        new_nodes.push(merge_task);
+        tasks[task_idx].depends_on = vec![merge_id];
     }
 
     let added = new_nodes.len();
@@ -102,83 +146,39 @@ pub fn inject_merge_nodes(tasks: &mut Vec<PlannerTask>, opts: InjectOptions) -> 
     added
 }
 
-/// 构造 reduction tree，返回 root merge node 的 id。
-///
-/// `tasks` 用于查找 parent 的 title 拼接合并描述。`new_nodes` 收集生成的 merge node。
-fn build_reduction_tree(
-    downstream_id: &str,
-    downstream_title: &str,
-    parents: &[String],
-    counter: &mut usize,
-    new_nodes: &mut Vec<PlannerTask>,
-    existing_tasks: &[PlannerTask],
-) -> String {
-    debug_assert!(parents.len() >= 2, "caller should filter < 2 parents");
-
-    // 用 title lookup 表（含已生成的 merge node title），后续 merge node 描述也能取到。
-    let lookup_title = |id: &str, news: &[PlannerTask]| -> String {
-        if let Some(t) = existing_tasks.iter().find(|t| t.id == id) {
-            return t.title.clone();
-        }
-        if let Some(t) = news.iter().find(|t| t.id == id) {
-            return t.title.clone();
-        }
-        id.to_string()
-    };
-
-    let mut layer: VecDeque<String> = parents.iter().cloned().collect();
-
-    while layer.len() > 1 {
-        let mut next_layer: VecDeque<String> = VecDeque::with_capacity((layer.len() + 1) / 2);
-
-        // 每轮从队头取 2 个配对；奇数余下的 1 个直接进下一层（与下一层产物再配对）。
-        while layer.len() >= 2 {
-            let p1 = layer.pop_front().unwrap();
-            let p2 = layer.pop_front().unwrap();
-            *counter += 1;
-            let merge_id = format!("merge-{downstream_id}-{counter}");
-            let p1_title = lookup_title(&p1, new_nodes);
-            let p2_title = lookup_title(&p2, new_nodes);
-            let merge_task = PlannerTask {
-                id: merge_id.clone(),
-                title: format!("Merge: {p1_title} + {p2_title}"),
-                description: format!(
-                    "Reconcile worktrees from two upstream tasks ({p1} and {p2}) into a clean, \
-                     verified merge so that downstream task `{downstream_id}` ({downstream_title}) \
-                     can build on top of a coherent base."
-                ),
-                complexity: "low".to_string(),
-                depends_on: vec![p1, p2],
-                expected_output: Some(
-                    "A merged worktree where conflicts (if any) are resolved with intent \
-                     preserved from both parents, and `verify_command` (if configured) passes \
-                     with exit code 0."
-                        .to_string(),
-                ),
-                role: None,
-                additional_skills: Vec::new(),
-                produces_artifacts: Vec::new(),
-                consumes_artifacts: Vec::new(),
-                file_scope_hints: Default::default(),
-                kind: NodeKind::Merge,
-                merge_parents: vec![],
-            };
-            // merge_parents 与 depends_on 重复一份（语义说明 "is merging these two"）
-            let mut merge_task = merge_task;
-            merge_task.merge_parents = merge_task.depends_on.clone();
-            new_nodes.push(merge_task);
-            next_layer.push_back(merge_id);
-        }
-
-        // 余下奇数 1 个 → 进下一层；它会和"下一层第一个 merge node"配对
-        if let Some(odd) = layer.pop_front() {
-            next_layer.push_back(odd);
-        }
-
-        layer = next_layer;
+/// 构造 merge node title：N≤3 时列出全部 parent，N≥4 时省略中间显示首末 + 计数。
+fn build_merge_title(parent_titles: &[String], downstream_title: &str) -> String {
+    let _ = downstream_title;
+    match parent_titles.len() {
+        0 | 1 => unreachable!("caller filters out N<2"),
+        2 => format!("Merge: {} + {}", parent_titles[0], parent_titles[1]),
+        3 => format!(
+            "Merge: {} + {} + {}",
+            parent_titles[0], parent_titles[1], parent_titles[2]
+        ),
+        n => format!(
+            "Merge: {} … {} ({} parents)",
+            parent_titles[0],
+            parent_titles[n - 1],
+            n
+        ),
     }
+}
 
-    layer.pop_front().expect("reduction tree must yield root")
+/// 构造 merge node description：列出所有上游 task id（不截断；上游通常 ≤8 个）。
+fn build_merge_description(parents: &[String], downstream_id: &str, downstream_title: &str) -> String {
+    let parents_list = parents
+        .iter()
+        .map(|p| format!("`{p}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Reconcile worktrees from {n} upstream task(s) ({list}) into a single coherent base so \
+         that downstream task `{downstream_id}` ({downstream_title}) can build on top of it. \
+         Resolve any cross-parent conflicts preserving intent from every parent, then verify.",
+        n = parents.len(),
+        list = parents_list,
+    )
 }
 
 #[cfg(test)]
@@ -207,10 +207,7 @@ mod tests {
     #[test]
     fn disabled_is_noop() {
         let mut tasks = vec![work("A", &[]), work("B", &[]), work("X", &["A", "B"])];
-        let added = inject_merge_nodes(
-            &mut tasks,
-            InjectOptions { enabled: false },
-        );
+        let added = inject_merge_nodes(&mut tasks, InjectOptions { enabled: false });
         assert_eq!(added, 0);
         assert_eq!(tasks.len(), 3);
         assert_eq!(tasks[2].depends_on, vec!["A", "B"]);
@@ -232,7 +229,7 @@ mod tests {
         assert_eq!(tasks.len(), 4);
 
         let merge_id = &tasks[3].id;
-        assert!(merge_id.starts_with("merge-X-"));
+        assert_eq!(merge_id, "merge-X");
         assert_eq!(tasks[3].kind, NodeKind::Merge);
         assert_eq!(tasks[3].depends_on, vec!["A".to_string(), "B".to_string()]);
         assert_eq!(tasks[3].merge_parents, vec!["A".to_string(), "B".to_string()]);
@@ -240,8 +237,8 @@ mod tests {
     }
 
     #[test]
-    fn four_parents_balanced_tree() {
-        // A,B → M1; C,D → M2; M1,M2 → M3; X.depends_on = [M3]
+    fn four_parents_single_merge_node() {
+        // v1.1 修正：N parents → 1 merge node（不再是 N-1）
         let mut tasks = vec![
             work("A", &[]),
             work("B", &[]),
@@ -250,47 +247,44 @@ mod tests {
             work("X", &["A", "B", "C", "D"]),
         ];
         let added = inject_merge_nodes(&mut tasks, InjectOptions { enabled: true });
-        assert_eq!(added, 3, "4 parents → 3 merge nodes");
-        assert_eq!(tasks.len(), 8);
+        assert_eq!(added, 1, "4 parents → 1 merge node (not 3)");
+        assert_eq!(tasks.len(), 6);
 
-        // 找出 X 的 depends_on（应为唯一 root merge）
         let x = tasks.iter().find(|t| t.id == "X").unwrap();
         assert_eq!(x.depends_on.len(), 1);
-        let root_id = &x.depends_on[0];
+        assert_eq!(x.depends_on[0], "merge-X");
 
-        let root = tasks.iter().find(|t| &t.id == root_id).unwrap();
-        assert_eq!(root.kind, NodeKind::Merge);
-        // root 的 2 个 parent 都应该是 merge node
-        for p in &root.depends_on {
-            let parent = tasks.iter().find(|t| &t.id == p).unwrap();
-            assert_eq!(parent.kind, NodeKind::Merge);
-        }
-
-        // 验证叶子 merge 是 (A,B) 和 (C,D)（按 depends_on 出现顺序保持稳定）
-        let merge_nodes: Vec<_> = tasks
-            .iter()
-            .filter(|t| t.kind == NodeKind::Merge && t.depends_on.iter().all(|d| ["A", "B", "C", "D"].contains(&d.as_str())))
-            .collect();
-        assert_eq!(merge_nodes.len(), 2);
-        let leaf1 = &merge_nodes[0].depends_on;
-        let leaf2 = &merge_nodes[1].depends_on;
-        // 两叶子合并对必须是 {A,B} + {C,D} 二者之一
-        let pair1: std::collections::HashSet<&String> = leaf1.iter().collect();
-        let pair2: std::collections::HashSet<&String> = leaf2.iter().collect();
-        let ab: std::collections::HashSet<String> = ["A", "B"].iter().map(|s| s.to_string()).collect();
-        let cd: std::collections::HashSet<String> = ["C", "D"].iter().map(|s| s.to_string()).collect();
-        let ab_ref: std::collections::HashSet<&String> = ab.iter().collect();
-        let cd_ref: std::collections::HashSet<&String> = cd.iter().collect();
-        assert!(
-            (pair1 == ab_ref && pair2 == cd_ref) || (pair1 == cd_ref && pair2 == ab_ref),
-            "leaves should be {{A,B}} + {{C,D}}, got {leaf1:?} + {leaf2:?}"
-        );
+        let merge = tasks.iter().find(|t| t.id == "merge-X").unwrap();
+        assert_eq!(merge.kind, NodeKind::Merge);
+        assert_eq!(merge.depends_on, vec!["A", "B", "C", "D"]);
+        assert_eq!(merge.merge_parents, vec!["A", "B", "C", "D"]);
     }
 
     #[test]
-    fn five_parents_odd_carry() {
-        // A,B → M1; C,D → M2; (M1,M2 配对) → M3; (M3,E 余数配对) → M4
-        // 即：第一层产生 M1, M2，剩余 E；第二层 M1+M2 → M3，剩余 E；第三层 M3+E → M4
+    fn eight_parents_still_single_merge_node() {
+        // 重点回归：N=8 不再生成 7 个 merge（用户提出的 DAG 视觉膨胀问题）
+        let parent_ids: Vec<String> = (0..8).map(|i| format!("P{i}")).collect();
+        let parent_refs: Vec<&str> = parent_ids.iter().map(|s| s.as_str()).collect();
+
+        let mut tasks: Vec<PlannerTask> =
+            parent_ids.iter().map(|p| work(p, &[])).collect();
+        tasks.push(work("X", &parent_refs));
+
+        let added = inject_merge_nodes(&mut tasks, InjectOptions { enabled: true });
+        assert_eq!(added, 1, "N=8 must yield exactly 1 merge node, got {added}");
+
+        let merge = tasks.iter().find(|t| t.kind == NodeKind::Merge).unwrap();
+        assert_eq!(merge.depends_on.len(), 8);
+        assert_eq!(merge.merge_parents.len(), 8);
+        // 顺序保持稳定
+        for (i, p) in parent_ids.iter().enumerate() {
+            assert_eq!(&merge.depends_on[i], p);
+            assert_eq!(&merge.merge_parents[i], p);
+        }
+    }
+
+    #[test]
+    fn five_parents_keeps_order() {
         let mut tasks = vec![
             work("A", &[]),
             work("B", &[]),
@@ -300,10 +294,13 @@ mod tests {
             work("X", &["A", "B", "C", "D", "E"]),
         ];
         let added = inject_merge_nodes(&mut tasks, InjectOptions { enabled: true });
-        assert_eq!(added, 4, "5 parents → 4 merge nodes");
+        assert_eq!(added, 1);
 
-        let x = tasks.iter().find(|t| t.id == "X").unwrap();
-        assert_eq!(x.depends_on.len(), 1);
+        let merge = tasks.iter().find(|t| t.id == "merge-X").unwrap();
+        assert_eq!(
+            merge.depends_on,
+            vec!["A".to_string(), "B".to_string(), "C".to_string(), "D".to_string(), "E".to_string()]
+        );
     }
 
     #[test]
@@ -320,8 +317,8 @@ mod tests {
     }
 
     #[test]
-    fn multiple_downstream_tasks_independent_trees() {
-        // X 依赖 (A,B)，Y 依赖 (B,C)；应该各自有 reduction tree（不共用 merge 节点）
+    fn multiple_downstream_tasks_independent_merges() {
+        // X 依赖 (A,B)，Y 依赖 (B,C)；应该各自有独立 merge node
         let mut tasks = vec![
             work("A", &[]),
             work("B", &[]),
@@ -334,8 +331,8 @@ mod tests {
 
         let x = tasks.iter().find(|t| t.id == "X").unwrap();
         let y = tasks.iter().find(|t| t.id == "Y").unwrap();
-        assert_eq!(x.depends_on.len(), 1);
-        assert_eq!(y.depends_on.len(), 1);
+        assert_eq!(x.depends_on, vec!["merge-X".to_string()]);
+        assert_eq!(y.depends_on, vec!["merge-Y".to_string()]);
         assert_ne!(x.depends_on[0], y.depends_on[0]);
     }
 
@@ -358,6 +355,21 @@ mod tests {
         assert!(merge.title.starts_with("Merge:"));
     }
 
+    #[test]
+    fn merge_node_title_collapses_when_many_parents() {
+        // N≥4 时 title 不再罗列所有 parent，避免 UI 标题过长
+        let parent_ids: Vec<String> = (0..6).map(|i| format!("P{i}")).collect();
+        let parent_refs: Vec<&str> = parent_ids.iter().map(|s| s.as_str()).collect();
+        let mut tasks: Vec<PlannerTask> = parent_ids.iter().map(|p| work(p, &[])).collect();
+        tasks.push(work("X", &parent_refs));
+
+        inject_merge_nodes(&mut tasks, InjectOptions { enabled: true });
+        let merge = tasks.iter().find(|t| t.kind == NodeKind::Merge).unwrap();
+        assert!(merge.title.contains("(6 parents)"), "got title: {}", merge.title);
+        assert!(merge.title.contains("Task P0"));
+        assert!(merge.title.contains("Task P5"));
+    }
+
     // ============================================================================
     // 集成式断言：与 validate_task_graph + consumes 校验交互
     // ============================================================================
@@ -369,7 +381,7 @@ mod tests {
     fn injection_preserves_validate_task_graph_invariants() {
         use crate::agent::planner::validate_task_graph;
 
-        for n_parents in 2..=6 {
+        for n_parents in 2..=8 {
             let mut tasks: Vec<PlannerTask> = (0..n_parents)
                 .map(|i| work(&format!("P{i}"), &[]))
                 .collect();
@@ -391,26 +403,26 @@ mod tests {
                 "post-inject N={n_parents} must still validate (no cycles, no dangling refs)"
             );
 
-            // X 的 depends_on 必须收敛到唯一 root merge
+            // X 的 depends_on 必须收敛到唯一 merge
             let x = tasks.iter().find(|t| t.id == "X").unwrap();
             assert_eq!(
                 x.depends_on.len(),
                 1,
-                "post-inject X must depend on exactly 1 root merge, got {:?}",
+                "post-inject X must depend on exactly 1 merge, got {:?}",
                 x.depends_on
             );
 
-            // merge 节点数量 = N - 1
+            // merge 节点数量恒为 1（v1.1 修正：不再是 N-1）
             let merges = tasks.iter().filter(|t| t.kind == NodeKind::Merge).count();
-            assert_eq!(merges, n_parents - 1, "N={n_parents} → expected N-1 merges");
+            assert_eq!(merges, 1, "N={n_parents} → expected exactly 1 merge node");
         }
     }
 
     /// inject 不破坏 consumes_artifacts 语义：下游 X 原本 `consumes` 一个 parent
-    /// 的 artifact，注入 merge 节点后 X.depends_on = [root_merge]，但 P1 仍在 X
-    /// 的**传递依赖闭包**内（X → root_merge → ... → P1）。
+    /// 的 artifact，注入 merge 节点后 X.depends_on = [merge-X]，但 P_i 仍在 X
+    /// 的**传递依赖闭包**内（X → merge-X → P_i）。
     ///
-    /// 这里只做拓扑闭包的间接断言：从 X 出发 BFS 应该能走到原 parent。
+    /// 这里只做拓扑闭包的间接断言：从 X 出发 BFS 应该能走到所有原 parent。
     #[test]
     fn injection_preserves_transitive_closure_to_original_parents() {
         use std::collections::{HashSet, VecDeque};
