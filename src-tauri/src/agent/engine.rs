@@ -529,6 +529,15 @@ impl Default for AgentRunOptions {
     }
 }
 
+/// P2-1 Phase B：hook 调用的 fatal 信号。详见 [`AgentEngine::dispatch_hook_phase`] 文档。
+#[derive(Debug, Clone)]
+enum HookFatal {
+    /// 整 agent 立即 failed。原因字串将被填入 events.error 给前端展示。
+    Terminal(String),
+    /// 当前 step 提前结束（不再调 LLM / 不再执行 tool），agent 仍存活。
+    StepAborted(String),
+}
+
 pub struct AgentEngine {
     provider: Arc<dyn LlmProvider>,
     tool_executor: ToolExecutor,
@@ -541,6 +550,16 @@ pub struct AgentEngine {
     /// 摘要触发阈值（chars）。超过此值的 tool_result 才走摘要路径，
     /// 减少没意义的小请求往返。
     tool_summary_threshold_chars: usize,
+    /// Single-Agent Uplift P2-1 Phase B：通用 hook registry。
+    ///
+    /// 默认空（行为同旧版）。caller 用 [`with_hooks`] 注入：典型链路为
+    /// builtin（GuardrailHook 等）+ workspace `.miragenty/hooks.json`
+    /// （Phase C 落地）。engine 在 7 个 [`HookPhase`] 调用点 fan-out 给 registry。
+    ///
+    /// 用 [`Arc`] 是因为 registry 在多个 phase 调用点共享只读访问，且 hooks 内部
+    /// 可能持有 Send + Sync 资源（线程池 / DB 连接池等），Arc 让 engine 自身
+    /// 不持有 phase 调用的可变借用。
+    hook_registry: Arc<crate::agent::hooks::HookRegistry>,
 }
 
 impl AgentEngine {
@@ -559,6 +578,7 @@ impl AgentEngine {
             cancel_token,
             tool_summarizer: None,
             tool_summary_threshold_chars: TOOL_RESULT_BUDGET_CHARS,
+            hook_registry: Arc::new(crate::agent::hooks::HookRegistry::new()),
         }
     }
 
@@ -572,6 +592,18 @@ impl AgentEngine {
     ) -> Self {
         self.tool_summarizer = Some(summarizer);
         self.tool_summary_threshold_chars = threshold_chars.max(TOOL_RESULT_BUDGET_CHARS);
+        self
+    }
+
+    /// Single-Agent Uplift P2-1 Phase B：注入 hook registry。
+    ///
+    /// Caller 构造好包含 builtin + workspace + user-global 的 registry 后传进来。
+    /// 不调此方法 = 空 registry = 所有 phase 调用点 `Pass`，行为完全等同旧版。
+    ///
+    /// 设计上接受 owned `HookRegistry` 然后 `Arc::new`：避免 caller 关心 Arc，
+    /// 也避免在 multi-engine 场景（极少）误把 registry 同步给意料外的 agent。
+    pub fn with_hooks(mut self, registry: crate::agent::hooks::HookRegistry) -> Self {
+        self.hook_registry = Arc::new(registry);
         self
     }
 
@@ -898,22 +930,124 @@ impl AgentEngine {
             self.apply_tool_result_budget_with_optional_summary(agent_id, step, &mut messages)
                 .await;
             if approximate_tokens(&messages) > MICROCOMPACT_TOKEN_THRESHOLD {
-                if let Some(report) = microcompact(&mut messages) {
-                    // P0-1 引入了 reactive compact 后，前端需要区分 proactive vs reactive
-                    // 两种来源。proactive (这里) = 主动按本地 token 估算触发；
-                    // reactive (`engine.rs` Llm 错误分支) = API 拒绝后兜底压缩。
-                    let mut meta = report.to_meta();
-                    if let Some(obj) = meta.as_object_mut() {
-                        obj.insert("kind".into(), serde_json::json!("proactive"));
-                        obj.insert("trigger".into(), serde_json::json!("token_threshold"));
-                    }
-                    self.emit_event_with_meta(
+                // P2-1 Phase B: PreCompact hook 调用点。compact 即将丢弃部分历史，
+                // hook 可以把关键 context 持久化到 artifact / agent_notes 防丢失。
+                {
+                    let hook_ctx = self.build_hook_context(
                         agent_id,
                         step,
-                        "compact",
-                        &report.human_readable(),
-                        Some(meta),
+                        crate::agent::hooks::HookPhase::PreCompact,
+                        &messages,
+                        None,
+                        None,
                     );
+                    // PreCompact 的 prevent 语义：terminal 仍然 fail；StepAborted 仅
+                    // 跳过本次 compact（即不压缩，messages 保持原样进 LLM）——这对
+                    // hook 想"今天先不压缩，让 model 看完再说"的场景是有意义的。
+                    match self.dispatch_hook_phase(agent_id, step, hook_ctx, &mut messages).await
+                    {
+                        Ok(()) => {
+                            if let Some(report) = microcompact(&mut messages) {
+                                // P0-1 引入了 reactive compact 后，前端需要区分 proactive vs reactive
+                                // 两种来源。proactive (这里) = 主动按本地 token 估算触发；
+                                // reactive (`engine.rs` Llm 错误分支) = API 拒绝后兜底压缩。
+                                let mut meta = report.to_meta();
+                                if let Some(obj) = meta.as_object_mut() {
+                                    obj.insert("kind".into(), serde_json::json!("proactive"));
+                                    obj.insert("trigger".into(), serde_json::json!("token_threshold"));
+                                }
+                                self.emit_event_with_meta(
+                                    agent_id,
+                                    step,
+                                    "compact",
+                                    &report.human_readable(),
+                                    Some(meta),
+                                );
+                                // P2-1 Phase B: PostCompact hook 调用点。compact 完成
+                                // （messages 已被 microcompact 改写），让 hook 重新注入丢失
+                                // 的关键 context。Prevent 在此处都视为 fail——compact 已
+                                // 不可逆，"不让 agent 继续"等价于 step abort 但 messages 已
+                                // 改，无法回滚到 PreCompact 状态。
+                                let hook_ctx_post = self.build_hook_context(
+                                    agent_id,
+                                    step,
+                                    crate::agent::hooks::HookPhase::PostCompact,
+                                    &messages,
+                                    None,
+                                    None,
+                                );
+                                match self
+                                    .dispatch_hook_phase(agent_id, step, hook_ctx_post, &mut messages)
+                                    .await
+                                {
+                                    Ok(()) => {}
+                                    Err(HookFatal::Terminal(reason))
+                                    | Err(HookFatal::StepAborted(reason)) => {
+                                        let msg =
+                                            format!("PostCompact hook terminated agent: {reason}");
+                                        self.mark_task_failed_with_reason(agent_id, "failed", &msg);
+                                        self.emit_event(
+                                            agent_id, step, "status_change", "failed",
+                                        );
+                                        self.update_agent_status(agent_id, "failed");
+                                        return Ok(AgentStatus::Failed);
+                                    }
+                                }
+                            }
+                        }
+                        Err(HookFatal::Terminal(reason)) => {
+                            let msg = format!("PreCompact hook terminated agent: {reason}");
+                            self.mark_task_failed_with_reason(agent_id, "failed", &msg);
+                            self.emit_event(agent_id, step, "status_change", "failed");
+                            self.update_agent_status(agent_id, "failed");
+                            return Ok(AgentStatus::Failed);
+                        }
+                        Err(HookFatal::StepAborted(reason)) => {
+                            // 跳过 compact，继续走 LLM 调用（messages 未压缩，下次 token
+                            // 估算如果仍超 threshold，下个 step 会再触发——但 hook 可以
+                            // 用 matcher/cooldown 控制不无限触发）
+                            tracing::info!(
+                                agent_id = %agent_id,
+                                step,
+                                "PreCompact hook step-aborted compact: {reason}"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // P2-1 Phase B: PreLlmCall hook 调用点。空 registry 时立即返回 Pass，
+            // 无任何额外开销。Terminal prevent → 当作 step_aborted_fatal 走 fail 路径；
+            // StepAborted → 跳过本 step 的 LLM 调用直接进入下一轮（loop continue）。
+            {
+                let hook_ctx = self.build_hook_context(
+                    agent_id,
+                    step,
+                    crate::agent::hooks::HookPhase::PreLlmCall,
+                    &messages,
+                    None,
+                    None,
+                );
+                match self.dispatch_hook_phase(agent_id, step, hook_ctx, &mut messages).await {
+                    Ok(()) => {}
+                    Err(HookFatal::Terminal(reason)) => {
+                        let msg = format!("PreLlmCall hook terminated agent: {reason}");
+                        self.mark_task_failed_with_reason(agent_id, "failed", &msg);
+                        self.emit_event(agent_id, step, "status_change", "failed");
+                        self.update_agent_status(agent_id, "failed");
+                        return Ok(AgentStatus::Failed);
+                    }
+                    Err(HookFatal::StepAborted(reason)) => {
+                        tracing::warn!(
+                            agent_id = %agent_id,
+                            step,
+                            "PreLlmCall hook aborted step (non-terminal): {reason}"
+                        );
+                        // 不调 LLM，但允许下个 step 继续（hook 注入的 message 仍在 messages
+                        // 里——其实 StepAborted 不注入，但下一轮主循环会重新评估）
+                        step = step.saturating_add(1);
+                        continue;
+                    }
                 }
             }
 
@@ -1403,6 +1537,34 @@ impl AgentEngine {
                 cache_control: None,
             });
 
+            // P2-1 Phase B: PostSampling hook 调用点。assistant message 已 push 进
+            // messages，tool_use 解析尚未开始。典型用途：记录响应文本 / reasoning 长度分析。
+            // 在 cost 记录前调，让 hook 也能阻止"按 token 计费但不该继续"的边缘场景。
+            {
+                let hook_ctx = self.build_hook_context(
+                    agent_id,
+                    step,
+                    crate::agent::hooks::HookPhase::PostSampling,
+                    &messages,
+                    None,
+                    None,
+                );
+                match self.dispatch_hook_phase(agent_id, step, hook_ctx, &mut messages).await {
+                    Ok(()) => {}
+                    Err(HookFatal::Terminal(reason)) => {
+                        let msg = format!("PostSampling hook terminated agent: {reason}");
+                        self.mark_task_failed_with_reason(agent_id, "failed", &msg);
+                        self.emit_event(agent_id, step, "status_change", "failed");
+                        self.update_agent_status(agent_id, "failed");
+                        return Ok(AgentStatus::Failed);
+                    }
+                    Err(HookFatal::StepAborted(_)) => {
+                        step = step.saturating_add(1);
+                        continue;
+                    }
+                }
+            }
+
             let step_cost = self.provider.estimate_cost(
                 &opts.model,
                 response.usage.input_tokens,
@@ -1779,6 +1941,39 @@ impl AgentEngine {
                     })),
                 );
 
+                // P2-1 Phase B: Stop hook 调用点。task_complete 触发的"自然 turn 结束"
+                // 是用户最常注册 hook 的位置（"提交前跑 npm test"）。在 guardrail
+                // evaluator 之前调，让 hook 也能 InjectMessage 让 agent 重做。
+                {
+                    let hook_ctx = self.build_hook_context(
+                        agent_id,
+                        step,
+                        crate::agent::hooks::HookPhase::Stop,
+                        &messages,
+                        None,
+                        Some(summary.clone()),
+                    );
+                    match self.dispatch_hook_phase(agent_id, step, hook_ctx, &mut messages).await
+                    {
+                        Ok(()) => {}
+                        Err(HookFatal::Terminal(reason)) => {
+                            let msg = format!("Stop hook terminated agent: {reason}");
+                            self.mark_task_failed_with_reason(agent_id, "failed", &msg);
+                            self.emit_event(agent_id, step, "status_change", "failed");
+                            self.update_agent_status(agent_id, "failed");
+                            return Ok(AgentStatus::Failed);
+                        }
+                        Err(HookFatal::StepAborted(_)) => {
+                            // Stop hook 的 StepAborted = "别 complete，继续跑"——
+                            // 转化为 Retry 路径让主循环重试，注入的 message 已 push 进
+                            // messages 由 hook handler 完成。
+                            consecutive_no_tool = 0;
+                            step = step.saturating_add(1);
+                            continue;
+                        }
+                    }
+                }
+
                 let outcome = self
                     .evaluate_completion(agent_id, step, &summary, opts)
                     .await;
@@ -1786,6 +1981,47 @@ impl AgentEngine {
                     CompletionOutcome::Completed => {
                         self.emit_event(agent_id, step, "message", &summary);
                         self.persist_completion_summary(agent_id, &summary);
+                        // P2-1 Phase B: TaskCompleted hook 调用点。guardrail 已 pass，
+                        // status 即将变 completed。典型用途：publish artifact / send
+                        // notification。在 status_change 之前调，让 terminal prevent 还能拦下。
+                        {
+                            let hook_ctx = self.build_hook_context(
+                                agent_id,
+                                step,
+                                crate::agent::hooks::HookPhase::TaskCompleted,
+                                &messages,
+                                None,
+                                Some(summary.clone()),
+                            );
+                            match self
+                                .dispatch_hook_phase(agent_id, step, hook_ctx, &mut messages)
+                                .await
+                            {
+                                Ok(()) => {}
+                                Err(HookFatal::Terminal(reason)) => {
+                                    let msg = format!(
+                                        "TaskCompleted hook terminated agent after summary persisted: {reason}"
+                                    );
+                                    self.mark_task_failed_with_reason(agent_id, "failed", &msg);
+                                    self.emit_event(agent_id, step, "status_change", "failed");
+                                    self.update_agent_status(agent_id, "failed");
+                                    return Ok(AgentStatus::Failed);
+                                }
+                                Err(HookFatal::StepAborted(_)) => {
+                                    // 这里的 StepAborted 含义最微妙："guardrail 全 pass + summary
+                                    // 已 persist，但 hook 反悔不让收尾"。最保守做法：当作 Failed，
+                                    // 避免出现"completed_at NULL 但 status=completed"的脏态。
+                                    let msg =
+                                        "TaskCompleted hook requested non-terminal step abort; \
+                                         treating as failed to avoid completed-but-not-finalized state"
+                                            .to_string();
+                                    self.mark_task_failed_with_reason(agent_id, "failed", &msg);
+                                    self.emit_event(agent_id, step, "status_change", "failed");
+                                    self.update_agent_status(agent_id, "failed");
+                                    return Ok(AgentStatus::Failed);
+                                }
+                            }
+                        }
                         self.emit_event(agent_id, step, "status_change", "completed");
                         self.update_agent_status(agent_id, "completed");
                         self.expire_agent_notes(agent_id);
@@ -2077,6 +2313,62 @@ impl AgentEngine {
             }
 
             messages.push(followup.build());
+
+            // P2-1 Phase B: PostToolUse hook 调用点。批量执行后触发一次（而非每个 tool
+            // 一次），avoid 一个 step 多个 tool 时事件淹没。hook 想"逐工具"信息可以从
+            // `ctx.messages_summary.recent_tool_uses` 倒序拿到本批次所有工具名。
+            // last_tool_use 取本批次最后一个有 ToolUse + ToolResult 配对的工具——
+            // 简化实现：取 tool_use_blocks 的最后一个 + 它的输出（来自刚 push 的 followup
+            // message 的最后一个 ToolResult block）。
+            if !tool_use_blocks.is_empty() {
+                let (last_id, last_name, last_input) =
+                    tool_use_blocks.last().expect("non-empty guarded above").clone();
+                // 从刚 push 的 followup message 倒序找匹配的 ToolResult
+                let (last_output_excerpt, last_is_error) = messages
+                    .last()
+                    .and_then(|m| {
+                        m.content.iter().rev().find_map(|b| match b {
+                            ContentBlock::ToolResult { tool_use_id, content, is_error }
+                                if tool_use_id == &last_id =>
+                            {
+                                let excerpt: String = content.chars().take(2048).collect();
+                                Some((excerpt, *is_error))
+                            }
+                            _ => None,
+                        })
+                    })
+                    .unwrap_or_else(|| (String::new(), false));
+                let hook_ctx = self.build_hook_context(
+                    agent_id,
+                    step,
+                    crate::agent::hooks::HookPhase::PostToolUse,
+                    &messages,
+                    Some(crate::agent::hooks::HookToolUseInfo {
+                        tool_use_id: last_id,
+                        tool_name: last_name,
+                        input: last_input,
+                        output_excerpt: last_output_excerpt,
+                        is_error: last_is_error,
+                    }),
+                    None,
+                );
+                match self.dispatch_hook_phase(agent_id, step, hook_ctx, &mut messages).await {
+                    Ok(()) => {}
+                    Err(HookFatal::Terminal(reason)) => {
+                        let msg = format!("PostToolUse hook terminated agent: {reason}");
+                        self.mark_task_failed_with_reason(agent_id, "failed", &msg);
+                        self.emit_event(agent_id, step, "status_change", "failed");
+                        self.update_agent_status(agent_id, "failed");
+                        return Ok(AgentStatus::Failed);
+                    }
+                    Err(HookFatal::StepAborted(_)) => {
+                        // 不终止 agent，但跳到下一 step（hook 注入的 message 已 push）
+                        consecutive_no_tool = 0;
+                        step = step.saturating_add(1);
+                        continue;
+                    }
+                }
+            }
 
             if self.cancel_token.is_cancelled() {
                 return self.finish_cancelled(agent_id, step);
@@ -3031,6 +3323,219 @@ impl AgentEngine {
             Ok(())
         }) {
             tracing::warn!("Failed to update agent status: {e}");
+        }
+    }
+
+    /// P2-1 Phase B：在指定 phase 执行注册的所有 hook，处理结果（emit 事件 + 注入 messages）。
+    ///
+    /// 返回值语义：
+    /// - `Ok(())`：继续主循环（Pass 或 Inject 后已 push 到 messages）
+    /// - `Err(HookFatal::Terminal(reason))`：terminal=true 的 Prevent，调用方应立即把
+    ///   agent 标 failed
+    /// - `Err(HookFatal::StepAborted(reason))`：terminal=false 的 Prevent，调用方应
+    ///   提前结束当前 step（不再调 LLM / 不再执行 tool）但 agent 仍存活
+    ///
+    /// 不变量：
+    /// - empty registry → 无任何 emit，立即 Pass 返回（**0 行为变化**，向后兼容）
+    /// - 多 hook InjectMessage → 按注册顺序拼接成单条 user message 注入，避免
+    ///   message 列表被 hook 数撑爆
+    /// - hook execute panic 已被 `tokio::task` 默认 catch（async fn）；为防御
+    ///   "hook execute 阻塞 N 分钟"主循环僵死，外层 caller 可选择性套 timeout
+    ///   （Phase C 引入 CommandHook 时再加，本地内置 hook 假设 short-running）
+    async fn dispatch_hook_phase(
+        &self,
+        agent_id: &str,
+        step: u32,
+        ctx: crate::agent::hooks::HookContext,
+        messages: &mut Vec<Message>,
+    ) -> std::result::Result<(), HookFatal> {
+        // 快速路径：空 registry 不做任何 IO / event emit，避免在主循环热路径上
+        // 把每个 step × 7 phase = 多个 event 写日志噪音化。
+        if self.hook_registry.hook_count() == 0 {
+            return Ok(());
+        }
+        let phase = ctx.phase;
+        let started = std::time::Instant::now();
+        let result = self.hook_registry.execute_phase(&ctx).await;
+        let duration_ms = started.elapsed().as_millis() as u64;
+        match result {
+            crate::agent::hooks::PhaseResult::Pass => {
+                // 仅在 registry 非空时记一笔 trace 事件，便于排查"hook 配置上来了但没生效"
+                let meta = serde_json::json!({
+                    "phase": phase.as_str(),
+                    "duration_ms": duration_ms,
+                    "hook_count": self.hook_registry.hook_count(),
+                });
+                self.emit_event_with_meta(
+                    agent_id,
+                    step,
+                    "hook_executed",
+                    &format!("hooks pass ({})", phase.as_str()),
+                    Some(meta),
+                );
+                Ok(())
+            }
+            crate::agent::hooks::PhaseResult::Injected(injs) => {
+                let total = injs.len();
+                // 单条聚合消息：每个 hook 一段，前缀 hook_name + severity
+                let body = injs
+                    .iter()
+                    .map(|i| {
+                        format!(
+                            "[hook:{} severity={}] {}",
+                            i.hook_name,
+                            i.severity.as_str(),
+                            i.content
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                let injected_user_msg = format!(
+                    "Hooks injected feedback in phase `{}`. Address these before continuing:\n\n{body}",
+                    phase.as_str()
+                );
+                messages.push(Message {
+                    role: MessageRole::User,
+                    content: vec![ContentBlock::Text {
+                        text: injected_user_msg,
+                    }],
+                    cache_control: None,
+                });
+                let meta = serde_json::json!({
+                    "phase": phase.as_str(),
+                    "duration_ms": duration_ms,
+                    "injections": injs
+                        .iter()
+                        .map(|i| serde_json::json!({
+                            "hook_name": i.hook_name,
+                            "severity": i.severity.as_str(),
+                        }))
+                        .collect::<Vec<_>>(),
+                });
+                self.emit_event_with_meta(
+                    agent_id,
+                    step,
+                    "hook_inject",
+                    &format!("{total} hook injection(s) in {}", phase.as_str()),
+                    Some(meta),
+                );
+                Ok(())
+            }
+            crate::agent::hooks::PhaseResult::Prevented {
+                hook_name,
+                reason,
+                terminal,
+            } => {
+                let meta = serde_json::json!({
+                    "phase": phase.as_str(),
+                    "duration_ms": duration_ms,
+                    "hook_name": hook_name,
+                    "reason": reason,
+                    "terminal": terminal,
+                });
+                self.emit_event_with_meta(
+                    agent_id,
+                    step,
+                    "hook_prevented",
+                    &format!(
+                        "hook `{hook_name}` prevented continuation in {} (terminal={terminal}): {reason}",
+                        phase.as_str()
+                    ),
+                    Some(meta),
+                );
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    step,
+                    phase = phase.as_str(),
+                    hook_name = %hook_name,
+                    terminal,
+                    "hook prevented continuation: {reason}"
+                );
+                if terminal {
+                    Err(HookFatal::Terminal(reason))
+                } else {
+                    Err(HookFatal::StepAborted(reason))
+                }
+            }
+        }
+    }
+
+    /// 构造给 hook 用的 [`HookContext`]。
+    ///
+    /// 把 engine 内部状态裁剪成 hook 可见的 owned 副本——见 hooks/mod.rs 的设计取舍。
+    /// `last_assistant_text` cap 1KB / `recent_tool_uses` cap 5 项防止上下文撑爆。
+    fn build_hook_context(
+        &self,
+        agent_id: &str,
+        step: u32,
+        phase: crate::agent::hooks::HookPhase,
+        messages: &[Message],
+        last_tool_use: Option<crate::agent::hooks::HookToolUseInfo>,
+        task_complete_summary: Option<String>,
+    ) -> crate::agent::hooks::HookContext {
+        let total_count = messages.len();
+        let last_assistant_text = messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, MessageRole::Assistant))
+            .and_then(|m| {
+                m.content.iter().find_map(|b| match b {
+                    ContentBlock::Text { text } => {
+                        let s: String = text.chars().take(1024).collect();
+                        Some(s)
+                    }
+                    _ => None,
+                })
+            });
+        // recent_tool_uses: 倒序收集，cap 5 项
+        let mut recent_tool_uses: Vec<String> = Vec::with_capacity(5);
+        for m in messages.iter().rev() {
+            for b in &m.content {
+                if let ContentBlock::ToolUse { name, .. } = b {
+                    if recent_tool_uses.len() < 5 {
+                        recent_tool_uses.push(name.clone());
+                    }
+                }
+            }
+            if recent_tool_uses.len() >= 5 {
+                break;
+            }
+        }
+        // mission_id 反查；失败时塞空串（hook 大多用不到）
+        // mission_id 反查：try_state→ok→with_conn 链式可能为 None / Err / 0 rows，
+        // 任一失败都 fallback 到空串（hook 大多用不到）。
+        let mission_id = self
+            .app_handle
+            .try_state::<Database>()
+            .and_then(|db| {
+                let task_id = db
+                    .with_conn(|conn| queries::get_task_id_for_agent(conn, agent_id))
+                    .ok()
+                    .flatten()?;
+                db.with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT mission_id FROM tasks WHERE id = ?1",
+                        rusqlite::params![&task_id],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .map_err(anyhow::Error::from)
+                })
+                .ok()
+            })
+            .unwrap_or_default();
+        crate::agent::hooks::HookContext {
+            agent_id: agent_id.to_string(),
+            mission_id,
+            workspace_path: self.workspace_root.to_string_lossy().into_owned(),
+            step,
+            phase,
+            messages_summary: crate::agent::hooks::HookMessagesSummary {
+                total_count,
+                last_assistant_text,
+                recent_tool_uses,
+            },
+            last_tool_use,
+            task_complete_summary,
         }
     }
 

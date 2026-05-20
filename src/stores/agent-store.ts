@@ -36,7 +36,14 @@ export type AgentEventKind =
   // 后端在 reactive compact / idle retry / max_output_tokens / cross-model
   // fallback 这四条恢复路径上 emit attempt + (下次成功后) succeeded。
   | "recovery_attempt"
-  | "recovery_succeeded";
+  | "recovery_succeeded"
+  // Single-Agent Uplift P2-1 Phase B: 通用 Stop Hook 体系事件。
+  // - hook_executed: 一个 phase 的 hook 全部 Pass 后记录
+  // - hook_inject:   hook InjectMessage 后（content 是 hook 注入文本）
+  // - hook_prevented: hook PreventContinuation 后（terminal 决定是否立即 fail）
+  | "hook_executed"
+  | "hook_inject"
+  | "hook_prevented";
 
 export interface AgentEvent {
   id: string;
