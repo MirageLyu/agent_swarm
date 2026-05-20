@@ -161,7 +161,14 @@
     "allowCommandHooksLabel": "允许 workspace 命令钩子（RCE 风险）",
     "allowCommandHooksHint": "开启后，agent 在每次 mission 启动时会加载该 workspace 下的 `.miragenty/hooks.json` 并在 phase 边界（PostToolUse / Stop 等）通过 `sh -c` 执行注册的 shell 命令。默认关闭——这些命令以你的用户权限运行，能编辑 workspace 的任何人都可触发任意代码执行。仅在审计过 hook 内容后打开。每个 hook 60s 超时，失败时仅降级为 advisory inject 而不会强杀 agent。",
     "allowCommandHooksOn": "允许（已审计）",
-    "allowCommandHooksOff": "禁用（默认，安全）"
+    "allowCommandHooksOff": "禁用（默认，安全）",
+    "explicitMergeNodeLabel": "启用显式 Merge 节点",
+    "explicitMergeNodeHint": "DAG 中如果一个 task 有多个 parent（菱形汇合），planner 会自动插入一个专属的「merge agent」节点，它有独立的 LLM 上下文，显式合并两路 worktree 并跑你配置的 verify 命令。默认关闭，保持旧版「theirs 兜底」的隐式 `prepare_task_base` 行为。仅对**新建**的 mission 生效——已存在的 mission 沿用其计划签订时的策略。",
+    "explicitMergeNodeOn": "用显式 merge agent",
+    "explicitMergeNodeOff": "隐式 theirs 兜底（默认）",
+    "mergeVerifyCommandLabel": "Merge 节点 verify 命令（全局默认）",
+    "mergeVerifyCommandPlaceholder": "如 cargo check、npm run build、pnpm test",
+    "mergeVerifyCommandHint": "Merge agent 调用 `task_complete` 前**必须**成功执行（exit code = 0）的 shell 命令。通过 CommandPasses guardrail 强制，300s 超时。留空 = 不设硬 gate（merge agent 仍可用 shell_exec 自评，但无自动校验）。「启用显式 merge 节点」关闭时此项禁用。"
   },
   "mission": {
     "title": "任务",

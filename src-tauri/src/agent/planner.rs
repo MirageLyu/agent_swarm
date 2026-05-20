@@ -644,6 +644,43 @@ pub struct PlannerOutput {
     pub tasks: Vec<PlannerTask>,
 }
 
+/// Task 节点类型。
+///
+/// **Explicit Merge Node v1**：DAG 多 parent 汇合点的合并不再是隐式基础设施步骤
+/// （`prepare_task_base` 静默 theirs 兜底），而是一个显式 `Merge` 节点，复用通用
+/// `AgentEngine`，让 LLM 看到 parent 上下文 + 自己跑 verify_command 验证合并结果。
+///
+/// 默认 `Work`；只有 `inject_merge_nodes` 在 planner 后处理阶段为多 parent
+/// 汇合点自动生成 `Merge` 节点。**用户编写的 mission template / planner LLM 输出
+/// 不需要也不应该手动指定 `Merge`**——它是基础设施自动产物。
+///
+/// 详见 `docs/research/explicit-merge-node/proposal.md` §3。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeKind {
+    #[default]
+    Work,
+    Merge,
+}
+
+impl NodeKind {
+    /// DB 落库 / 读取用的字符串形式（与 migration 029 的 CHECK 约束对齐）。
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            NodeKind::Work => "work",
+            NodeKind::Merge => "merge",
+        }
+    }
+
+    /// 从 DB 字符串还原；未识别值（包括 NULL 兜底）→ `Work`，保证读旧数据安全。
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "merge" => NodeKind::Merge,
+            _ => NodeKind::Work,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlannerTask {
     pub id: String,
@@ -679,6 +716,27 @@ pub struct PlannerTask {
     /// FM-15 FR-04: file scope hints（用于冲突预测 + worktree 加速）。
     #[serde(default, skip_serializing_if = "FileScopeHints::is_empty")]
     pub file_scope_hints: FileScopeHints,
+
+    // ---- Explicit Merge Node v1 ----
+    /// 节点类型；默认 `Work`，由 `inject_merge_nodes` 后处理为多 parent 汇合点
+    /// 创建 `Merge` 节点。LLM 输出不强制此字段（serde 默认填 `Work`），避免
+    /// planner prompt 需要解释此概念。
+    #[serde(default, skip_serializing_if = "is_default_node_kind")]
+    pub kind: NodeKind,
+
+    /// 仅当 `kind == Merge` 时非空：永远恰好 2 个 parent task id（二叉 reduction
+    /// tree 算法保证）。`Work` 节点恒为空。
+    ///
+    /// 与 `depends_on` 的关系：merge 节点入库时 `merge_parents == depends_on`
+    /// （后者表示拓扑依赖，前者额外语义说明"是合并这两个"）。冗余存储是为了
+    /// 后续 schema 演化（比如未来支持 N-parent merge 时 depends_on 不变但
+    /// merge_parents 变长）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merge_parents: Vec<String>,
+}
+
+fn is_default_node_kind(kind: &NodeKind) -> bool {
+    matches!(kind, NodeKind::Work)
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]

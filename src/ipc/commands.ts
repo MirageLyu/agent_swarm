@@ -205,6 +205,19 @@ export interface ConfigResponse {
    * 详见后端 AppConfig.allow_command_hooks 字段文档。
    */
   allow_command_hooks: boolean;
+  /**
+   * Explicit Merge Node v1：是否启用 DAG 多 parent 汇合点的显式 Merge 节点。
+   * 默认 false。开启后 planner 在新 mission 自动注入 N-1 个 binary merge node
+   * （N = parents），每个 merge node 是一个独立 agent 实例，复用同一套 AgentEngine。
+   * 详见 docs/research/explicit-merge-node/proposal.md。
+   */
+  enable_explicit_merge_node: boolean;
+  /**
+   * Explicit Merge Node v1：merge agent task_complete 时必须跑过的 build/lint/test
+   * 命令（mission 级 verify_command 优先；未配则用此全局默认）。空 = 不强制。
+   * 例：`cargo check`、`npm run build`、`pnpm test`。
+   */
+  merge_verify_command: string;
 }
 
 export interface SetApiKeyRequest {
@@ -230,6 +243,10 @@ export interface UpdateConfigRequest {
   agent_fallback_sticky?: boolean;
   /** P2-1 Phase C：开关 CommandHook 加载（RCE 风险，谨慎打开） */
   allow_command_hooks?: boolean;
+  /** Explicit Merge Node v1：启用显式 merge 节点 */
+  enable_explicit_merge_node?: boolean;
+  /** Explicit Merge Node v1：全局 verify_command 默认值 */
+  merge_verify_command?: string;
 }
 
 export interface TestLlmConnectionRequest {

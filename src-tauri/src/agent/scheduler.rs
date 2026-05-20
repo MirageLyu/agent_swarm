@@ -216,9 +216,16 @@ impl Scheduler {
             db.with_conn(|conn| queries::get_ready_tasks_for_mission(conn, mission_id, slots))?;
 
         for task in &ready_tasks {
-            if let Err(e) =
-                Self::dispatch_task(mission_id, &task.id, &task.title, &task.description, repo_path, app)
-            {
+            if let Err(e) = Self::dispatch_task(
+                mission_id,
+                &task.id,
+                &task.title,
+                &task.description,
+                &task.kind,
+                task.merge_parents_json.as_deref(),
+                repo_path,
+                app,
+            ) {
                 tracing::error!("Failed to dispatch task {}: {e}", task.id);
             }
         }
@@ -701,6 +708,8 @@ impl Scheduler {
         task_id: &str,
         task_title: &str,
         task_description: &str,
+        task_kind: &str,
+        merge_parents_json: Option<&str>,
         repo_path: &PathBuf,
         app: &tauri::AppHandle,
     ) -> Result<()> {
@@ -864,11 +873,41 @@ impl Scheduler {
         let directives = db
             .with_conn(|conn| queries::get_mission_directives(conn, mission_id))
             .unwrap_or_default();
-        let task_desc = if directives.is_empty() {
+
+        // Explicit Merge Node v1：merge 节点用专用 task_desc 模板，注入两个 parent
+        // 的上下文（title/description/agent_id/分支名）、`prepare_task_base` 已写入
+        // 的冲突文件清单、以及"成功标准 = verify 通过 + task_complete"。
+        //
+        // 与 Work 节点的差异**只在 task_desc**——AgentEngine、tools、hooks、recovery、
+        // fallback、token budget 全部复用，符合用户原话"和通用 agent 相当的能力，
+        // 复用同一套 agent harness"。
+        let merge_context = if task_kind == "merge" {
+            crate::agent::merge_prompt::build_merge_task_desc(
+                mission_id,
+                task_id,
+                merge_parents_json,
+                &db,
+            )
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to build merge task desc for {task_id}: {e}; falling back to generic"
+                );
+                String::new()
+            })
+        } else {
+            String::new()
+        };
+
+        let base_desc = if merge_context.is_empty() {
             format!("{task_title}\n\n{task_description}")
         } else {
+            format!("{task_title}\n\n{task_description}\n\n{merge_context}")
+        };
+        let task_desc = if directives.is_empty() {
+            base_desc
+        } else {
             format!(
-                "{task_title}\n\n{task_description}\n\n\
+                "{base_desc}\n\n\
                  [Standing Mission Directives — you MUST follow these]\n{directives}"
             )
         };
@@ -1006,10 +1045,12 @@ impl Scheduler {
         app: &tauri::AppHandle,
     ) -> Result<AgentRunOptions> {
         let cfg = app.state::<ConfigManager>().get_config_snapshot();
-        let row: (String, i64, String, Option<String>) = db.with_conn(|conn| {
+        // Explicit Merge Node v1：把 kind 一起捞出来，merge 节点要额外注入
+        // `CommandPasses { cmd: verify_command }` 作为硬 quality gate。
+        let row: (String, i64, String, Option<String>, String) = db.with_conn(|conn| {
             let row = conn
                 .query_row(
-                    "SELECT guardrails, guardrail_retry_budget, produces_artifacts, expected_output \
+                    "SELECT guardrails, guardrail_retry_budget, produces_artifacts, expected_output, kind \
                      FROM tasks WHERE id = ?1",
                     rusqlite::params![task_id],
                     |row| {
@@ -1018,13 +1059,57 @@ impl Scheduler {
                             row.get::<_, i64>(1)?,
                             row.get::<_, Option<String>>(2)?.unwrap_or_else(|| "[]".to_string()),
                             row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<String>>(4)?.unwrap_or_else(|| "work".to_string()),
                         ))
                     },
                 )?;
             Ok(row)
         })?;
-        let (guardrails_json, retry_budget, produces_json, expected_output) = row;
-        let guardrails: Vec<Guardrail> = parse_guardrails(&guardrails_json);
+        let (guardrails_json, retry_budget, produces_json, expected_output, kind) = row;
+        let mut guardrails: Vec<Guardrail> = parse_guardrails(&guardrails_json);
+
+        // Explicit Merge Node v1 Phase B（v1 内联）：merge 节点的 verify gate。
+        //
+        // 设计：只在 mission 显式配置了 verify_command 时注入 CommandPasses
+        // guardrail；否则 merge agent 仍可跑（用 shell_exec 自评，prompt 已经告
+        // 知此情形）。**不**为 work 节点注入——避免无意中给所有 task 加 build gate
+        // 破坏现有行为。
+        if kind == "merge" {
+            // 优先级：mission 级 verify_command > AppConfig 全局 merge_verify_command > None。
+            // mission 级支持 per-mission 覆盖（v1 还没暴露 UI，预留接口）；全局默认
+            // 让用户在 Settings 设一次即可适用所有 mission。
+            let mission_id = db
+                .with_conn(|conn| queries::get_mission_id_for_task(conn, task_id))
+                .ok()
+                .flatten();
+            let mission_verify = mission_id.as_ref().and_then(|mid| {
+                db.with_conn(|conn| queries::get_mission_verify_command(conn, mid))
+                    .ok()
+                    .flatten()
+            });
+            let resolved_verify = mission_verify.or_else(|| {
+                let s = cfg.merge_verify_command.trim();
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.to_string())
+                }
+            });
+            if let Some(verify_cmd) = resolved_verify {
+                // 300s timeout（merge 场景常涉及 build + test，60s 默认太紧）；
+                // working_dir = None 用 agent worktree。
+                guardrails.push(Guardrail::CommandPasses {
+                    cmd: verify_cmd.clone(),
+                    timeout_sec: 300,
+                    working_dir: None,
+                });
+                tracing::info!(
+                    task_id = %task_id,
+                    verify_len = verify_cmd.len(),
+                    "merge task: injected CommandPasses guardrail for verify_command"
+                );
+            }
+        }
 
         // produces_artifacts JSON → Vec<(local_name, type)>
         let produces: Vec<(String, String)> = serde_json::from_str::<serde_json::Value>(&produces_json)

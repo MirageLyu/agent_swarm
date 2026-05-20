@@ -50,6 +50,10 @@ impl TemplateTask {
             produces_artifacts: Vec::new(),
             consumes_artifacts: Vec::new(),
             file_scope_hints: Default::default(),
+            // Explicit Merge Node v1：YAML 模板永远是 Work；Merge 节点由
+            // planner 后处理算法自动生成（template 路径目前还不接入 inject）。
+            kind: crate::agent::planner::NodeKind::Work,
+            merge_parents: Vec::new(),
         }
     }
 }

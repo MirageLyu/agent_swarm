@@ -321,6 +321,10 @@ impl PlannerState {
             produces_artifacts: input.produces_artifacts,
             consumes_artifacts: input.consumes_artifacts.clone(),
             file_scope_hints: input.file_scope_hints,
+            // Explicit Merge Node v1：planner LLM 输出永远是 Work；Merge 由
+            // inject_merge_nodes 后处理生成。
+            kind: crate::agent::planner::NodeKind::Work,
+            merge_parents: Vec::new(),
         };
         let id = task.id.clone();
         self.tasks.insert(id.clone(), task);

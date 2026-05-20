@@ -1645,8 +1645,35 @@ pub async fn sign_contract(
         })
         .await
         .map_err(|e| e.to_string())?;
-    let planner_output = outcome.output;
+    let mut planner_output = outcome.output;
     let planner_session_id = outcome.session_id.clone();
+
+    // Explicit Merge Node v1：planner LLM 输出之后、tasks 入库之前，按配置
+    // 注入 merge 节点。inject 算法保证：
+    //   - 若开关关闭 → no-op，行为字节对等旧路径
+    //   - 若开关开 → 多 parent 汇合点用二叉 reduction tree 展开成 N-1 个 merge 节点
+    // 注入后 validate_task_graph 不需要重跑——算法保证不产生新环，且原 task 的
+    // depends_on 改成 [root_merge_id]（单 parent，恒合法）；新 merge node 的
+    // depends_on 引用已存在 id（合法）。
+    let merge_inject_enabled = {
+        let cfg_mgr = app.state::<crate::commands::ConfigManager>();
+        let cfg = cfg_mgr.get_config_snapshot();
+        cfg.enable_explicit_merge_node
+    };
+    let merge_inject_added = crate::agent::planner_merge_inject::inject_merge_nodes(
+        &mut planner_output.tasks,
+        crate::agent::planner_merge_inject::InjectOptions {
+            enabled: merge_inject_enabled,
+        },
+    );
+    if merge_inject_added > 0 {
+        tracing::info!(
+            mission_id = %mission_id,
+            added = merge_inject_added,
+            total_tasks = planner_output.tasks.len(),
+            "Explicit Merge Node v1: injected merge nodes for multi-parent joins"
+        );
+    }
 
     // 第 3 步 —— 一个事务原子完成：标 contract signed + 升 mission planned + 写 tasks。
     // 任意一步失败回滚整个事务，contract 不会卡在"半签"状态。
@@ -1710,10 +1737,24 @@ pub async fn sign_contract(
                 let file_scope_json = serde_json::to_string(&pt.file_scope_hints)
                     .unwrap_or_else(|_| "{\"definite\":[],\"possible\":[]}".into());
 
+                // Explicit Merge Node v1：把 NodeKind 和 merge_parents 写入 migration 029 的新列。
+                // 旧 task / 关闭 explicit merge 的 mission 永远是 'work' + NULL，行为字节对等。
+                let kind_db = pt.kind.as_db_str();
+                let merge_parents_json: Option<String> = if pt.merge_parents.is_empty() {
+                    None
+                } else {
+                    // merge_parents 是 planner id；映射成 DB id 以便下游 scheduler 直接查询
+                    let mapped: Vec<String> = pt
+                        .merge_parents
+                        .iter()
+                        .filter_map(|p_id| planner_id_to_db_id.get(p_id).cloned())
+                        .collect();
+                    serde_json::to_string(&mapped).ok()
+                };
                 tx.execute(
                     "INSERT INTO tasks (id, mission_id, title, description, complexity, status, role, expected_output,
-                        additional_skills, consumes_artifacts, produces_artifacts, file_scope_hints)
-                     VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
+                        additional_skills, consumes_artifacts, produces_artifacts, file_scope_hints, kind, merge_parents)
+                     VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)",
                     rusqlite::params![
                         task_id,
                         mission_id,
@@ -1726,6 +1767,8 @@ pub async fn sign_contract(
                         consumes_json,
                         produces_json,
                         file_scope_json,
+                        kind_db,
+                        merge_parents_json,
                     ],
                 )?;
 

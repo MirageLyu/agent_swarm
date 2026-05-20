@@ -139,6 +139,11 @@ pub struct ReadyTask {
     pub id: String,
     pub title: String,
     pub description: String,
+    /// Explicit Merge Node v1：`"work"` 或 `"merge"`；scheduler 据此分支构造 prompt。
+    /// 兼容旧 mission：迁移 029 给 NULL 兜底 `'work'`，所以这里永远拿到非空值。
+    pub kind: String,
+    /// 仅 `kind == "merge"` 时填充：merge 节点的 2 个 parent task DB id（JSON）。
+    pub merge_parents_json: Option<String>,
 }
 
 pub fn get_ready_tasks_for_mission(
@@ -147,7 +152,7 @@ pub fn get_ready_tasks_for_mission(
     limit: i64,
 ) -> Result<Vec<ReadyTask>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, description FROM tasks
+        "SELECT id, title, description, kind, merge_parents FROM tasks
          WHERE mission_id = ?1 AND status = 'ready'
          LIMIT ?2",
     )?;
@@ -157,6 +162,8 @@ pub fn get_ready_tasks_for_mission(
                 id: row.get(0)?,
                 title: row.get(1)?,
                 description: row.get(2)?,
+                kind: row.get::<_, Option<String>>(3)?.unwrap_or_else(|| "work".into()),
+                merge_parents_json: row.get(4)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -999,6 +1006,72 @@ pub fn get_mission_directives(conn: &Connection, mission_id: &str) -> Result<Str
         |row| row.get(0),
     )?;
     Ok(directives)
+}
+
+/// Explicit Merge Node v1：按 task id 查所属 mission id（许多场景需要 mission
+/// 级配置但只有 task id 在手）。
+pub fn get_mission_id_for_task(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Option<String>> {
+    let v: Option<String> = conn
+        .query_row(
+            "SELECT mission_id FROM tasks WHERE id = ?1",
+            params![task_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(v)
+}
+
+/// Explicit Merge Node v1：读 mission 级 verify_command（migration 029 引入）。
+/// 返回 `None` 表示用户未配置；scheduler 据此决定是否在 merge guardrails 写入
+/// `CommandPasses { cmd: verify }`。无配 + 无 repo 默认推断时 merge agent 仍能跑，
+/// 只是没有"必须 build 通过"的硬约束（fallback 到 LLM 自评 + Stop hook）。
+pub fn get_mission_verify_command(
+    conn: &Connection,
+    mission_id: &str,
+) -> Result<Option<String>> {
+    let v: Option<String> = conn
+        .query_row(
+            "SELECT verify_command FROM missions WHERE id = ?1",
+            params![mission_id],
+            |row| row.get::<_, Option<String>>(0),
+        )?;
+    Ok(v.filter(|s| !s.trim().is_empty()))
+}
+
+/// Explicit Merge Node v1：按 task id 取 (title, description) —— merge prompt
+/// 在拼 parent 上下文时需要展示 parent 的"做了什么"。
+pub fn get_task_title_and_description(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Option<(String, String)>> {
+    let row = conn
+        .query_row(
+            "SELECT title, description FROM tasks WHERE id = ?1",
+            params![task_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    Ok(row)
+}
+
+/// Explicit Merge Node v1：按 task id 查 agent id（用 merge prompt 里指 `agent/<id>`
+/// 分支名让 merge agent 能 `git diff` parent 产物）。
+pub fn get_agent_id_for_task(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Option<String>> {
+    let v: Option<String> = conn
+        .query_row(
+            "SELECT id FROM agents WHERE task_id = ?1
+             ORDER BY created_at DESC LIMIT 1",
+            params![task_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(v)
 }
 
 pub fn get_mission_id_for_agent(conn: &Connection, agent_id: &str) -> Result<Option<String>> {

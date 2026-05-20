@@ -161,7 +161,14 @@
     "allowCommandHooksLabel": "Allow workspace command hooks (RCE risk)",
     "allowCommandHooksHint": "When enabled, the agent will load `.miragenty/hooks.json` from each mission's workspace and execute the registered shell commands at phase boundaries (PostToolUse, Stop, etc). DEFAULT OFF — these commands run with your user privileges via `sh -c`, so anyone who can edit the workspace can execute arbitrary code. Only enable after auditing every hook command. Each hook is timeout-capped at 60s and failures degrade to advisory injections rather than killing the agent.",
     "allowCommandHooksOn": "Allow (audited)",
-    "allowCommandHooksOff": "Block (default, safe)"
+    "allowCommandHooksOff": "Block (default, safe)",
+    "explicitMergeNodeLabel": "Enable explicit merge node",
+    "explicitMergeNodeHint": "When a DAG task has multiple parents (diamond join), planner auto-inserts a dedicated 'merge agent' that gets its own LLM context and explicitly reconciles both parents' worktrees + runs your verify command. Default OFF preserves the legacy 'theirs-wins' implicit merge in `prepare_task_base`. Only takes effect for NEW missions; existing missions continue with whichever strategy was active when their plan was signed.",
+    "explicitMergeNodeOn": "Use explicit merge agents",
+    "explicitMergeNodeOff": "Implicit theirs-wins merge (default)",
+    "mergeVerifyCommandLabel": "Merge verify command (global default)",
+    "mergeVerifyCommandPlaceholder": "e.g. cargo check, npm run build, pnpm test",
+    "mergeVerifyCommandHint": "Shell command the merge agent MUST run successfully (exit code 0) before it can mark the merge task complete. Enforced via a CommandPasses guardrail with a 300s timeout. Leave empty to skip the hard gate — the merge agent will still self-verify via shell_exec, but no automated check enforces it. Disabled until 'explicit merge node' is enabled."
   },
   "mission": {
     "title": "Missions",

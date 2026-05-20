@@ -149,6 +149,28 @@ pub struct AppConfig {
     /// 详见 [`crate::agent::hooks::config`] 模块文档。
     #[serde(default)]
     pub allow_command_hooks: bool,
+
+    // ---- Explicit Merge Node v1 ----
+    /// 是否启用显式 Merge 节点：planner 在 DAG 多 parent 汇合点自动注入 `Merge`
+    /// 节点，让一个独立 agent 实例（同一套 AgentEngine，复用 P0/P1/P2 全套能力）
+    /// 显式负责"合两路 worktree + 跑 verify_command + 决定 task_complete"。
+    ///
+    /// **默认 false**，旧 mission 行为字节对等（仍走 `prepare_task_base` 隐式
+    /// theirs 兜底路径）。开启后只对**新建** mission 生效——存量 mission 的 planner
+    /// 已跑完，不会回溯注入。
+    ///
+    /// 详见 `docs/research/explicit-merge-node/proposal.md`。
+    #[serde(default)]
+    pub enable_explicit_merge_node: bool,
+
+    /// 仅 `enable_explicit_merge_node = true` 时有意义：merge agent `task_complete`
+    /// 时必须跑过的 build/test/lint 命令（CommandPasses guardrail）。空字符串 =
+    /// 不强制 verify gate（merge agent 仍可自评，但没有硬约束）。
+    ///
+    /// 注意：当前 v1 落库到 `missions.verify_command`，是 **mission 级**默认；
+    /// 用户可以在 mission 创建后单独覆盖（v2 暴露 per-mission Settings）。
+    #[serde(default)]
+    pub merge_verify_command: String,
 }
 
 /// FM-14: 审批策略；持久化到 config.json，前端在 Settings 里编辑。
@@ -305,6 +327,8 @@ impl Default for AppConfig {
             agent_fallback_model: String::new(),
             agent_fallback_sticky: default_agent_fallback_sticky(),
             allow_command_hooks: false,
+            enable_explicit_merge_node: false,
+            merge_verify_command: String::new(),
         }
     }
 }
@@ -365,6 +389,9 @@ pub struct ConfigResponse {
     pub agent_fallback_sticky: bool,
     // Single-Agent Uplift P2-1 Phase C
     pub allow_command_hooks: bool,
+    // Explicit Merge Node v1
+    pub enable_explicit_merge_node: bool,
+    pub merge_verify_command: String,
 }
 
 #[tauri::command]
@@ -387,6 +414,8 @@ pub fn get_config(app: tauri::AppHandle) -> Result<ConfigResponse, String> {
         agent_fallback_model: config.agent_fallback_model.clone(),
         agent_fallback_sticky: config.agent_fallback_sticky,
         allow_command_hooks: config.allow_command_hooks,
+        enable_explicit_merge_node: config.enable_explicit_merge_node,
+        merge_verify_command: config.merge_verify_command.clone(),
     })
 }
 
@@ -423,6 +452,9 @@ pub struct UpdateConfigRequest {
     pub agent_fallback_sticky: Option<bool>,
     // Single-Agent Uplift P2-1 Phase C
     pub allow_command_hooks: Option<bool>,
+    // Explicit Merge Node v1
+    pub enable_explicit_merge_node: Option<bool>,
+    pub merge_verify_command: Option<String>,
 }
 
 #[tauri::command]
@@ -477,6 +509,22 @@ pub fn update_config(
                 "AppConfig.allow_command_hooks toggled"
             );
             config.allow_command_hooks = v;
+        }
+        if let Some(v) = request.enable_explicit_merge_node {
+            tracing::info!(
+                enable_explicit_merge_node_was = config.enable_explicit_merge_node,
+                enable_explicit_merge_node_now = v,
+                "AppConfig.enable_explicit_merge_node toggled"
+            );
+            config.enable_explicit_merge_node = v;
+        }
+        if let Some(cmd) = request.merge_verify_command {
+            // 仅记录长度避免泄漏命令内容到日志（用户可能配 secret token）
+            tracing::info!(
+                merge_verify_command_len = cmd.trim().len(),
+                "AppConfig.merge_verify_command updated"
+            );
+            config.merge_verify_command = cmd.trim().to_string();
         }
         if let Some(lang) = request.language {
             // 仅接受白名单内的 BCP 47 tag，避免脏数据。

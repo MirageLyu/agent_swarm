@@ -878,6 +878,33 @@ const MIGRATIONS: &[(&str, &str)] = &[(
         PRAGMA foreign_keys=ON;
         "#,
     ),
+    (
+        // Explicit Merge Node v1：把"多 parent worktree 合并"从隐式基础设施步骤
+        // 升级为 DAG 一等公民节点。设计文档：
+        // docs/research/explicit-merge-node/proposal.md
+        //
+        // 数据模型只加 3 列：
+        //   - tasks.kind：'work'（普通任务，默认）| 'merge'（合并节点）
+        //   - tasks.merge_parents：merge 节点的 2 个 parent task id（JSON 数组）；
+        //     work 节点为 NULL。**只存 2 个**——分层 reduction tree 算法把 N parents
+        //     拆成 N-1 个二元 merge node，每个 merge agent 上下文小、可调试。
+        //   - missions.verify_command：可选，mission 级 build/lint/test 命令。
+        //     merge 节点 task_complete 时通过 Guardrail::CommandPasses 强制跑过且
+        //     exit=0 才放行。未配时 scheduler 按 codebase_intel 推断的 repo type
+        //     兜底（Rust→`cargo check`，Node→`npm run build`，其他→空 = 不强校验）。
+        //
+        // 默认所有现有 mission 不受影响：tasks.kind='work'、verify_command=NULL；
+        // 是否启用显式 merge 由 AppConfig.enable_explicit_merge_node 顶层开关
+        // （加在 commands/config.rs，非 schema 层）。这一 migration 只准备能力，
+        // 不改变行为。
+        "029_explicit_merge_node",
+        r#"
+        ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'work'
+            CHECK (kind IN ('work', 'merge'));
+        ALTER TABLE tasks ADD COLUMN merge_parents TEXT;
+        ALTER TABLE missions ADD COLUMN verify_command TEXT;
+        "#,
+    ),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
