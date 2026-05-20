@@ -30,7 +30,13 @@ export type AgentEventKind =
   | "tool_progress"
   | "tool_summary"
   | "compact"
-  | "todo_update";
+  | "todo_update"
+  // Single-Agent Uplift P0-3: silent recovery 事件。默认前端隐藏（详见
+  // ui-store.showSilentRecoveryEvents toggle），meta.silent=true 时不渲染。
+  // 后端在 reactive compact / idle retry / max_output_tokens / cross-model
+  // fallback 这四条恢复路径上 emit attempt + (下次成功后) succeeded。
+  | "recovery_attempt"
+  | "recovery_succeeded";
 
 export interface AgentEvent {
   id: string;

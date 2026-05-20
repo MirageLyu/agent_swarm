@@ -187,6 +187,18 @@ export interface ConfigResponse {
   agent_step_idle_seconds: number;
   /** i18n: BCP 47 tag, e.g. "en-US" / "zh-CN" */
   language: string;
+  /**
+   * Single-Agent Uplift P0-2：累计输出 token 软上限，0 = 关闭。
+   * 命中阈值或边际收益递减时引擎注入 "wrap up" 提示促 task_complete。
+   */
+  agent_output_token_budget: number;
+  /**
+   * Single-Agent Uplift P1-2：fallback 模型名，空 = 关闭。
+   * 主模型过载（5xx）/ 限速（429）时自动切换重发当前 step。
+   */
+  agent_fallback_model: string;
+  /** P1-2：true（默认）= 切换后保持 fallback；false = 下一 step 重试主模型 */
+  agent_fallback_sticky: boolean;
 }
 
 export interface SetApiKeyRequest {
@@ -204,6 +216,12 @@ export interface UpdateConfigRequest {
   agent_step_idle_seconds?: number;
   /** i18n: BCP 47 tag, must be in backend SUPPORTED list */
   language?: string;
+  /** P0-2: 0 = 关闭，否则上限会被 backend clamp 到 1,000,000 */
+  agent_output_token_budget?: number;
+  /** P1-2: 空字符串 = 关闭 fallback */
+  agent_fallback_model?: string;
+  /** P1-2 sticky flag */
+  agent_fallback_sticky?: boolean;
 }
 
 export interface TestLlmConnectionRequest {
@@ -795,6 +813,11 @@ export interface MissionReportMetrics {
   avg_quality_score: number | null;
   auto_fixes: number;
   review_reduction_rate: number | null;
+  /**
+   * Single-Agent Uplift P1-2: mission 全部 agent 累计 cross-model fallback 切换次数。
+   * 0 = 主模型全程稳定（绝大多数 mission）。>0 时 Report 渲染 chip 提示用户。
+   */
+  fallback_switches_total: number;
 }
 
 export interface MissionReportSummary {

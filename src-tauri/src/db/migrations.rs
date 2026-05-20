@@ -822,6 +822,18 @@ const MIGRATIONS: &[(&str, &str)] = &[(
         PRAGMA foreign_keys=ON;
         "#,
     ),
+    (
+        // Single-Agent Uplift P1-2 (Phase B): agents 表加 `fallback_switches_total`
+        // 累计 cross-model fallback 切换次数，给 mission report 渲染 + 长期统计用。
+        //
+        // 为什么持久化而非只在 events 表里查：events 可能因日志保留策略被清理；
+        // 这一列是 agent 的"质量指标"，应该跟随 agent 行本身永久存活。
+        // 0 = 没触发过 fallback（绝大多数情况），>0 时 report 渲染 chip。
+        "027_p12_fallback_switches",
+        r#"
+        ALTER TABLE agents ADD COLUMN fallback_switches_total INTEGER NOT NULL DEFAULT 0;
+        "#,
+    ),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

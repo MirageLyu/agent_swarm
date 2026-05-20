@@ -80,6 +80,14 @@ pub struct ReportMetrics {
     pub avg_quality_score: Option<f64>,
     pub auto_fixes: i64,
     pub review_reduction_rate: Option<f64>,
+    /// Single-Agent Uplift P1-2: 本 mission 全部 agent 累计 cross-model fallback
+    /// 切换次数。0 = 主模型全程稳定（绝大多数 mission）。>0 表明上游 overload /
+    /// rate-limit 期间 agent 通过备用模型保住了进度——是 fallback 机制兜底成功
+    /// 的硬证据。
+    ///
+    /// 给前端用：渲染为 chip "fallback × N" 提示用户"过程中有切换，可能影响成本"。
+    #[serde(default)]
+    pub fallback_switches_total: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -408,6 +416,18 @@ fn aggregate_data(conn: &Connection, mission_id: &str) -> Result<AggregateData> 
         None
     };
 
+    // P1-2 Phase B：聚合本 mission 内所有 agent 的 cross-model fallback 计数。
+    // 缺列时（旧 DB / 单测里 migration 027 没跑）回退 0；SUM(NULL) 默认 NULL。
+    let fallback_switches_total: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(a.fallback_switches_total), 0) \
+             FROM agents a JOIN tasks t ON a.task_id = t.id \
+             WHERE t.mission_id = ?1",
+            [mission_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+
     let metrics = ReportMetrics {
         tasks_total,
         tasks_completed,
@@ -417,6 +437,7 @@ fn aggregate_data(conn: &Connection, mission_id: &str) -> Result<AggregateData> 
         avg_quality_score,
         auto_fixes,
         review_reduction_rate,
+        fallback_switches_total,
     };
 
     // ── cost breakdown
@@ -1113,7 +1134,15 @@ pub fn render_markdown(report: &MissionReport) -> String {
     if let Some(s) = report.summary.metrics.avg_quality_score {
         md.push_str(&format!("| Avg Quality Score | {:.2} |\n", s));
     }
-    md.push_str(&format!("| Auto-fixes | {} |\n\n", report.summary.metrics.auto_fixes));
+    md.push_str(&format!("| Auto-fixes | {} |\n", report.summary.metrics.auto_fixes));
+    // P1-2 Phase B：仅在发生过 fallback 时渲染行，避免 0 值给绝大多数 mission 添噪音
+    if report.summary.metrics.fallback_switches_total > 0 {
+        md.push_str(&format!(
+            "| Model fallbacks | {} (upstream overload/rate-limit triggered cross-model switch) |\n",
+            report.summary.metrics.fallback_switches_total
+        ));
+    }
+    md.push('\n');
 
     if !report.decisions.is_empty() {
         md.push_str("## Architecture Decisions\n\n");
@@ -1415,6 +1444,7 @@ mod tests {
                 avg_quality_score: Some(8.5),
                 auto_fixes: 1,
                 review_reduction_rate: Some(0.5),
+                fallback_switches_total: 0,
             },
             evaluator_review: ReportEvaluatorReview {
                 rounds: vec![],

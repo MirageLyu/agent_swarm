@@ -39,6 +39,16 @@ interface UiState {
    * Settings 页面保存 API key 后也应回写。
    */
   apiKeyConfigured: boolean | null;
+  /**
+   * Single-Agent Uplift P0-3 (前端 toggle)：是否在 timeline 显示 silent
+   * recovery 事件（recovery_attempt / recovery_succeeded，且 meta.silent=true）。
+   *
+   * 默认 false：agent 自救成功的事件不打扰用户。Developer 想 debug 恢复路径时
+   * 在 Settings → Developer 打开。
+   *
+   * 持久化到 localStorage（key: SILENT_RECOVERY_LOCAL_KEY），避免每次启动重置。
+   */
+  showSilentRecoveryEvents: boolean;
 
   setActiveView: (view: ViewId) => void;
   setTheme: (theme: Theme) => void;
@@ -52,6 +62,30 @@ interface UiState {
   openMissionReport: (missionId: string | null) => void;
   /** MVP onboarding：写入 API key 配置状态 */
   setApiKeyConfigured: (configured: boolean) => void;
+  /** P0-3: 切换 silent recovery 事件可见性 + 同步 localStorage */
+  setShowSilentRecoveryEvents: (show: boolean) => void;
+}
+
+/// localStorage 持久化键。**改名会丢用户偏好**，需要做迁移；目前没必要。
+const SILENT_RECOVERY_LOCAL_KEY = "miragenty.ui.showSilentRecoveryEvents";
+
+function loadShowSilentRecoveryEvents(): boolean {
+  if (typeof window === "undefined" || !window.localStorage) return false;
+  try {
+    return window.localStorage.getItem(SILENT_RECOVERY_LOCAL_KEY) === "true";
+  } catch {
+    // SSR / private 模式 storage 抛错时安全回退到默认值
+    return false;
+  }
+}
+
+function persistShowSilentRecoveryEvents(show: boolean): void {
+  if (typeof window === "undefined" || !window.localStorage) return;
+  try {
+    window.localStorage.setItem(SILENT_RECOVERY_LOCAL_KEY, show ? "true" : "false");
+  } catch {
+    // 写失败不影响内存 state，下次启动会回退默认 false
+  }
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -66,6 +100,7 @@ export const useUiStore = create<UiState>((set) => ({
   activePreflightSessionId: null,
   activeReportMissionId: null,
   apiKeyConfigured: null,
+  showSilentRecoveryEvents: loadShowSilentRecoveryEvents(),
 
   setActiveView: (view) => set({ activeView: view }),
   setTheme: (theme) => set({ theme }),
@@ -82,4 +117,8 @@ export const useUiStore = create<UiState>((set) => ({
       activeView: missionId ? "report" : "missions",
     }),
   setApiKeyConfigured: (configured) => set({ apiKeyConfigured: configured }),
+  setShowSilentRecoveryEvents: (show) => {
+    persistShowSilentRecoveryEvents(show);
+    set({ showSilentRecoveryEvents: show });
+  },
 }));

@@ -1373,6 +1373,10 @@ impl AgentEngine {
                         Some(switch_meta.to_json()),
                     );
                     pending_recovery_to_resolve = Some((trigger, strategy));
+                    // P1-2 Phase B: 立即持久化累计计数。放在这里而非 agent 结束时，
+                    // 因为 agent 可能在 fallback 后崩溃；持久化点放在"切换那一刻"
+                    // 保证 report / 长期统计永远不漏。开销可忽略——单 row 单字段 UPDATE。
+                    self.persist_fallback_switches(agent_id, fallback_switches_total);
                     tracing::warn!(
                         agent_id = %agent_id,
                         step,
@@ -3027,6 +3031,28 @@ impl AgentEngine {
             Ok(())
         }) {
             tracing::warn!("Failed to update agent status: {e}");
+        }
+    }
+
+    /// P1-2 Phase B：持久化 cross-model fallback 累计切换次数到 agents 表。
+    ///
+    /// 失败仅 warn 不 fail——这是观测指标，落库失败不应影响 agent 主循环。
+    /// 调用方在 fallback 实际发生时立即调用一次（典型 mission 全程 0~3 次）。
+    fn persist_fallback_switches(&self, agent_id: &str, total: u32) {
+        let db = self.app_handle.state::<Database>();
+        if let Err(e) = db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE agents SET fallback_switches_total = ?1, \
+                 updated_at = datetime('now') WHERE id = ?2",
+                rusqlite::params![total as i64, agent_id],
+            )?;
+            Ok(())
+        }) {
+            tracing::warn!(
+                agent_id = %agent_id,
+                fallback_switches_total = total,
+                "Failed to persist fallback_switches_total: {e}"
+            );
         }
     }
 

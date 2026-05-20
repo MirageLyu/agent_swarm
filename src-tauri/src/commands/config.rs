@@ -104,6 +104,34 @@ pub struct AppConfig {
     /// 跑完，wall-clock 仅作为兜底防御 LLM 死循环。
     #[serde(default = "default_evaluator_timeout_seconds")]
     pub evaluator_timeout_seconds: u64,
+
+    // ---- Single-Agent Uplift P0-2: Output token budget + diminishing-returns ----
+    /// 单 agent 在所有 step 累计输出 token 的软上限。
+    ///
+    /// 当 agent 用掉 90% 或连续 3 轮新输出 < 500 token（边际收益递减）时，
+    /// 引擎注入"该收尾了"的提示促 agent 调 task_complete。`max_steps` 作为
+    /// 硬上限兜底保留。0 = 关闭预算控制，回退到 max_steps-only 旧行为（安全等价）。
+    ///
+    /// 推荐值：模型 context window 的约 30%（128K 模型 → 40000）。
+    #[serde(default = "default_agent_output_token_budget")]
+    pub agent_output_token_budget: u64,
+
+    // ---- Single-Agent Uplift P1-2: Cross-model fallback ----
+    /// Fallback 模型名。主模型返回过载（5xx）/ 限速（429）时自动切换重发。
+    ///
+    /// 空字符串 = 关闭（行为同旧版）。必须是当前 provider 能调起的模型——
+    /// **跨厂商 fallback 尚不支持**（API key / endpoint 不同），后续 P1-2 Phase D。
+    #[serde(default)]
+    pub agent_fallback_model: String,
+
+    /// 粘性 fallback：切换后是否继续用 fallback 模型（默认 true）。
+    ///
+    /// - true（默认）：切换后下一 step 仍用 fallback。上游过载通常持续几分钟，
+    ///   频繁切回主模型 = 反复撞墙。
+    /// - false：下一 step 重新尝试主模型；若仍失败会再次切换。适合"主模型偶发
+    ///   一次性 5xx"场景，但成本是每次都要重试一次主模型。
+    #[serde(default = "default_agent_fallback_sticky")]
+    pub agent_fallback_sticky: bool,
 }
 
 /// FM-14: 审批策略；持久化到 config.json，前端在 Settings 里编辑。
@@ -210,6 +238,15 @@ fn default_tool_summary_provider() -> String { "openai_compat".to_string() }
 fn default_tool_summary_threshold_chars() -> u32 { 8 * 1024 }
 fn default_evaluator_timeout_seconds() -> u64 { 600 }
 
+// Single-Agent Uplift P0-2 / P1-2 默认值。
+//
+// P0-2: 0 = 关闭。我们**默认关闭**预算控制原因——max_steps 已经是兜底，
+// 且不少用户依赖"agent 跑满 80 step 才停"的行为；预算控制属于 opt-in 优化。
+// Settings UI 里会推荐"约 context window 的 30%"作为典型起点。
+fn default_agent_output_token_budget() -> u64 { 0 }
+// P1-2: 默认 sticky=true。详见字段注释。
+fn default_agent_fallback_sticky() -> bool { true }
+
 impl Default for ApprovalPolicy {
     fn default() -> Self {
         Self {
@@ -247,6 +284,9 @@ impl Default for AppConfig {
             tool_summary_provider: default_tool_summary_provider(),
             tool_summary_threshold_chars: default_tool_summary_threshold_chars(),
             evaluator_timeout_seconds: default_evaluator_timeout_seconds(),
+            agent_output_token_budget: default_agent_output_token_budget(),
+            agent_fallback_model: String::new(),
+            agent_fallback_sticky: default_agent_fallback_sticky(),
         }
     }
 }
@@ -301,6 +341,10 @@ pub struct ConfigResponse {
     pub agent_step_idle_seconds: u64,
     /// i18n: BCP 47 tag, e.g. "en-US" / "zh-CN"
     pub language: String,
+    // Single-Agent Uplift P0-2 / P1-2
+    pub agent_output_token_budget: u64,
+    pub agent_fallback_model: String,
+    pub agent_fallback_sticky: bool,
 }
 
 #[tauri::command]
@@ -319,6 +363,9 @@ pub fn get_config(app: tauri::AppHandle) -> Result<ConfigResponse, String> {
         agent_timeout_seconds: config.agent_timeout_seconds,
         agent_step_idle_seconds: config.agent_step_idle_seconds,
         language: config.language.clone(),
+        agent_output_token_budget: config.agent_output_token_budget,
+        agent_fallback_model: config.agent_fallback_model.clone(),
+        agent_fallback_sticky: config.agent_fallback_sticky,
     })
 }
 
@@ -349,6 +396,10 @@ pub struct UpdateConfigRequest {
     pub agent_step_idle_seconds: Option<u64>,
     /// i18n: BCP 47 tag。前端传入后立即调用 i18n.changeLanguage 同步。
     pub language: Option<String>,
+    // Single-Agent Uplift P0-2 / P1-2
+    pub agent_output_token_budget: Option<u64>,
+    pub agent_fallback_model: Option<String>,
+    pub agent_fallback_sticky: Option<bool>,
 }
 
 #[tauri::command]
@@ -380,6 +431,19 @@ pub fn update_config(
         if let Some(v) = request.agent_step_idle_seconds {
             // 0 = 关闭 idle 检测；否则至少 5s 防误杀。
             config.agent_step_idle_seconds = if v == 0 { 0 } else { v.max(5) };
+        }
+        if let Some(v) = request.agent_output_token_budget {
+            // 上限 1M 对绝大多数 long-context 模型够用（Gemini 2M 是异类，且 1M
+            // tokens 的 output 已经远超合理 agent 单次任务规模）。
+            // 防误填 1e18 把 i64 溢成负数。
+            config.agent_output_token_budget = v.min(1_000_000);
+        }
+        if let Some(v) = request.agent_fallback_model {
+            // trim 防 UI 残留空白。空串保留语义 = 关闭。
+            config.agent_fallback_model = v.trim().to_string();
+        }
+        if let Some(v) = request.agent_fallback_sticky {
+            config.agent_fallback_sticky = v;
         }
         if let Some(lang) = request.language {
             // 仅接受白名单内的 BCP 47 tag，避免脏数据。

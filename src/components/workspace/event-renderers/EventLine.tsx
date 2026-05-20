@@ -1,5 +1,6 @@
 import { memo } from "react";
 import type { AgentEvent } from "../../../stores/agent-store";
+import { useUiStore } from "../../../stores/ui-store";
 import styles from "./EventLine.module.css";
 import { ToolUseLine } from "./ToolUseLine";
 import { ToolResultLine } from "./ToolResultLine";
@@ -9,6 +10,7 @@ import { ToolProgressLine } from "./ToolProgressLine";
 import { NoteAppliedLine } from "./NoteAppliedLine";
 import { AskUserQuestionLine } from "./AskUserQuestionLine";
 import { ToolSummaryLine } from "./ToolSummaryLine";
+import { RecoveryLine } from "./RecoveryLine";
 
 interface EventLineProps {
   event: AgentEvent;
@@ -33,6 +35,11 @@ export const EventLine = memo(function EventLine({
   isLast,
   isRunning,
 }: EventLineProps) {
+  // P0-3: silent recovery 事件默认隐藏；showSilentRecoveryEvents toggle 打开时显示。
+  // 不在 switch 里判定是因为 zustand selector 要放在组件顶层（hook 规则），
+  // 而 switch 里 return null 已经足够——React 不会渲染。
+  const showSilentRecoveryEvents = useUiStore((s) => s.showSilentRecoveryEvents);
+
   switch (event.kind) {
     case "tool_use":
       return <ToolUseLine event={event} />;
@@ -79,6 +86,14 @@ export const EventLine = memo(function EventLine({
     case "review":
       // Phase 1.2 / 2.x 接管。当前先走 plain 行展示，避免编译期 exhaustive 错。
       break;
+    case "recovery_attempt":
+    case "recovery_succeeded": {
+      // P0-3: meta.silent=true 时默认不渲染（agent 自救成功的事件不打扰用户）。
+      // toggle 打开后用 RecoveryLine 展示为浅灰色 chip，给 developer debug 用。
+      const silent = (event.meta as { silent?: boolean } | null | undefined)?.silent === true;
+      if (silent && !showSilentRecoveryEvents) return null;
+      return <RecoveryLine event={event} />;
+    }
     default:
       break;
   }
