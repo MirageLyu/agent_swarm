@@ -1120,19 +1120,54 @@ impl AgentEngine {
                     }
                     // TextDelta：主回显流；ReasoningDelta：thinking 阶段，前端渲染成
                     // "思考中..."占位卡，避免推理模型 thinking 期间用户看到长沉默。
-                    // 其他 kind（ToolUseDelta 等）当前不透传给前端，工具使用走 agent-event。
-                    let kind_str = match chunk.kind {
+                    //
+                    // P1-1 Phase B (observability-first)：ToolUseStart / ToolUseStop
+                    // 也在 stream 中转发给前端，让 UI 在 LLM 还没收完时就提前显示
+                    // "🔧 read_file 已开始"。**执行时机不变**——actual dispatch 仍在
+                    // step 末尾 batch 跑，避免触碰并发竞态（cancel / approval gate
+                    // 还无法处理"safe tool 跑一半 stream cancel"边界）。
+                    //
+                    // 这给用户带来"看起来快了 1-3s"的感知 win，且 0 风险：execution
+                    // 路径 100% 不变。真正的 streaming overlap 留到未来 PR（需要
+                    // StreamingToolExecutor 接入 ToolDispatcher trait + 单测覆盖
+                    // cancel/approval 边界）。
+                    let payload_meta: Option<serde_json::Value>;
+                    let kind_str = match &chunk.kind {
                         StreamChunkKind::TextDelta => {
                             text_chunks += 1;
                             text_bytes += chunk.content.len() as u64;
+                            payload_meta = None;
                             "text_delta"
                         }
                         StreamChunkKind::ReasoningDelta => {
                             reasoning_chunks += 1;
                             reasoning_bytes += chunk.content.len() as u64;
+                            payload_meta = None;
                             "reasoning_delta"
                         }
-                        _ => continue,
+                        StreamChunkKind::ToolUseStart { tool_use_id, name } => {
+                            // tool_use_started 给前端早渲染 spinner。content 字段传
+                            // 工具名让 ToolUseLine 立刻能显示，不必等 batch emit 后才出现。
+                            payload_meta = Some(serde_json::json!({
+                                "tool_use_id": tool_use_id,
+                                "tool_name": name,
+                                "phase": "started",
+                            }));
+                            "tool_use_started"
+                        }
+                        StreamChunkKind::ToolUseStop { tool_use_id } => {
+                            // tool_use_arg_done 标志 LLM 已完整输出该 tool_use 的 input。
+                            // 前端可以把 "args 解析中" → "args 完成、等执行" 状态切换。
+                            payload_meta = Some(serde_json::json!({
+                                "tool_use_id": tool_use_id,
+                                "phase": "arg_done",
+                            }));
+                            "tool_use_arg_done"
+                        }
+                        // InputDelta 不发——前端不需要看 JSON 半成品；MessageStop 同理
+                        StreamChunkKind::ToolUseInputDelta { .. } | StreamChunkKind::MessageStop => {
+                            continue
+                        }
                     };
                     let _ = app_handle.emit(
                         "agent-stream",
@@ -1141,7 +1176,7 @@ impl AgentEngine {
                             step: stream_step,
                             kind: kind_str.to_string(),
                             content: chunk.content,
-                            meta: None,
+                            meta: payload_meta,
                         },
                     );
                 }
