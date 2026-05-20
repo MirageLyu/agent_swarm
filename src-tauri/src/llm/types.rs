@@ -101,12 +101,44 @@ pub struct StreamChunk {
     pub content: String,
 }
 
+/// 流式 LLM 响应的 chunk 类型。
+///
+/// **Single-Agent Uplift P1-1 协议升级**：tool_use 相关 chunk 全部携带
+/// `tool_use_id`，这是 streaming tool execution 的必要前提——下游 executor
+/// 收到 InputDelta 后必须知道这块 input 归属哪个 tool_use 才能累积分桶。
+///
+/// **向后兼容性**：
+/// - 旧 consumer 只 match TextDelta / ReasoningDelta，新 variant 落进
+///   `_ => continue` 兜底，不影响行为
+/// - 旧 provider（不 emit 新 chunk）：consumer 拿不到 ToolUseStart →
+///   走最终 LlmResponse.content 的 fallback 路径，等价于现状的串行执行
+///
+/// **协议特殊性**：
+/// - OpenAI SSE 不显式给"tool_call 完成"信号，client 在 finish_reason
+///   抵达时主动 emit `ToolUseStop`
+/// - Anthropic SSE 有 content_block_stop 事件，1:1 映射
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StreamChunkKind {
     TextDelta,
     ReasoningDelta,
-    ToolUseStart { id: String, name: String },
-    ToolUseInputDelta,
+    /// 一个新的 tool_use block 开始。
+    ///
+    /// 历史保留字段 `id` 等同于 `tool_use_id`（迁移期 alias，未来某次 cleanup
+    /// 可以收成单字段；目前留着是因为有日志/事件序列化历史包袱）。
+    ToolUseStart {
+        tool_use_id: String,
+        name: String,
+    },
+    /// 该 tool_use_id 的 input JSON 的增量片段。`content` 字段携带原始片段文本。
+    ToolUseInputDelta {
+        tool_use_id: String,
+    },
+    /// 该 tool_use_id 的 input 完整结束（input JSON 已闭合）。
+    /// 注意：这是**解析层**事件，不一定对应 SSE 物理 stop ——
+    /// OpenAI 协议下由 client 在 finish_reason 抵达时主动 emit。
+    ToolUseStop {
+        tool_use_id: String,
+    },
     MessageStop,
 }
 

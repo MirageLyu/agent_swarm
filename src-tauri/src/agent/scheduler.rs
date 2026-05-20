@@ -1035,6 +1035,15 @@ impl Scheduler {
             max_output_tokens: cfg.agent_max_output_tokens,
             stream_network_retries: cfg.stream_network_retries,
             stream_initial_retry_delay_ms: cfg.stream_initial_retry_delay_ms,
+            // Single-Agent Uplift P0-2: 默认仍为 None（关闭），保持向后兼容。
+            // 后续 PR 会在 AppConfig 加 agent_output_token_budget 字段 + Settings UI
+            // toggle，把 cfg 字段 plumb 到这里。本 PR 只完成 tracker 落地 + 主循环
+            // 接入，UI 暴露和默认值计算另起 commit。
+            output_token_budget: None,
+            // Single-Agent Uplift P1-2: 默认关闭 fallback。Settings UI + AppConfig
+            // plumbing 在 P1-2 Phase B 单独 PR 暴露；本 PR 只完成 engine 接线。
+            fallback_model: None,
+            fallback_sticky: true,
         })
     }
 

@@ -779,6 +779,49 @@ const MIGRATIONS: &[(&str, &str)] = &[(
         CREATE INDEX IF NOT EXISTS idx_agent_todos_agent ON agent_todos(agent_id, order_idx);
         "#,
     ),
+    (
+        // Single-Agent Uplift P0-3: Withhold-then-Recover 引入两个新 event kind。
+        //
+        // - `recovery_attempt`：可恢复错误（prompt_too_long / max_output_tokens / idle）
+        //   触发后，agent 启动恢复流程时发的事件。meta.silent=true → 前端默认隐藏。
+        // - `recovery_succeeded`：恢复路径走通后发的"什么都没发生"通知。同 silent。
+        //
+        // 为什么必须新增 kind 而非复用 system_hint：system_hint 默认前端可见——把
+        // 静默恢复事件塞进 system_hint 会让用户看到一堆"你不需要关心"的噪音。新 kind
+        // 让前端能按 kind 决策是否渲染（详见 `agent/recovery_log.rs` 文档）。
+        "026_p03_recovery_event_kinds",
+        r#"
+        PRAGMA foreign_keys=OFF;
+
+        CREATE TABLE agent_events_new (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+            step INTEGER NOT NULL DEFAULT 0,
+            kind TEXT NOT NULL
+                CHECK (kind IN (
+                    'llm_call', 'tool_use', 'tool_result', 'checkpoint',
+                    'error', 'message', 'status_change', 'review',
+                    'system_hint', 'guardrail_pass', 'guardrail_fail',
+                    'guardrail_summary', 'note_applied',
+                    'tool_progress', 'tool_summary', 'compact', 'todo_update',
+                    'recovery_attempt', 'recovery_succeeded'
+                )),
+            content TEXT NOT NULL DEFAULT '',
+            meta TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        INSERT INTO agent_events_new (id, agent_id, step, kind, content, meta, created_at)
+            SELECT id, agent_id, step, kind, content, meta, created_at FROM agent_events;
+
+        DROP TABLE agent_events;
+        ALTER TABLE agent_events_new RENAME TO agent_events;
+
+        CREATE INDEX IF NOT EXISTS idx_agent_events_agent ON agent_events(agent_id, created_at);
+
+        PRAGMA foreign_keys=ON;
+        "#,
+    ),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

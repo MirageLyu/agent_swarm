@@ -31,7 +31,7 @@ pub const ARG_RAW_KEY: &str = "__raw_args__";
 
 /// 解析 OpenAI/DeepSeek 风格 tool call 的 arguments 字符串为 JSON Value。
 /// 空字符串 / 解析失败时返回 sentinel input 而不是默默吞错。
-fn parse_tool_arguments_or_sentinel(
+pub(crate) fn parse_tool_arguments_or_sentinel(
     tool_name: &str,
     args_str: &str,
 ) -> serde_json::Value {
@@ -624,14 +624,53 @@ impl LlmProvider for OpenAICompatProvider {
                                 while tool_calls.len() <= idx {
                                     tool_calls.push((String::new(), String::new(), String::new()));
                                 }
+                                // Single-Agent Uplift P1-1: 流式 emit per-tool_use chunk
+                                //
+                                // 时序约束：必须先有 id（用于 ToolUseStart）才能 emit InputDelta，
+                                // 否则 downstream executor 无法定位累积桶。OpenAI 协议**通常**
+                                // 在第一个 tool_call delta 里就给 id+name，但不保证——做防御：
+                                //   - 没 id 时 InputDelta 也累积进 tool_calls[idx].2，但不 emit
+                                //     （fallback：finish_reason 后从 LlmResponse.content 解析）
+                                //   - 第一次拿到 id 时立即 emit ToolUseStart，把"在此之前累积过
+                                //     args"的情况合并补一条 InputDelta，给 downstream 完整 input
+                                let mut first_id_seen_this_delta = false;
                                 if let Some(id) = tc["id"].as_str() {
-                                    tool_calls[idx].0 = id.to_string();
+                                    if tool_calls[idx].0.is_empty() && !id.is_empty() {
+                                        tool_calls[idx].0 = id.to_string();
+                                        first_id_seen_this_delta = true;
+                                    }
                                 }
                                 if let Some(name) = tc["function"]["name"].as_str() {
                                     tool_calls[idx].1.push_str(name);
                                 }
+                                // ToolUseStart：id+name 都 ready 时 emit
+                                // 注意：name 可能跨 chunk 累积，等 .1 非空再 emit 反而更准
+                                if first_id_seen_this_delta && !tool_calls[idx].1.is_empty() {
+                                    let _ = tx
+                                        .send(StreamChunk {
+                                            kind: StreamChunkKind::ToolUseStart {
+                                                tool_use_id: tool_calls[idx].0.clone(),
+                                                name: tool_calls[idx].1.clone(),
+                                            },
+                                            content: String::new(),
+                                        })
+                                        .await;
+                                }
                                 if let Some(args) = tc["function"]["arguments"].as_str() {
                                     tool_calls[idx].2.push_str(args);
+                                    // InputDelta：仅在 id 已知时 emit；否则 args 进累积器，
+                                    // 等 finish_reason 走 fallback。这个分支理论上极少触发——
+                                    // OpenAI/DeepSeek/Qwen 三家实测都是首个 chunk 即给 id。
+                                    if !tool_calls[idx].0.is_empty() && !args.is_empty() {
+                                        let _ = tx
+                                            .send(StreamChunk {
+                                                kind: StreamChunkKind::ToolUseInputDelta {
+                                                    tool_use_id: tool_calls[idx].0.clone(),
+                                                },
+                                                content: args.to_string(),
+                                            })
+                                            .await;
+                                    }
                                 }
                             }
                         }
@@ -657,6 +696,23 @@ impl LlmProvider for OpenAICompatProvider {
                         }
                     }
                 }
+            }
+        }
+
+        // Single-Agent Uplift P1-1: OpenAI 协议无 per-tool_call stop 信号 ——
+        // finish_reason 抵达后，主动给每个 tool_call emit ToolUseStop。
+        // 严格按收到顺序（vec index），让 downstream executor 知道 input
+        // 闭合可以触发 dispatch。空 id 的 slot 跳过（视为 fallback 走 LlmResponse）。
+        for (id, _name, _args) in &tool_calls {
+            if !id.is_empty() {
+                let _ = tx
+                    .send(StreamChunk {
+                        kind: StreamChunkKind::ToolUseStop {
+                            tool_use_id: id.clone(),
+                        },
+                        content: String::new(),
+                    })
+                    .await;
             }
         }
 

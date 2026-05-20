@@ -27,8 +27,15 @@ use crate::llm::{
 };
 use crate::tools::{coding_agent_tools_with_artifact_support, ToolExecutor, TASK_COMPLETE_TOOL};
 
+// P0-2: BudgetStopReason 由 BudgetDecision 内部携带，主循环只 match Stop variant，
+// 不直接构造 reason，所以这里不 import；`.as_str()` 通过 method dispatch 触达。
+use super::budget_tracker::{BudgetDecision, BudgetTracker};
 use super::codebase_intel;
 use super::guardrail::{self, Guardrail, GuardrailContext};
+use super::recovery_log::{
+    build_recovery_attempt_meta, build_recovery_succeeded_meta, format_attempt_content,
+    format_succeeded_content, RecoveryStrategy, RecoveryTrigger,
+};
 use super::types::*;
 
 /// FR-11 默认值；Scheduler 可从配置覆盖。
@@ -56,6 +63,35 @@ const STEPS_REMAINING_HINT: u32 = 5;
 /// max_steps 自身（80）已是 retry 总次数的隐式上限，加上 cancel_token + UI 可见
 /// 的 system_hint，无需再加任务级 budget。
 const DEFAULT_IDLE_RETRY_BUDGET: u32 = 2;
+
+/// Single-Agent Uplift P1-3: 撞顶 (`stop_reason == "length"`) 时升档使用的 max_tokens。
+///
+/// **第一档恢复**：默认 `max_output_tokens`（16K）撞顶时，**同 step 内**升档到 64K
+/// 重发。覆盖 80% 撞顶场景——大多数撞顶其实只略超 8-16K。
+///
+/// 选 64K 是因为：Anthropic Claude 4 / OpenAI o-series / DeepSeek-V4 都支持
+/// ≥64K output；更小窗口模型（如 deepseek-coder-32k）由 `compute_escalated_cap`
+/// 在 caller 端 clamp 到 `context_window / 2`，避免无谓重试。
+pub(crate) const ESCALATED_MAX_OUTPUT_TOKENS: u32 = 65_536;
+
+/// Single-Agent Uplift P1-3: multi-turn "continue from where you cut off" 恢复上限。
+///
+/// **第二档恢复**：64K 升档后仍撞顶 → 注入 "Resume directly" user message 让 LLM
+/// 接着写，最多 3 次。第 4 次还撞顶 → surface error（任务本身太大，需要人介入）。
+///
+/// 3 次 = Claude Code `MAX_OUTPUT_TOKENS_RECOVERY_LIMIT` 直接 port。在生产数据上够用，
+/// 后续按 Miragenty 实测再调。
+pub(crate) const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT: u32 = 3;
+
+/// P1-3 升档值的 clamp 计算：不超过模型 context_window / 2，且不低于 caller 当前值。
+///
+/// 为什么不超过 ctx/2：升档输出占去一半 ctx 就没空间给后续 user 输入 + tool_result。
+/// 为什么不低于当前值：clamp 之后还比当前低就直接跳过升档（caller 应判定后走 multi-turn）。
+pub(crate) fn compute_escalated_cap(provider: &str, model: &str, current: u32) -> u32 {
+    let caps = crate::llm::registry::get_capabilities(provider, model);
+    let upper = (caps.context_window / 2) as u32;
+    upper.min(ESCALATED_MAX_OUTPUT_TOKENS).max(current)
+}
 
 /// 每步 LLM 请求的 max_tokens 默认值。
 /// 详细动机参见 [`AgentRunOptions::max_output_tokens`]。
@@ -241,7 +277,7 @@ fn approximate_tokens(messages: &[Message]) -> usize {
 }
 
 #[derive(Debug, Clone)]
-struct CompactReport {
+pub(crate) struct CompactReport {
     dropped_messages: usize,
     tools_seen: Vec<String>,
     tokens_before: usize,
@@ -249,7 +285,7 @@ struct CompactReport {
 }
 
 impl CompactReport {
-    fn human_readable(&self) -> String {
+    pub(crate) fn human_readable(&self) -> String {
         format!(
             "Compacted {} earlier message(s) to free context. ~{}K → ~{}K tokens. \
              Earlier tool calls: {}.",
@@ -264,7 +300,7 @@ impl CompactReport {
         )
     }
 
-    fn to_meta(&self) -> serde_json::Value {
+    pub(crate) fn to_meta(&self) -> serde_json::Value {
         serde_json::json!({
             "dropped_messages": self.dropped_messages,
             "tokens_before": self.tokens_before,
@@ -333,6 +369,77 @@ fn microcompact(messages: &mut Vec<Message>) -> Option<CompactReport> {
     })
 }
 
+/// Single-Agent Uplift P0-1: reactive 版的 microcompact。
+///
+/// 触发场景：LLM API 实际返回 `context_length_exceeded` / `prompt is too long` 等
+/// "已经撞墙" 错误后，由 [`run_inner`] 主循环识别（见
+/// [`crate::llm::classify_llm_error`]）后调用，**同 step 内**做一次激进压缩然后重发。
+///
+/// 与 [`microcompact`] 的差异：
+///
+/// | 维度            | microcompact (proactive)         | reactive_compact_aggressive            |
+/// |-----------------|----------------------------------|----------------------------------------|
+/// | 触发时机        | 每 step 开头基于本地 token 估算  | API 端真返回拒绝错误后                 |
+/// | 最小消息数门槛  | 8                                | 4（已经撞墙，压少胜过 fail）           |
+/// | drop 比例       | `len() / 3`                      | `len() / 2`                            |
+/// | 摘要文案        | 中性 "earlier explored"          | 显式 "API rejected as too long"        |
+/// | 单 step 触发次数| 每 step 最多 1 次（自然）        | 每 step 最多 1 次（caller flag 守住）  |
+///
+/// **返回 None 的语义**：已经无能为力（messages < 4 或压完只剩 system 在撑），
+/// 此时 caller 应让原错误真 bail。这是合同里"反正你试过了，别死循环"的兜底。
+pub(crate) fn reactive_compact_aggressive(messages: &mut Vec<Message>) -> Option<CompactReport> {
+    // 至少留 2 条消息（一对 user/assistant）给 LLM 当上下文。messages < 4 时压完只剩 1 条
+    // assistant 或 1 条 user，毫无意义。
+    if messages.len() < 4 {
+        return None;
+    }
+    let before = approximate_tokens(messages);
+    let drop_count = messages.len() / 2;
+    let dropped: Vec<Message> = messages.drain(0..drop_count).collect();
+
+    let mut tools_seen: Vec<String> = Vec::new();
+    for msg in &dropped {
+        for block in &msg.content {
+            if let ContentBlock::ToolUse { name, .. } = block {
+                if !tools_seen.contains(name) {
+                    tools_seen.push(name.clone());
+                }
+            }
+        }
+    }
+
+    let summary = format!(
+        "[context-compact:reactive] The LLM API rejected the previous request as too long. \
+         {} earlier message(s) have been aggressively compacted to free space and the request \
+         is being retried with the same step. The full event history remains visible to the user \
+         in the workspace timeline. Tools you ran earlier: {}. Continue from the latest \
+         user/tool messages below.",
+        drop_count,
+        if tools_seen.is_empty() {
+            "(none)".to_string()
+        } else {
+            tools_seen.join(", ")
+        },
+    );
+
+    messages.insert(
+        0,
+        Message {
+            role: MessageRole::User,
+            content: vec![ContentBlock::Text { text: summary }],
+            cache_control: None,
+        },
+    );
+
+    let after = approximate_tokens(messages);
+    Some(CompactReport {
+        dropped_messages: drop_count,
+        tools_seen,
+        tokens_before: before,
+        tokens_after: after,
+    })
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 struct AgentEventPayload {
     agent_id: String,
@@ -365,6 +472,36 @@ pub struct AgentRunOptions {
     pub stream_network_retries: u32,
     /// 网络重试首次退避毫秒数。
     pub stream_initial_retry_delay_ms: u64,
+    /// Single-Agent Uplift P0-2: 单 agent 整个任务的 output_token 软上限。
+    ///
+    /// `Some(n)` → 启用 [`budget_tracker::BudgetTracker`]：累计 output ≥ 90% 或者
+    /// 连续 3 轮 delta < 500 token 时往 conversation 注入一条"该收尾了"的提示，
+    /// 让 agent 自己调 task_complete。`max_steps` 仍是硬上限兜底。
+    ///
+    /// `None` → 关闭，行为同 P0-2 之前（只走 `max_steps` 硬上限）。
+    ///
+    /// 推荐值：模型 `context_window × 30%`。30% 来自经验——output 通常是 input 的
+    /// 1/3 到 1/5，task 完成时 output 占 ctx 30% 已是"高消耗"。计算放在 caller
+    /// （commands/scheduler），engine 只负责执行。
+    pub output_token_budget: Option<u64>,
+    /// Single-Agent Uplift P1-2: 可选的备用模型。
+    ///
+    /// `Some(name)` → 主模型遇到 Overloaded/RateLimited 时切到该模型重发当前 step
+    /// （本 step 只切一次，避免环路）。`None` → 关闭 fallback，行为同 P1-2 之前
+    /// （overload → bail）。
+    ///
+    /// **跨 provider fallback 暂不支持**：fallback 模型必须能被同一 provider 调起
+    /// （即 OpenAI-compat 内部不同模型，或 Anthropic 内部不同模型）。跨厂商切换
+    /// 会触发 tool schema / cache control 不兼容，单独 PR 处理。
+    pub fallback_model: Option<String>,
+    /// Single-Agent Uplift P1-2: fallback 触发后的粘性策略。
+    ///
+    /// `true`（默认）→ 切到 fallback 后后续 step 继续用 fallback，直到 agent 结束。
+    /// 原因：reseller overload 通常持续 5-30 分钟，频繁回切 primary 等于反复撞墙。
+    ///
+    /// `false` → 下一个 step 重新尝试 primary。当用户希望"只是临时切一下"时用，
+    /// 但要意识到大概率立刻再次撞 overload。
+    pub fallback_sticky: bool,
 }
 
 impl Default for AgentRunOptions {
@@ -381,6 +518,13 @@ impl Default for AgentRunOptions {
             max_output_tokens: DEFAULT_AGENT_MAX_OUTPUT_TOKENS,
             stream_network_retries: 5,
             stream_initial_retry_delay_ms: 1000,
+            // P0-2: 默认关闭，需 caller (scheduler / commands::agent::run) 显式启用。
+            // 这保证 P0-2 PR 完全向后兼容——旧调用点 Default::default() 还是走 max_steps。
+            output_token_budget: None,
+            // P1-2: 默认关闭——大部分用户没配 fallback model。caller 显式注入 Some(name) 才启用。
+            fallback_model: None,
+            // P1-2: 启用 fallback 时默认 sticky=true（见字段文档）
+            fallback_sticky: true,
         }
     }
 }
@@ -574,6 +718,70 @@ impl AgentEngine {
         // - 与"每 step 是一次独立 LLM 调用"的语义对齐，更符合直觉
         let mut idle_retries_left: u32 = opts.idle_retry_budget;
         let mut resume_after_idle_retry = false;
+        // Single-Agent Uplift P0-1: per-step 一次 reactive compact 配额。
+        //
+        // 不变量：每个 step 编号最多触发一次 reactive compact retry。如果 reactive
+        // compact 后重发**仍然**撞 prompt_too_long → flag 守住不再压，让原错误 bail。
+        //
+        // 配合 `skip_step_increment` 实现：reactive retry 不消耗 step 号——同一 step
+        // 内"失败 → 压 → 重发"是同一行 timeline 事件。下一个真正的 step++ 才把
+        // attempted 重置回 false。
+        //
+        // 与 idle_retries_left 的差别：idle retry 每次 step++（即把 retry 当独立 step
+        // 计入 max_steps 兜底），因为 idle 是"网络/上游卡住"，需要 max_steps 兜底
+        // 防止无限 retry。reactive 不同——单 step 最多 1 次（flag 守住），不需要 step++
+        // 兜底，反而想保持 step 号语义稳定（前端 timeline 一致性）。
+        let mut attempted_reactive_compact_this_step = false;
+        // P0-1 实现工具：设为 true 时本次 loop 跳过 step++ + flag reset 段，
+        // 让 reactive compact 重发能复用同 step 号。仅 reactive 分支会 set，set 后
+        // 立刻 continue；下一轮顶部消费完即清零。
+        let mut skip_step_increment_for_reactive = false;
+        // Single-Agent Uplift P0-2: 可选的 output_token budget tracker。
+        //
+        // `Some` = caller 显式开启（见 `AgentRunOptions::output_token_budget` 文档）；
+        // `None` = 关闭，等同 P0-2 之前行为（仅 max_steps 兜底）。
+        //
+        // 不变量：tracker 只在每 step 拿到 LLM response 后 record + decide 一次。
+        // **不**在 reactive compact retry 时重复 record（response 还没出来），
+        // 也**不**在 IdleTimeout retry 时重复——这两个路径都 `continue` 跳过下方
+        // `record_step` 调用。
+        let mut budget_tracker: Option<BudgetTracker> = opts
+            .output_token_budget
+            .map(|_| BudgetTracker::new());
+        // Single-Agent Uplift P1-3: max_output_tokens 三档恢复 state。
+        //
+        // - `current_max_output_tokens`：本 agent 当前用的 max_tokens；升档后**单调
+        //   上升**直到 agent 结束。下一步直接用大窗口，减少撞顶概率。
+        // - `escalated_once_this_step`：本 step 已经升过档（per-step flag，新 step 重置）；
+        //   单 step 内只升一次，第二次就要走 multi-turn 而非死循环升档。
+        // - `multi_turn_recovery_count`：multi-turn "Resume directly" 累计计数，**跨 step**
+        //   累计；上限 `MAX_OUTPUT_TOKENS_RECOVERY_LIMIT` 后真 surface error。
+        let mut current_max_output_tokens: u32 = opts.max_output_tokens;
+        let mut escalated_once_this_step = false;
+        let mut multi_turn_recovery_count: u32 = 0;
+        // Single-Agent Uplift P1-2: Cross-Model Fallback state。
+        //
+        // - `current_model`：本 agent 当前 LLM 请求用的模型名。fallback 触发后切到
+        //   opts.fallback_model；sticky=true 保留到 agent 结束，sticky=false 每 step
+        //   末尾回切 primary。
+        // - `switched_to_fallback_this_step`：本 step 已经切过一次（per-step flag）。
+        //   防止主+备都过载时无限切换死循环 —— 本 step 切一次后不再切，整 step fail。
+        // - `fallback_switches_total`：agent 维度累计切换次数，给 mission report /
+        //   debug log 用。每次成功切换 +1。
+        let mut current_model: String = opts.model.clone();
+        let mut switched_to_fallback_this_step = false;
+        let mut fallback_switches_total: u32 = 0;
+        // Single-Agent Uplift P0-3: 等待 emit recovery_succeeded 的待办。
+        //
+        // 任意 recovery 分支（P0-1 reactive / idle retry / P1-3 escalate / multi-turn）
+        // 触发后，往这里塞 (trigger, strategy)；下次 stream OK 完成时主循环消费并
+        // emit recovery_succeeded。简化语义："下次 LLM 调用成功 = 上次 attempt 成功"。
+        //
+        // 不变量：
+        //   - 永远只持有最近一次未 resolve 的 recovery；新 recovery 覆盖旧的（旧的
+        //     视为"还在恢复中又遇到新故障"，最后一次 succeeded 也足够通知前端"现在 OK 了"）
+        //   - 拿到 Stream OK 后立即取出 (take())，避免重复 emit
+        let mut pending_recovery_to_resolve: Option<(RecoveryTrigger, RecoveryStrategy)> = None;
 
         self.emit_event(agent_id, step, "status_change", "running");
         self.update_agent_status(agent_id, "running");
@@ -587,6 +795,16 @@ impl AgentEngine {
                 opts.idle_retry_budget,
             );
             resume_after_idle_retry = false;
+            // 与 idle_retries_left 不同：reactive compact 是"step 内"的自救——同一 step
+            // 反复 continue 重发时**不能**重置（否则压完还失败时会无限循环）。step 边界
+            // 才重置（即"开始新一步 LLM 调用"时）。
+            //
+            // 这里"边界"= step += 1 之前。注意 idle-retry continue 不 step++，所以这条
+            // 判定要看 `resume_after_idle_retry` 的旧值（已经在前面读出并清零）。
+            // 简化做法：在 step += 1 之后重置（见下方）。这里只 init。
+            //
+            // **不在循环顶部重置**：循环顶部对应"上一轮可能是 reactive compact retry"，
+            // 重置会丢失"本 step 已经压过一次"的信息。step += 1 那行下面才是边界。
 
             if self.cancel_token.is_cancelled() {
                 return self.finish_cancelled(agent_id, step);
@@ -624,15 +842,53 @@ impl AgentEngine {
                 self.emit_event(agent_id, step, "system_hint", &hint);
             }
 
-            step += 1;
-            self.update_agent_step(agent_id, step);
-            tracing::info!(
-                agent_id = %agent_id,
-                step,
-                msgs_in_context = messages.len(),
-                ctx_tokens_est = approximate_tokens(&messages),
-                "step begin"
-            );
+            // Single-Agent Uplift P0-1: reactive compact retry 复用同 step 号。
+            // 同一 step 号可能对应最多 2 次 LLM 调用：原始 + 1 次 reactive 重发；
+            // 前端 timeline 用 events 顺序而非 step 号区分这两次调用。
+            if skip_step_increment_for_reactive {
+                skip_step_increment_for_reactive = false;
+                tracing::info!(
+                    agent_id = %agent_id,
+                    step,
+                    msgs_in_context = messages.len(),
+                    ctx_tokens_est = approximate_tokens(&messages),
+                    "step retry (reactive compact)"
+                );
+            } else {
+                step += 1;
+                self.update_agent_step(agent_id, step);
+                // 新 step 边界 → 重置 per-step flags。
+                // - reactive compact 配额（P0-1）
+                // - max_output_tokens 升档配额（P1-3）：每 step 又有一次升档机会
+                //   （注意：current_max_output_tokens 不重置，是单调上升的——升过一次
+                //    后下个 step 直接用大窗口）
+                attempted_reactive_compact_this_step = false;
+                escalated_once_this_step = false;
+                // P1-2: step 边界重置 fallback per-step flag。注意 current_model
+                // 不在此重置 —— sticky=true 时跨 step 保留。
+                switched_to_fallback_this_step = false;
+                // P1-2 non-sticky: 上一步切了 fallback 但 sticky=false → 这一步回切 primary。
+                // 大多数用户场景下 sticky=true 更合理（overload 通常持续几分钟），
+                // 但 explicit opt-out 时尊重用户配置。
+                if !opts.fallback_sticky && current_model != opts.model {
+                    tracing::info!(
+                        agent_id = %agent_id,
+                        step,
+                        from = %current_model,
+                        to = %opts.model,
+                        "P1-2 non-sticky: reverting to primary model at step boundary"
+                    );
+                    current_model = opts.model.clone();
+                }
+                tracing::info!(
+                    agent_id = %agent_id,
+                    step,
+                    msgs_in_context = messages.len(),
+                    ctx_tokens_est = approximate_tokens(&messages),
+                    current_model = %current_model,
+                    "step begin"
+                );
+            }
 
             // Single-Agent Uplift Phase 2.2 + B2: prompt 进 LLM 之前做三层瘦身。
             //   ① tool_summary：tool_summarizer 配置在则先尝试 LLM 摘要（小模型）
@@ -643,12 +899,20 @@ impl AgentEngine {
                 .await;
             if approximate_tokens(&messages) > MICROCOMPACT_TOKEN_THRESHOLD {
                 if let Some(report) = microcompact(&mut messages) {
+                    // P0-1 引入了 reactive compact 后，前端需要区分 proactive vs reactive
+                    // 两种来源。proactive (这里) = 主动按本地 token 估算触发；
+                    // reactive (`engine.rs` Llm 错误分支) = API 拒绝后兜底压缩。
+                    let mut meta = report.to_meta();
+                    if let Some(obj) = meta.as_object_mut() {
+                        obj.insert("kind".into(), serde_json::json!("proactive"));
+                        obj.insert("trigger".into(), serde_json::json!("token_threshold"));
+                    }
                     self.emit_event_with_meta(
                         agent_id,
                         step,
                         "compact",
                         &report.human_readable(),
-                        Some(report.to_meta()),
+                        Some(meta),
                     );
                 }
             }
@@ -657,17 +921,23 @@ impl AgentEngine {
             self.emit_event(agent_id, step, "llm_call", &call_summary);
 
             let request = LlmRequest {
-                model: opts.model.clone(),
+                // P1-2: 用 current_model 而非 opts.model。fallback 切换后这里直接拿
+                // 备用模型；sticky=true 时跨 step 保持，sticky=false 由 step 末
+                // 段恢复 primary。
+                model: current_model.clone(),
                 system: Some(system.clone()),
                 messages: messages.clone(),
                 tools: tools.clone(),
-                max_tokens: opts.max_output_tokens,
+                // P1-3: 用 current_max_output_tokens 而非 opts.max_output_tokens。
+                // 升档后这个值会上升到 ESCALATED_MAX_OUTPUT_TOKENS（clamped）；
+                // 没撞顶过则保持初始值。
+                max_tokens: current_max_output_tokens,
                 provider_extras: None,
             };
             tracing::info!(
                 agent_id = %agent_id,
                 step,
-                model = %opts.model,
+                model = %current_model,
                 msg_count = request.messages.len(),
                 tool_count = request.tools.len(),
                 max_tokens = request.max_tokens,
@@ -887,6 +1157,15 @@ impl AgentEngine {
                         tool_use_blocks = tool_use_n,
                         "llm_response done"
                     );
+                    // P0-3: 如果上一次循环触发了 recovery_attempt，这次 stream 成功
+                    // 完成 → emit 一条 silent recovery_succeeded 给前端关闭"恢复中"状态。
+                    if let Some((trigger, strategy)) = pending_recovery_to_resolve.take() {
+                        let content = format_succeeded_content(trigger, &strategy);
+                        let meta = build_recovery_succeeded_meta(trigger, &strategy);
+                        self.emit_event_with_meta(
+                            agent_id, step, "recovery_succeeded", &content, Some(meta),
+                        );
+                    }
                     r
                 }
                 Err(StreamGuardError::IdleTimeout { idle_secs, threshold_secs })
@@ -909,6 +1188,26 @@ impl AgentEngine {
                         "stream idle timeout, auto-injecting continue prompt"
                     );
                     self.emit_event(agent_id, step, "system_hint", &notice);
+                    // P0-3: 同时 emit silent recovery_attempt 给前端开"恢复中"状态。
+                    // **双发**：保留 system_hint 给现有 UI 渲染（用户可见），同时新发
+                    // recovery_attempt 给未来 toggle 后的 UX 用。前端切换后 system_hint 可删。
+                    let strategy = RecoveryStrategy::IdleRetryContinue {
+                        retries_left: idle_retries_left,
+                    };
+                    let attempt_meta = build_recovery_attempt_meta(
+                        RecoveryTrigger::IdleTimeout, &strategy,
+                        &format!("idle {idle_secs}s > {threshold_secs}s threshold"),
+                        1,
+                    );
+                    self.emit_event_with_meta(
+                        agent_id, step, "recovery_attempt",
+                        &format_attempt_content(RecoveryTrigger::IdleTimeout, &strategy),
+                        Some(attempt_meta),
+                    );
+                    pending_recovery_to_resolve = Some((
+                        RecoveryTrigger::IdleTimeout,
+                        RecoveryStrategy::IdleRetryContinue { retries_left: idle_retries_left },
+                    ));
                     // 没有 assistant turn 可 push（流被中止）。直接追加一条 user
                     // 提示给 LLM 让它在下一次 stream 里基于已有上下文继续。
                     let continue_msg = format!(
@@ -924,6 +1223,168 @@ impl AgentEngine {
                 }
                 Err(StreamGuardError::Cancelled) => {
                     return self.finish_cancelled(agent_id, step);
+                }
+                // Single-Agent Uplift P0-1: API 端真返回 "prompt too long" 类错误 →
+                // 同 step 内做一次 reactive compact 重发。压不动（messages 太少）/已经
+                // 压过一次（flag set） → 走原 bail 路径让上层 retry 或 fail。
+                //
+                // 判定逻辑放在 `crate::llm::error_class::classify_llm_error`，按错误消息
+                // 关键词识别 OpenAI / Anthropic / DeepSeek / 通义 四家的 context-length
+                // 错误。**不识别** rate_limit / overload —— 那些走 P1-2 model fallback
+                // （现阶段仍走默认 bail）。
+                Err(StreamGuardError::Llm(msg))
+                    if !attempted_reactive_compact_this_step
+                        && crate::llm::classify_llm_error(&msg)
+                            == crate::llm::LlmErrorClass::PromptTooLong =>
+                {
+                    attempted_reactive_compact_this_step = true;
+                    let report = reactive_compact_aggressive(&mut messages);
+                    if let Some(r) = &report {
+                        // 成功路径：emit silent recovery_attempt（前端默认隐藏）
+                        // 同时保留 'compact' event 以兼容旧前端渲染——双发不影响数据流，
+                        // P0-3 前端 toggle 上线后可以删 compact 那条。
+                        let strategy = RecoveryStrategy::ReactiveCompact {
+                            dropped_msgs: r.dropped_messages,
+                            tokens_before: r.tokens_before,
+                            tokens_after: r.tokens_after,
+                        };
+                        let attempt_meta = build_recovery_attempt_meta(
+                            RecoveryTrigger::PromptTooLong, &strategy, &msg, 1,
+                        );
+                        let content = format_attempt_content(RecoveryTrigger::PromptTooLong, &strategy);
+                        self.emit_event_with_meta(
+                            agent_id, step, "recovery_attempt", &content, Some(attempt_meta),
+                        );
+                        // 同时保留 compact 事件（兼容现有前端 timeline 渲染）
+                        let mut compact_meta = r.to_meta();
+                        if let Some(obj) = compact_meta.as_object_mut() {
+                            obj.insert("kind".into(), serde_json::json!("reactive"));
+                            obj.insert("trigger".into(), serde_json::json!("prompt_too_long"));
+                            obj.insert("error_excerpt".into(),
+                                serde_json::json!(msg.chars().take(200).collect::<String>()));
+                        }
+                        self.emit_event_with_meta(
+                            agent_id, step, "compact",
+                            &format!(
+                                "Reactive compact: dropped {} msg (~{}K → ~{}K tokens) after API context-length error",
+                                r.dropped_messages, r.tokens_before / 1000, r.tokens_after / 1000
+                            ),
+                            Some(compact_meta),
+                        );
+                    } else {
+                        // 失败路径：messages 已经太短压不动 → emit error（用户可见），原 bail
+                        let human = format!(
+                            "Cannot recover from prompt_too_long: only {} message(s) remain, no further compaction possible. Failing step.",
+                            messages.len()
+                        );
+                        self.emit_event_with_meta(
+                            agent_id, step, "error", &human,
+                            Some(serde_json::json!({
+                                "kind": "reactive_compact_no_room",
+                                "messages_remaining": messages.len(),
+                                "error_excerpt": msg.chars().take(200).collect::<String>(),
+                            })),
+                        );
+                        return Err(anyhow::anyhow!(msg));
+                    }
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        step,
+                        msgs_after_compact = messages.len(),
+                        ctx_tokens_after = approximate_tokens(&messages),
+                        "reactive compact succeeded; retrying same step"
+                    );
+                    // 标记 pending recovery：下一次 stream 成功完成时 emit succeeded
+                    pending_recovery_to_resolve = Some((
+                        RecoveryTrigger::PromptTooLong,
+                        RecoveryStrategy::ReactiveCompact {
+                            dropped_msgs: report.as_ref().map(|r| r.dropped_messages).unwrap_or(0),
+                            tokens_before: report.as_ref().map(|r| r.tokens_before).unwrap_or(0),
+                            tokens_after: report.as_ref().map(|r| r.tokens_after).unwrap_or(0),
+                        },
+                    ));
+                    // **关键**：不 step++，复用本 step 编号重发请求。step 号在前端 timeline
+                    // 保持单调，"同一步 LLM 调用失败 → 压缩 → 重发"看起来是一条线的事件流。
+                    skip_step_increment_for_reactive = true;
+                    continue;
+                }
+                // Single-Agent Uplift P1-2: Overloaded / RateLimited + 配置了 fallback_model
+                // + 本 step 还没切过 + fallback 与当前模型不同 → 切到 fallback 重发同 step。
+                //
+                // 优先级：PromptTooLong 优先匹配（上面的 arm），fallback 这条只在
+                // PromptTooLong 不匹配时进入。这与 LlmErrorClass 内部的优先级一致。
+                //
+                // 单 step 一次的硬约束：避免 primary+fallback 都过载时无限切换。
+                // 第二次再遇到 trigger → fall through 到 Err(e) 的 bail 路径，整 step 失败。
+                Err(StreamGuardError::Llm(msg))
+                    if !switched_to_fallback_this_step
+                        && opts.fallback_model.is_some()
+                        && opts.fallback_model.as_deref() != Some(current_model.as_str())
+                        && crate::llm::classify_llm_error(&msg).is_fallback_trigger() =>
+                {
+                    let class = crate::llm::classify_llm_error(&msg);
+                    let trigger = RecoveryTrigger::from_error_class(class)
+                        .expect("is_fallback_trigger guarantees Some(trigger)");
+                    let from_model = current_model.clone();
+                    let to_model = opts
+                        .fallback_model
+                        .clone()
+                        .expect("guarded by opts.fallback_model.is_some()");
+                    switched_to_fallback_this_step = true;
+                    fallback_switches_total += 1;
+                    current_model = to_model.clone();
+
+                    // strip reasoning blocks: 跨模型 thinking signature 不通用，
+                    // 不剥会让 fallback 拿到上一个模型的 thinking 后 400/silent-drop
+                    crate::agent::fallback::strip_reasoning_blocks(&mut messages);
+
+                    let strategy = RecoveryStrategy::ModelFallback {
+                        from: from_model.clone(),
+                        to: to_model.clone(),
+                        switch_total: fallback_switches_total,
+                    };
+                    // 双发：silent recovery_attempt + 可见 system_hint。
+                    // 与 reactive compact 不同——fallback 改变了请求的模型，**用户应该
+                    // 知道**（成本/能力可能差异大），所以 system_hint 这条不静默。
+                    let attempt_meta = build_recovery_attempt_meta(trigger, &strategy, &msg, 1);
+                    self.emit_event_with_meta(
+                        agent_id,
+                        step,
+                        "recovery_attempt",
+                        &format_attempt_content(trigger, &strategy),
+                        Some(attempt_meta),
+                    );
+                    let visible_msg = format!(
+                        "Primary model `{from_model}` returned {trigger_label}; switched to fallback `{to_model}` and retrying this step.",
+                        trigger_label = class.as_str(),
+                    );
+                    let switch_meta = crate::agent::fallback::FallbackSwitchMeta {
+                        from: from_model.clone(),
+                        to: to_model.clone(),
+                        trigger: class.as_str(),
+                        switch_in_step: 1,
+                        switch_total: fallback_switches_total,
+                    };
+                    self.emit_event_with_meta(
+                        agent_id,
+                        step,
+                        "system_hint",
+                        &visible_msg,
+                        Some(switch_meta.to_json()),
+                    );
+                    pending_recovery_to_resolve = Some((trigger, strategy));
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        step,
+                        from = %from_model,
+                        to = %to_model,
+                        trigger = %class.as_str(),
+                        fallback_switches_total,
+                        "cross-model fallback triggered, retrying same step"
+                    );
+                    // 同 step 重发：用 fallback model，复用 step 号（与 reactive 一致策略）
+                    skip_step_increment_for_reactive = true;
+                    continue;
                 }
                 Err(e) => return Err(anyhow::anyhow!(e.user_message_zh())),
             };
@@ -956,6 +1417,14 @@ impl AgentEngine {
                 response.usage.output_tokens,
                 step_cost,
             );
+
+            // Single-Agent Uplift P0-2: 累计 output token 到 budget tracker。
+            // 仅当 caller 显式开启 budget（opts.output_token_budget=Some）时 tracker
+            // 才存在。decide 调用放在 task_complete 判定之前（见下方）——这样如果
+            // budget 触发，nudge 能赶在本 step 的 follow-up message 里一起回给 LLM。
+            if let Some(t) = budget_tracker.as_mut() {
+                t.record_step(response.usage.output_tokens);
+            }
 
             // FM-14: budget gate —— 累计成本触线时阻塞当前 agent 等待审批。
             // rejected → 标 task failed 让 mission 自然走完终态判定。
@@ -1020,61 +1489,267 @@ impl AgentEngine {
                 }
             }
 
-            // 当 LLM 因为 max_tokens 被截断（stop_reason == "length"）时，
-            // tool_use 的 JSON arguments 几乎一定残缺——后续 dispatch_tool 会发出
-            // missing_or_invalid_arguments 错误。但单纯把工具错误丢回去 LLM 看不出
-            // 是 max_tokens 撞顶，会重试同样巨大的 output → 死循环。
-            // 这里**显式**告诉它"你被截断了"，并提示分段策略。
+            // Single-Agent Uplift P1-3: 三档 max_output_tokens 恢复。
             //
-            // 注入路径分两种：
-            //   ① 本步有 tool_calls → hint **必须** 并入 follow-up message（否则
-            //      DeepSeek/OpenAI 协议层会因为 [tool_calls][user_text][tool_results]
-            //      序列报 400 insufficient_tool_messages_following_tool_calls）。
-            //   ② 本步无 tool_calls → 独立 user message 合规。
+            // 当 LLM 因 max_tokens 被截断 (`stop_reason ∈ {"length","max_tokens","max_output_tokens"}`)，
+            // 按优先级走以下分支：
+            //   ① **升档**：本 step 未升过 + 当前 cap < ESCALATED → 升到 ESCALATED 重发同 prompt
+            //      （需 strip 上次 partial assistant message + skip_step_increment_for_reactive 复用同 step 号）
+            //   ② **multi-turn recovery**：升档过 / 已在 ESCALATED → 注入 "Resume directly" 提示让 LLM 接着写
+            //      （保留 assistant message + 走 follow-up / 独立 push 路径）
+            //   ③ **surface**：multi-turn 已用满 LIMIT 次 → emit error 事件（不 fail，但不再恢复）
+            //
+            // 注入协议（同 reactive）：
+            //   - 本步有 tool_calls → 暂存到 pending_max_tokens_hint → follow-up 阶段并入
+            //   - 本步无 tool_calls → 直接 push 独立 user msg
+            //
+            // ① 走 continue（不到下面 push assistant 处理）——它独立于 ②/③ 的注入路径。
             let mut pending_max_tokens_hint: Option<String> = None;
-            if response.stop_reason == "length"
-                || response.stop_reason == "max_tokens"
-                || response.stop_reason == "max_output_tokens"
-            {
-                let hint = format!(
-                    "[System] Your previous response hit the {} max_tokens output budget and \
-                     was cut off mid-response. Any tool calls in that turn likely have truncated/\
-                     invalid arguments and will fail. \
-                     **Strategy**: Split large file content across multiple smaller tool calls. \
-                     For files > ~8KB, prefer one of:\n\
-                     1. Call write_file with a partial header first, then use edit_file with \
-                        anchor strings to append sections.\n\
-                     2. Use shell_exec with `cat <<EOF >> path` to append in chunks (each \
-                        heredoc must finish in one tool call).\n\
-                     3. For docs, write a short outline first; then fill each section in its own \
-                        tool call.\n\
-                     Avoid retrying the exact same large output — it will be truncated again.",
-                    opts.max_output_tokens
+            let is_max_tokens_hit = matches!(
+                response.stop_reason.as_str(),
+                "length" | "max_tokens" | "max_output_tokens"
+            );
+
+            if is_max_tokens_hit {
+                // ① 升档分支：可以升 + 没升过
+                let escalated_cap = compute_escalated_cap(
+                    self.provider.name(),
+                    &opts.model,
+                    current_max_output_tokens,
                 );
-                self.emit_event_with_meta(
-                    agent_id,
-                    step,
-                    "system_hint",
-                    &format!(
-                        "Output truncated at {} tokens — instructed agent to split into smaller calls",
-                        opts.max_output_tokens
-                    ),
-                    Some(serde_json::json!({
-                        "kind": "max_tokens_hit",
-                        "max_tokens": opts.max_output_tokens,
-                        "stop_reason": response.stop_reason,
-                    })),
-                );
-                if tool_use_blocks.is_empty() {
-                    // ① 没有 tool_calls 在前，独立 push 合规。
-                    messages.push(Message {
-                        role: MessageRole::User,
-                        content: vec![ContentBlock::Text { text: hint }],
-                        cache_control: None,
-                    });
+                let can_escalate = !escalated_once_this_step
+                    && escalated_cap > current_max_output_tokens;
+                if can_escalate {
+                    let old_cap = current_max_output_tokens;
+                    let new_cap = escalated_cap;
+                    escalated_once_this_step = true;
+                    current_max_output_tokens = new_cap;
+
+                    self.emit_event_with_meta(
+                        agent_id,
+                        step,
+                        "system_hint",
+                        &format!(
+                            "Output truncated at {old_cap} tokens — auto-escalating max_output_tokens to {new_cap} and retrying same step"
+                        ),
+                        Some(serde_json::json!({
+                            "kind": "max_tokens_escalate",
+                            "old_cap": old_cap,
+                            "new_cap": new_cap,
+                            "stop_reason": response.stop_reason,
+                        })),
+                    );
+                    // P0-3: 双发 silent recovery_attempt（同 reactive / idle 模式）
+                    let strategy = RecoveryStrategy::OutputTokensEscalate { old_cap, new_cap };
+                    let attempt_meta = build_recovery_attempt_meta(
+                        RecoveryTrigger::MaxOutputTokens, &strategy,
+                        &format!("stop_reason={}", response.stop_reason), 1,
+                    );
+                    self.emit_event_with_meta(
+                        agent_id, step, "recovery_attempt",
+                        &format_attempt_content(RecoveryTrigger::MaxOutputTokens, &strategy),
+                        Some(attempt_meta),
+                    );
+                    pending_recovery_to_resolve = Some((
+                        RecoveryTrigger::MaxOutputTokens,
+                        RecoveryStrategy::OutputTokensEscalate { old_cap, new_cap },
+                    ));
+
+                    // **关键**：刚才 push 进 messages 末尾的 partial assistant message
+                    // 必须 pop——升档相当于重发同一 prompt，旧 partial 不能留（否则
+                    // LLM 会看到自己半截输出 + 同样 prompt，行为不确定）。
+                    if let Some(last) = messages.last() {
+                        if matches!(last.role, MessageRole::Assistant) {
+                            messages.pop();
+                        }
+                    }
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        step,
+                        old_cap,
+                        new_cap,
+                        "max_output_tokens escalation; popping partial assistant + retry same step"
+                    );
+
+                    // 不 step++，复用同 step 号重发——和 reactive compact 同语义。
+                    skip_step_increment_for_reactive = true;
+                    continue;
+                }
+
+                // ② multi-turn recovery：可以继续接着写
+                if multi_turn_recovery_count < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT {
+                    multi_turn_recovery_count += 1;
+                    let recovery_msg = format!(
+                        "[System] Output token limit ({current_cap}) hit again. \
+                         Resume directly — no apology, no recap. Pick up mid-thought if that's \
+                         where the cut happened. **Break remaining work into smaller pieces** \
+                         (separate tool calls / shorter writes). \
+                         Recovery attempt {n}/{limit}.",
+                        current_cap = current_max_output_tokens,
+                        n = multi_turn_recovery_count,
+                        limit = MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
+                    );
+                    self.emit_event_with_meta(
+                        agent_id,
+                        step,
+                        "system_hint",
+                        &format!(
+                            "Output truncated at {} tokens (recovery {}/{}); asked agent to resume mid-thought",
+                            current_max_output_tokens,
+                            multi_turn_recovery_count,
+                            MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
+                        ),
+                        Some(serde_json::json!({
+                            "kind": "max_tokens_multi_turn",
+                            "max_tokens": current_max_output_tokens,
+                            "stop_reason": response.stop_reason,
+                            "recovery_count": multi_turn_recovery_count,
+                            "recovery_limit": MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
+                        })),
+                    );
+                    // P0-3: 双发 silent recovery_attempt
+                    let strategy = RecoveryStrategy::OutputTokensContinue {
+                        recovery_count: multi_turn_recovery_count,
+                        recovery_limit: MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
+                    };
+                    let attempt_meta = build_recovery_attempt_meta(
+                        RecoveryTrigger::MaxOutputTokens, &strategy,
+                        &format!("stop_reason={}, cap={}", response.stop_reason, current_max_output_tokens),
+                        multi_turn_recovery_count,
+                    );
+                    self.emit_event_with_meta(
+                        agent_id, step, "recovery_attempt",
+                        &format_attempt_content(RecoveryTrigger::MaxOutputTokens, &strategy),
+                        Some(attempt_meta),
+                    );
+                    pending_recovery_to_resolve = Some((
+                        RecoveryTrigger::MaxOutputTokens,
+                        RecoveryStrategy::OutputTokensContinue {
+                            recovery_count: multi_turn_recovery_count,
+                            recovery_limit: MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
+                        },
+                    ));
+                    if tool_use_blocks.is_empty() {
+                        messages.push(Message {
+                            role: MessageRole::User,
+                            content: vec![ContentBlock::Text { text: recovery_msg }],
+                            cache_control: None,
+                        });
+                    } else {
+                        pending_max_tokens_hint = Some(recovery_msg);
+                    }
                 } else {
-                    // ② 暂存，下面 follow-up 阶段并入。
-                    pending_max_tokens_hint = Some(hint);
+                    // ③ surface：multi-turn 用满了——任务本身设计有问题
+                    let surface_msg = format!(
+                        "[System][Persistent Error] Hit max_output_tokens after escalation \
+                         to {esc} and {limit} multi-turn recoveries. The task is too large for \
+                         the model in one session. **Last resort**: split the remaining work \
+                         into smaller tool calls (one section per call); if the artifact you \
+                         were producing must be one file, write a skeleton first then edit_file \
+                         in chunks. Calling task_complete with partial progress is acceptable.",
+                        esc = ESCALATED_MAX_OUTPUT_TOKENS,
+                        limit = MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
+                    );
+                    self.emit_event_with_meta(
+                        agent_id,
+                        step,
+                        "error",
+                        &format!(
+                            "max_output_tokens exhausted: escalated to {esc} + {limit} recovery attempts",
+                            esc = ESCALATED_MAX_OUTPUT_TOKENS,
+                            limit = MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
+                        ),
+                        Some(serde_json::json!({
+                            "kind": "max_tokens_exhausted",
+                            "escalated_cap": ESCALATED_MAX_OUTPUT_TOKENS,
+                            "recovery_attempts": multi_turn_recovery_count,
+                        })),
+                    );
+                    // 不 fail，继续走 follow-up——让 LLM 看到 surface_msg 自己决定下一步
+                    if tool_use_blocks.is_empty() {
+                        messages.push(Message {
+                            role: MessageRole::User,
+                            content: vec![ContentBlock::Text { text: surface_msg }],
+                            cache_control: None,
+                        });
+                    } else {
+                        pending_max_tokens_hint = Some(surface_msg);
+                    }
+                }
+            }
+
+            // Single-Agent Uplift P0-2: budget tracker 决策——是否该让 agent 收尾了。
+            //
+            // 触发路径与 max_tokens hint 同源（注入到 follow-up 或独立 user msg），
+            // 因为本质都是"让 LLM 下一轮看到一条系统提示并相应调整"。区别：max_tokens
+            // 是 protocol 级硬错误，budget 是软提醒，所以 budget nudge **不**注入
+            // pending_max_tokens_hint（避免和真撞顶提示混淆）；走单独路径。
+            //
+            // 不变量：单 agent 只 nudge 一次（tracker.nudge_already_emitted 守住）。
+            // 一次 nudge 后 LLM 通常会 task_complete；如果它装聋不 complete，max_steps
+            // 还是会兜底 fail。
+            let mut pending_budget_nudge: Option<String> = None;
+            if let (Some(tracker), Some(budget)) =
+                (budget_tracker.as_mut(), opts.output_token_budget)
+            {
+                let decision = tracker.decide(budget);
+                if let BudgetDecision::Stop { reason, accumulated, budget: b, pct } = decision {
+                    if !tracker.nudge_already_emitted() {
+                        tracker.mark_nudge_emitted();
+                        let reason_str = reason.as_str();
+                        let nudge = format!(
+                            "[System] You have used {accumulated} output tokens out of your {b} \
+                             token budget ({pct_pct:.0}% — trigger: {reason_str}). \
+                             **Stop exploring** and call `task_complete` now with a summary of \
+                             your progress so far. If the task isn't fully done, summarise what's \
+                             done and what's not — do not start new work in this turn.",
+                            pct_pct = pct * 100.0,
+                        );
+                        self.emit_event_with_meta(
+                            agent_id,
+                            step,
+                            "system_hint",
+                            &format!(
+                                "Token budget {reason_str}: {accumulated}/{b} ({:.0}%); \
+                                 asked agent to wrap up via task_complete",
+                                pct * 100.0,
+                            ),
+                            Some(serde_json::json!({
+                                "kind": "budget_stop_nudge",
+                                "reason": reason_str,
+                                "accumulated_tokens": accumulated,
+                                "budget": b,
+                                "pct": pct,
+                            })),
+                        );
+                        if tool_use_blocks.is_empty() {
+                            messages.push(Message {
+                                role: MessageRole::User,
+                                content: vec![ContentBlock::Text { text: nudge }],
+                                cache_control: None,
+                            });
+                        } else {
+                            pending_budget_nudge = Some(nudge);
+                        }
+                        // log diminishing/exhausted 触发量级，便于事后调阈值
+                        tracing::warn!(
+                            agent_id = %agent_id,
+                            step,
+                            accumulated_tokens = accumulated,
+                            budget = b,
+                            pct = pct * 100.0,
+                            reason = reason_str,
+                            "token budget stop nudge injected"
+                        );
+                    } else {
+                        // 已发过 nudge，第二次以上的 Stop 只 trace，不发事件
+                        tracing::debug!(
+                            agent_id = %agent_id,
+                            step,
+                            accumulated_tokens = accumulated,
+                            "budget tracker stop re-triggered after nudge; suppressed"
+                        );
+                    }
                 }
             }
             let task_complete_call = tool_use_blocks
@@ -1359,6 +2034,13 @@ impl AgentEngine {
             // 同样必须并入 follow-up，避免 [tool_calls][user_text][tool_results] 协议违例。
             if let Some(hint) = pending_max_tokens_hint {
                 followup.append_hint(hint);
+            }
+
+            // P0-2: budget tracker 触发的"该收尾了" nudge（仅当本步有 tool_calls 时
+            // 才暂存到此）。同 max_tokens hint 走相同协议路径——OpenAI tool_call 紧跟
+            // tool_result 配对要求。
+            if let Some(nudge) = pending_budget_nudge {
+                followup.append_hint(nudge);
             }
 
             // L3 read-only-loop hint：必须叠在同一条 follow-up message 里，
@@ -2717,6 +3399,197 @@ mod context_compaction_tests {
         // tokens 下降（用近似估算）
         let after_tokens = approximate_tokens(&messages);
         assert!(after_tokens < before_tokens, "压缩后 tokens 必须下降");
+    }
+
+    // ---- Single-Agent Uplift P0-1: reactive compact ----
+    //
+    // 守住 reactive compact 的核心不变量：
+    //   ① messages < 4 时返回 None（让 caller bail，不死循环）
+    //   ② messages >= 4 时压一半 + 显式 "reactive" 摘要标签
+    //   ③ 反复调用（模拟死循环 retry）仍按规则压，不 panic 不溢出
+    //   ④ 比 proactive microcompact 更激进
+
+    /// messages < 4 时 reactive_compact_aggressive 不动手，返回 None。
+    /// 这是 caller 区分"还能救一次" vs "真的没办法"的关键信号。
+    #[test]
+    fn reactive_compact_returns_none_when_too_few_messages() {
+        let mut messages: Vec<Message> = vec![
+            user_msg("first"),
+            user_msg("second"),
+            user_msg("third"),
+        ];
+        let report = reactive_compact_aggressive(&mut messages);
+        assert!(report.is_none(), "<4 messages 必须返回 None 让 caller 真 bail");
+        assert_eq!(messages.len(), 3, "返回 None 时 messages 不应被破坏");
+    }
+
+    /// reactive 摘要必须明确标注 "reactive" 来源——前端依此区分 proactive 主动压缩
+    /// 和 "API 拒绝后" 被动压缩，UX 上加红色徽章警示。
+    #[test]
+    fn reactive_compact_summary_marks_reactive_origin() {
+        // 8 条消息，包含 2 个工具调用 (前半 read_file, 后半 edit_file)
+        // 让我们能验证 tools_seen 只汇总被 drop 的前半部分。
+        let mut messages: Vec<Message> = Vec::new();
+        for i in 0..4 {
+            messages.push(user_msg(&format!("user msg {i} ").repeat(10)));
+            messages.push(assistant_with_tool_use(
+                if i < 2 { "read_file" } else { "edit_file" },
+                &format!("tu_{i}"),
+            ));
+        }
+        let before_count = messages.len();
+
+        let report = reactive_compact_aggressive(&mut messages)
+            .expect("8 条消息应能压");
+        // 8 / 2 = 4 条被 drop
+        assert_eq!(report.dropped_messages, 4);
+        assert!(report.tools_seen.contains(&"read_file".to_string()),
+            "drop 的前半含 read_file 应被汇总");
+
+        // 摘要插到最前 + 包含 "reactive" 显式标签
+        assert!(matches!(messages[0].role, MessageRole::User));
+        if let ContentBlock::Text { text } = &messages[0].content[0] {
+            assert!(text.contains("[context-compact:reactive]"),
+                "摘要必须显式标注 reactive 来源，前端按此渲染红色徽章");
+            assert!(text.contains("API rejected"),
+                "摘要必须告诉 LLM 触发原因，让其下一轮更谨慎");
+        } else {
+            panic!("reactive 摘要必须是 Text block");
+        }
+        // 总数 = 原数 - drop + 1（summary）
+        assert_eq!(messages.len(), before_count - report.dropped_messages + 1);
+    }
+
+    /// reactive_compact_aggressive 比 microcompact 更激进：drop 一半而非 1/3。
+    /// 这是"已经撞墙"场景的合理取舍——多丢一些上下文换"重发能过"。
+    #[test]
+    fn reactive_compact_is_more_aggressive_than_microcompact() {
+        let mut for_reactive: Vec<Message> = (0..9).map(|i| user_msg(&format!("m{i}"))).collect();
+        let mut for_micro: Vec<Message> = (0..9).map(|i| user_msg(&format!("m{i}"))).collect();
+
+        let r_report = reactive_compact_aggressive(&mut for_reactive).unwrap();
+        let m_report = microcompact(&mut for_micro).unwrap();
+
+        assert!(
+            r_report.dropped_messages > m_report.dropped_messages,
+            "reactive 必须比 proactive 更激进；got reactive={} vs micro={}",
+            r_report.dropped_messages,
+            m_report.dropped_messages
+        );
+        assert_eq!(r_report.dropped_messages, 4, "9 / 2 = 4");
+        assert_eq!(m_report.dropped_messages, 3, "9 / 3 = 3");
+    }
+
+    /// 死循环防御：messages 长度刚好等于阈值 4 时压一次后还剩 3 ——
+    /// 第二次调用必须返回 None。这是 caller flag 加防御的双保险。
+    #[test]
+    fn reactive_compact_second_call_after_min_threshold_returns_none() {
+        let mut messages: Vec<Message> = (0..4).map(|i| user_msg(&format!("m{i}"))).collect();
+        let first = reactive_compact_aggressive(&mut messages);
+        assert!(first.is_some(), "4 条消息应能压一次");
+        // 现在 messages 长度 = 4 - 2 + 1 = 3
+        assert_eq!(messages.len(), 3);
+        // 第二次：< 4 → None（让 caller 真 bail，不死循环）
+        let second = reactive_compact_aggressive(&mut messages);
+        assert!(second.is_none(), "压完后再调必须返回 None 兜底");
+    }
+
+    /// tokens 必须真的下降——这是 reactive 存在的核心价值。
+    /// 如果 summary 字串本身比被 drop 的内容还大（病态情况），就要返回前压缩
+    /// 没意义。当前实现没有这道防御（认为生产消息内容总比一行 summary 大）。
+    /// 这条测试 codify 当前正常情况下 tokens 一定下降的契约。
+    #[test]
+    fn reactive_compact_actually_reduces_tokens_for_normal_payload() {
+        let mut messages: Vec<Message> = Vec::new();
+        for i in 0..8 {
+            messages.push(user_msg(&format!("user message {i} with some content ").repeat(30)));
+        }
+        let before_tokens = approximate_tokens(&messages);
+        let report = reactive_compact_aggressive(&mut messages).unwrap();
+        let after_tokens = approximate_tokens(&messages);
+        assert!(
+            after_tokens < before_tokens,
+            "正常 payload 下 reactive 必须真的减少 token；got {} → {}",
+            report.tokens_before, report.tokens_after
+        );
+        assert_eq!(report.tokens_before, before_tokens);
+        assert_eq!(report.tokens_after, after_tokens);
+    }
+}
+
+#[cfg(test)]
+mod max_output_tokens_escalation_tests {
+    //! Single-Agent Uplift P1-3：max_output_tokens 三档恢复的 escalation cap 计算。
+    //!
+    //! 三档行为本身需要 mock provider 跑集成测试（独立 PR），这里**只**守住
+    //! `compute_escalated_cap` 的纯函数行为——主循环的状态机依赖它正确。
+    //!
+    //! 守住的不变量：
+    //!   ① 大 ctx 模型 → 升档到 ESCALATED_MAX_OUTPUT_TOKENS（64K）封顶
+    //!   ② 中 ctx 模型 → 升档到 context_window/2
+    //!   ③ 小 ctx 模型 → 升档值 ≤ 当前值 = "不该升"（caller 据此跳过升档分支）
+    //!   ④ current 已经在 ESCALATED → 永不再升
+
+    use super::*;
+
+    #[test]
+    fn large_ctx_model_escalates_to_64k() {
+        // anthropic claude-4-sonnet ctx = 200K → 200K/2 = 100K，与 64K 取 min = 64K
+        let cap = compute_escalated_cap("anthropic", "claude-4-sonnet", 16_384);
+        assert_eq!(cap, ESCALATED_MAX_OUTPUT_TOKENS);
+    }
+
+    #[test]
+    fn medium_ctx_model_escalates_to_half_window() {
+        // dashscope 未命中 qwen3 系列时走 dashscope_default → ctx=32768
+        // → upper(16384).min(64K).max(8K) = 16384
+        let cap = compute_escalated_cap("dashscope", "some-other-model", 8_192);
+        assert_eq!(cap, 16_384, "32K ctx fallback 模型升档值 = ctx/2 = 16K");
+    }
+
+    #[test]
+    fn small_ctx_model_clamps_below_current_means_no_escalation() {
+        // 32K ctx 模型，caller current 已是 32K → upper(16384).max(32K) = 32K
+        // 等于 current → caller 检查 escalated_cap > current 为 false → 跳过升档
+        let cap = compute_escalated_cap("dashscope", "some-other-model", 32_000);
+        assert_eq!(cap, 32_000,
+            "升档值不能低于当前值；upper(ctx/2)=16K < current=32K → 取 current");
+    }
+
+    #[test]
+    fn already_at_64k_stays_at_64k() {
+        // current 已是 64K：upper(100K).max(64K) = 64K，等于 current → caller 跳过升档
+        let cap = compute_escalated_cap("anthropic", "claude-4-sonnet", ESCALATED_MAX_OUTPUT_TOKENS);
+        assert_eq!(cap, ESCALATED_MAX_OUTPUT_TOKENS);
+    }
+
+    #[test]
+    fn unknown_model_uses_default_ctx() {
+        // unknown provider/model fallback 到 default ctx=32768
+        let cap = compute_escalated_cap("unknown-provider", "unknown-model", 4_096);
+        // default ctx=32768 → upper(16K).max(4K) = 16K
+        assert_eq!(cap, 16_384);
+    }
+
+    #[test]
+    fn escalated_constant_is_within_reasonable_range() {
+        // 防御：常量本身被错误调小（如 8K）会让 P1-3 整个失效
+        assert!(
+            ESCALATED_MAX_OUTPUT_TOKENS >= 32_768,
+            "ESCALATED_MAX_OUTPUT_TOKENS 太小，无法覆盖大多数撞顶场景"
+        );
+        // 上限 256K：超过此值多数生产模型不支持，clamp 也救不回来
+        assert!(
+            ESCALATED_MAX_OUTPUT_TOKENS <= 262_144,
+            "ESCALATED_MAX_OUTPUT_TOKENS 太大，可能被 provider 直接 400"
+        );
+    }
+
+    #[test]
+    fn recovery_limit_is_within_reasonable_range() {
+        // 防御：太小没意义（< 2 等于没 multi-turn），太大成本失控（> 5 累计 N×64K output）
+        assert!(MAX_OUTPUT_TOKENS_RECOVERY_LIMIT >= 2);
+        assert!(MAX_OUTPUT_TOKENS_RECOVERY_LIMIT <= 5);
     }
 }
 

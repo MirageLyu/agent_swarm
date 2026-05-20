@@ -1,7 +1,8 @@
 mod provider;
 mod anthropic;
 pub mod deepseek_adapter;
-mod openai_compat;
+pub mod error_class;
+pub(crate) mod openai_compat;
 pub mod registry;
 pub mod stream_diagnostics;
 mod stream_guard;
@@ -9,6 +10,7 @@ mod types;
 
 pub use provider::LlmProvider;
 pub use anthropic::AnthropicProvider;
+pub use error_class::{classify_llm_error, LlmErrorClass};
 pub use openai_compat::{OpenAICompatProvider, ARG_PARSE_ERROR_KEY, ARG_RAW_KEY};
 pub use stream_diagnostics::{StreamRegistry, StreamStats};
 pub use stream_guard::{
