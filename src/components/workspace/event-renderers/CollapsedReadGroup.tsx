@@ -10,7 +10,7 @@ interface CollapsedReadGroupProps {
 /**
  * Single-Agent Uplift A3 (collapseReadSearch).
  *
- * 把"连续只读探查"——read_file / search_files / glob / list_files 的
+ * 把"连续只读探查"——read_file / grep / glob / list_files 的
  * tool_use + tool_result 配对——折叠成一行，带 chevron 可展开。
  *
  * 设计动机：
@@ -77,7 +77,7 @@ function isToolUseMeta(value: unknown): value is ToolUseMetaShape {
 
 /**
  * Header 一行 summary：把所有 tool_use 的关键参数串起来。
- * 示例：`read_file src/foo.rs · search_files "needle" · glob **\/*.rs`
+ * 示例：`read_file src/foo.rs · grep "needle" · glob **\/*.rs`
  * 长度上限交给 CSS ellipsis 处理，这里只做语义压缩。
  */
 function buildSummary(events: AgentEvent[]): string {
@@ -102,7 +102,9 @@ function extractKeyArg(tool: string, input: unknown): string | null {
   const obj = input as Record<string, unknown>;
   if (typeof obj.path === "string") return obj.path;
   if (typeof obj.pattern === "string") {
-    return tool === "search_files" ? `"${obj.pattern}"` : obj.pattern;
+    // grep（主名）+ search_files（alias）走引号包裹格式；glob 直接展示 pattern。
+    const isGrep = tool === "grep" || tool === "search_files";
+    return isGrep ? `"${obj.pattern}"` : obj.pattern;
   }
   return null;
 }

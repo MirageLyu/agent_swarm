@@ -147,7 +147,9 @@ impl ToolExecutor {
             "read_file" => self.read_file(input).await,
             "write_file" => self.write_file(input).await,
             "edit_file" => self.edit_file(input).await,
-            "search_files" => self.search_files(input).await,
+            // 2026-05 重命名 `search_files` → `grep`；`search_files` 保留为 alias，
+            // 兼容旧 session replay 与历史 hook config。canonical 主路径见 `tools::registry`。
+            "grep" | "search_files" => self.grep(input).await,
             "glob" => self.glob_files(input).await,
             "shell_exec" => self.shell_exec(input, None).await,
             "list_files" => self.list_files(input).await,
@@ -194,7 +196,7 @@ impl ToolExecutor {
     ///   等价。带 offset/limit 的精确分页请求不走 stub（用户可能是为了拿不
     ///   同窗口）。
     /// - **二进制兜底**：检测到 NUL 字节时返回结构化错误，不 lossy UTF-8。
-    /// - **大文件**：超过 4MiB 的文件直接拒绝，提示用 search_files / grep。
+    /// - **大文件**：超过 4MiB 的文件直接拒绝，提示用 grep（ripgrep）。
     async fn read_file(&self, input: &serde_json::Value) -> ToolOutput {
         let rel_path = match input["path"].as_str() {
             Some(p) => p,
@@ -232,7 +234,7 @@ impl ToolExecutor {
             return ToolOutput::error(
                 "file_too_large",
                 &format!(
-                    "{rel_path} is {} bytes (>4MiB). Use search_files to grep within it, or pass \
+                    "{rel_path} is {} bytes (>4MiB). Use grep to search within it, or pass \
                      offset+limit to page through it.",
                     metadata.len()
                 ),
@@ -626,7 +628,7 @@ impl ToolExecutor {
         }
     }
 
-    /// Single-Agent Uplift Audit-Fix: search_files 升级为 GrepTool 等价。
+    /// `grep` 工具实现（历史名 `search_files`，2026-05 重命名）。底层 ripgrep。
     ///
     /// 入参（兼容旧 schema 的 `pattern` + `path`，新增以下可选字段）：
     ///   - `pattern` (str, 必填)：ripgrep 正则
@@ -648,7 +650,7 @@ impl ToolExecutor {
     ///     做总量截断（默认 200 行）。
     ///   - 旧版彻底丢弃 stderr → rg 报错时 LLM 拿到空字符串还以为"无匹配"。
     ///     新版区分 exit code：1=no match（OK 返回提示），2+=真正错误（带 stderr）。
-    async fn search_files(&self, input: &serde_json::Value) -> ToolOutput {
+    async fn grep(&self, input: &serde_json::Value) -> ToolOutput {
         let pattern = match input["pattern"].as_str() {
             Some(p) => p,
             None => return ToolOutput::error(
@@ -2084,6 +2086,81 @@ mod tests {
             .await;
         assert!(!out.is_error);
         assert!(out.content.contains("No matches"), "got: {}", out.content);
+    }
+
+    // ---- grep 主名路径（2026-05 重命名后 LLM 实际看到/调用的就是这个名字）----
+    // 上面三个 search_files_* 测试现在等同于 "alias 路径回归"——确保旧 session
+    // replay / 旧 hook config 仍走通。这里加 3 个 grep_* 测试验证主名路径。
+
+    #[tokio::test]
+    async fn grep_content_mode_returns_line_numbers() {
+        if !rg_available() {
+            eprintln!("[skip] ripgrep (`rg`) not on PATH; skipping grep tests");
+            return;
+        }
+        let (dir, exec) = setup();
+        fs::write(
+            dir.path().join("a.rs"),
+            "let x = 1;\nlet needle = 2;\nlet y = 3;\n",
+        )
+        .unwrap();
+        let out = exec
+            .execute("grep", &serde_json::json!({"pattern": "needle"}))
+            .await;
+        assert!(!out.is_error, "got: {}", out.content);
+        // content mode 默认带 --line-number：应能看到 `a.rs:2:let needle = 2;`
+        assert!(out.content.contains("a.rs"), "got:\n{}", out.content);
+        assert!(out.content.contains("2"), "should have line number 2");
+        assert!(out.content.contains("needle"));
+    }
+
+    #[tokio::test]
+    async fn grep_count_mode_aggregates_per_file() {
+        if !rg_available() {
+            return;
+        }
+        let (dir, exec) = setup();
+        fs::write(dir.path().join("a.rs"), "foo\nfoo\nbar\n").unwrap();
+        fs::write(dir.path().join("b.rs"), "foo\n").unwrap();
+        let out = exec
+            .execute(
+                "grep",
+                &serde_json::json!({"pattern": "foo", "output_mode": "count"}),
+            )
+            .await;
+        assert!(!out.is_error, "got: {}", out.content);
+        // count 模式 rg 输出形如 `a.rs:2\nb.rs:1\n`
+        assert!(
+            out.content.contains("a.rs:2"),
+            "expected a.rs count=2, got:\n{}",
+            out.content
+        );
+        assert!(out.content.contains("b.rs:1"), "got:\n{}", out.content);
+    }
+
+    /// 关键回归：通过主名 `grep` 调与通过 alias `search_files` 调，行为必须**字节相等**。
+    /// 否则 alias 兼容性是假的。
+    #[tokio::test]
+    async fn grep_and_search_files_alias_produce_identical_output() {
+        if !rg_available() {
+            return;
+        }
+        let (dir, exec) = setup();
+        fs::write(dir.path().join("file1.rs"), "hello world\n").unwrap();
+        fs::write(dir.path().join("file2.rs"), "hello again\n").unwrap();
+
+        let args = serde_json::json!({
+            "pattern": "hello",
+            "output_mode": "files_with_matches"
+        });
+        let via_grep = exec.execute("grep", &args).await;
+        let via_alias = exec.execute("search_files", &args).await;
+
+        assert_eq!(via_grep.is_error, via_alias.is_error);
+        assert_eq!(
+            via_grep.content, via_alias.content,
+            "grep main-name and search_files alias must produce identical output"
+        );
     }
 
     // ---- 行号前缀检测的退化情况：含 `|` 的 Rust 模式不应被误认为行号块 ----

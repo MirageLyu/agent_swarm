@@ -118,8 +118,11 @@ fn next_idle_retry_budget(
 }
 
 /// 只读工具集合（不会改变工作区状态）。L3 循环检测据此判断是否在原地探索。
+///
+/// 同时识别 `grep`（主名，2026-05 起）与 `search_files`（alias，旧 session replay
+/// 兼容）。如果将来加新只读工具，直接列举即可。
 fn is_read_only_tool(name: &str) -> bool {
-    matches!(name, "read_file" | "search_files" | "list_files")
+    matches!(name, "read_file" | "grep" | "search_files" | "list_files")
 }
 
 /// **DeepSeek / OpenAI tool-call 协议适配器：tool_calls 之后唯一合规的 follow-up 回合。**
@@ -2175,7 +2178,7 @@ impl AgentEngine {
             //
             // 之前所有 tool_use 严格串行 → 一个 step 跑 3 个 read_file 等于 3× IO 延迟。
             // 现在按 ToolSpec.is_concurrency_safe 分桶：
-            //   - safe  (read_file / list_files / search_files / glob): 并行跑
+            //   - safe  (read_file / list_files / grep / glob): 并行跑
             //   - unsafe(write_file / edit_file / shell_exec / publish_artifact /
             //            todo_write): 串行跑（防写盘冲突 / approval gate 顺序错乱）
             //

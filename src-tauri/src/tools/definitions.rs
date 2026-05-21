@@ -52,7 +52,7 @@ fn builtin_tools_legacy() -> Vec<ToolDefinition> {
             cache_control: None,
         },
         ToolDefinition {
-            name: "search_files".to_string(),
+            name: "grep".to_string(),
             description: "Search for a pattern in files using ripgrep".to_string(),
             input_schema: json!({
                 "type": "object",
@@ -133,7 +133,7 @@ fn builtin_tools_legacy() -> Vec<ToolDefinition> {
             }),
             cache_control: None,
         },
-        // Single-Agent Uplift Phase 1.3: 文件名通配。`search_files` 内容搜索擅长，
+        // Single-Agent Uplift Phase 1.3: 文件名通配。`grep` 内容搜索擅长，
         // 但找文件用 rg 很别扭。glob 用 globwalk 直接按 mtime 排序返回前 N 条，
         // 对应 innerCC GlobTool 的核心用例。
         ToolDefinition {
@@ -141,7 +141,7 @@ fn builtin_tools_legacy() -> Vec<ToolDefinition> {
             description: "Find files by name/path glob pattern, sorted by recency (most-recently \
                           modified first). Examples: `**/*.rs`, `src/**/test_*.ts`, \
                           `**/migrations/*.sql`. Use this when you know the filename shape; use \
-                          `search_files` (ripgrep) for content search."
+                          `grep` (ripgrep) for content search."
                 .to_string(),
             input_schema: json!({
                 "type": "object",

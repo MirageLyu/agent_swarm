@@ -51,9 +51,12 @@ pub const TOOLS: &[ToolSpec] = &[
         make_definition: defs::edit_file_def,
     },
     ToolSpec {
-        name: "search_files",
+        // 历史名 `search_files`；2026-05 重命名为 `grep` 对齐业界（Claude Code / Cursor 都叫 Grep），
+        // 让 LLM tool-routing 更准。`search_files` 作为 alias 仍被 `lookup` / `executor` 接受，
+        // 保留旧 hook config / 旧 session replay 的兼容性（详见 `canonicalize`）。
+        name: "grep",
         is_concurrency_safe: true,
-        make_definition: defs::search_files_def,
+        make_definition: defs::grep_def,
     },
     ToolSpec {
         name: "glob",
@@ -72,9 +75,42 @@ pub const TOOLS: &[ToolSpec] = &[
     },
 ];
 
+/// Tool alias 表：`(old_name, canonical_name)`。
+///
+/// 重命名工具时把旧名加进这里即可让 `lookup` / `canonicalize` / hook matcher 透明兼容。
+/// 见 `canonicalize` 文档与 `tools::executor::ToolExecutor::execute` 的 alias 路由。
+const ALIASES: &[(&str, &str)] = &[
+    // 2026-05: search_files → grep（对齐 Claude Code / Cursor 命名）
+    ("search_files", "grep"),
+];
+
+/// 把任意工具名（含 alias）规范化为 canonical 名。
+///
+/// 调用方：
+/// - `lookup`：alias 反查到 spec
+/// - `executor::execute`：alias 路由到主实现
+/// - `hooks::command::matches`：双向 canonicalize 确保旧 hook config（`matcher: "search_files"`）
+///   在新 `grep` 事件上仍能匹配，反之亦然
+///
+/// 行为：
+/// - 已是主名 → 原样返回
+/// - 是 alias → 返回主名
+/// - 未知名 → 原样返回（不做任何猜测；保持调用方现有 unknown-tool 错处理逻辑）
+pub fn canonicalize(name: &str) -> &str {
+    for (alias, canonical) in ALIASES {
+        if *alias == name {
+            return canonical;
+        }
+    }
+    name
+}
+
 /// O(N) lookup —— TOOLS 长度 ~10 内不需要 HashMap，cache friendliness 反而更好。
+///
+/// 同时识别 alias：`lookup("search_files")` 等价于 `lookup("grep")`，返回主 spec。
 pub fn lookup(name: &str) -> Option<&'static ToolSpec> {
-    TOOLS.iter().find(|t| t.name == name)
+    let canonical = canonicalize(name);
+    TOOLS.iter().find(|t| t.name == canonical)
 }
 
 /// 给 LLM 暴露的所有内置工具定义。
@@ -103,7 +139,7 @@ mod defs {
                    write, you'll get an `unchanged_since_last_read` stub instead of the full \
                    content — reuse the previous output rather than re-reading.\n\
                  - Binary files (NUL bytes) and files larger than 4 MiB are rejected; use \
-                   search_files / shell_exec for those."
+                   grep / shell_exec for those."
                     .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -213,11 +249,14 @@ mod defs {
         }
     }
 
-    pub fn search_files_def() -> ToolDefinition {
+    pub fn grep_def() -> ToolDefinition {
         ToolDefinition {
-            name: "search_files".to_string(),
+            name: "grep".to_string(),
             description:
-                "Search file contents using ripgrep. Output modes:\n\
+                "A powerful search tool built on ripgrep. Use this to search file contents \
+                 (regex over text). For finding files by name/path pattern use `glob`; for \
+                 listing a directory use `list_files`.\n\n\
+                 Output modes:\n\
                  - `content` (default): matching lines with `path:lineno:text`. Optional context \
                    via `context_before` / `context_after` / `context`.\n\
                  - `files_with_matches`: just the file paths that contain a match.\n\
@@ -285,7 +324,7 @@ mod defs {
             description: "Find files by name/path glob pattern, sorted by recency (most-recently \
                           modified first). Examples: `**/*.rs`, `src/**/test_*.ts`, \
                           `**/migrations/*.sql`. Use this when you know the filename shape; use \
-                          `search_files` (ripgrep) for content search."
+                          `grep` (ripgrep) for content search."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -345,5 +384,74 @@ mod defs {
             }),
             cache_control: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonicalize_passes_through_unknown() {
+        assert_eq!(canonicalize("read_file"), "read_file");
+        assert_eq!(canonicalize("nonexistent_tool"), "nonexistent_tool");
+        assert_eq!(canonicalize(""), "");
+    }
+
+    #[test]
+    fn canonicalize_resolves_search_files_alias() {
+        assert_eq!(canonicalize("search_files"), "grep");
+    }
+
+    #[test]
+    fn canonicalize_idempotent_on_canonical_name() {
+        // grep 是主名，canonicalize 不应再改它
+        assert_eq!(canonicalize("grep"), "grep");
+        assert_eq!(canonicalize(canonicalize("search_files")), "grep");
+    }
+
+    #[test]
+    fn lookup_finds_canonical_name() {
+        let spec = lookup("grep").expect("grep should be in TOOLS");
+        assert_eq!(spec.name, "grep");
+        assert!(spec.is_concurrency_safe);
+    }
+
+    #[test]
+    fn lookup_finds_alias_via_canonicalize() {
+        // search_files 是 alias，应能反查到 grep 的 spec
+        let spec = lookup("search_files").expect("search_files alias should resolve");
+        assert_eq!(spec.name, "grep");
+        assert!(
+            spec.is_concurrency_safe,
+            "concurrency-safe bit must survive alias lookup; otherwise old session replays \
+             would lose parallel-read capability"
+        );
+    }
+
+    #[test]
+    fn lookup_returns_none_for_unknown() {
+        assert!(lookup("totally_made_up").is_none());
+    }
+
+    #[test]
+    fn all_definitions_exposes_grep_as_primary_name() {
+        // 给 LLM 看的 tool 列表里必须是 grep，不能漏；search_files 不应作为独立条目重复出现。
+        let defs = all_definitions();
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"grep"), "grep must be exposed; got {names:?}");
+        assert!(
+            !names.contains(&"search_files"),
+            "search_files should be alias-only (hidden from LLM), got {names:?}"
+        );
+    }
+
+    #[test]
+    fn grep_definition_description_mentions_ripgrep_and_grep() {
+        // LLM 命名识别基础：description 第一段应明示 ripgrep + 区分 glob 用途。
+        let def = lookup("grep").unwrap().definition();
+        let desc = def.description.to_lowercase();
+        assert!(desc.contains("ripgrep"), "desc must mention ripgrep: {}", def.description);
+        assert!(desc.contains("glob"), "desc should hint when to use glob instead");
     }
 }

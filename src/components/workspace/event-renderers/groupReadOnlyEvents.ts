@@ -8,7 +8,7 @@ import type { AgentEvent } from "../../../stores/agent-store";
  *   - `group`：连续只读探查（≥2 个 tool_use），由 CollapsedReadGroup 折叠展示
  *
  * 折叠规则：
- *   - 只读工具：read_file / search_files / glob / list_files
+ *   - 只读工具：read_file / grep（旧名 search_files，保留 alias）/ glob / list_files
  *   - 单个 tool_use 后必须紧跟它的 tool_result（或 error），中间不能插非 readonly 的事件
  *   - 连续 ≥2 个完整的 (tool_use, tool_result) 才折叠；单一 op 不值得折叠
  *   - 任一 tool_result 是 is_error 仍可参与折叠（搜不到/找不到不算严重失败）
@@ -21,7 +21,14 @@ export type EventGroup =
   | { kind: "single"; event: AgentEvent }
   | { kind: "group"; events: AgentEvent[] };
 
-const READONLY_TOOLS = new Set(["read_file", "search_files", "glob", "list_files"]);
+// 同时识别 `grep`（主名，2026-05 起）与 `search_files`（alias，历史事件 replay 兼容）。
+const READONLY_TOOLS = new Set([
+  "read_file",
+  "grep",
+  "search_files",
+  "glob",
+  "list_files",
+]);
 
 function getToolName(event: AgentEvent): string | null {
   if (

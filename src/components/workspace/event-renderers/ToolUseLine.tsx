@@ -19,7 +19,7 @@ function isToolUseMeta(value: unknown): value is ToolUseMeta {
 /// 把工具入参压缩成 1 行可读 summary。优先展示用户最关心的字段：
 ///   - read_file / write_file / edit_file / list_files: path
 ///   - shell_exec: command 首行
-///   - search_files / glob: pattern
+///   - grep (alias: search_files) / glob: pattern
 ///   - 其它: 紧凑 JSON
 /// 故意截短到 ~80 字，超过部分点击展开按钮看完整 input。
 function summarizeInput(tool: string, input: unknown): string {
@@ -59,6 +59,7 @@ const TOOL_ICON: Record<string, string> = {
   write_file: "✏️",
   edit_file: "✏️",
   list_files: "📂",
+  grep: "🔍",
   search_files: "🔍",
   glob: "🔎",
   shell_exec: "⚡",

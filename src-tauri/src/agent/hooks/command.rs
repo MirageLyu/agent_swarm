@@ -154,9 +154,21 @@ impl AgentHook for CommandHook {
             Some(s) if !s.trim().is_empty() => s.trim(),
             _ => return true,
         };
-        // 简单子串匹配：tool 名包含 matcher，或 phase 名匹配 matcher
+        // 子串匹配：tool 名包含 matcher，或 phase 名匹配 matcher。
+        //
+        // 双向 canonicalize：用户写 `matcher: "search_files"` 时，新 grep 事件应仍触发；
+        // 反之用户写 `matcher: "grep"` 时也能命中历史 search_files 事件（如果有）。
+        // 同时保留原始字符串比对，避免宽匹配（如 `matcher: "file"`）因 canonicalize
+        // 改变行为。详见 `tools::registry::canonicalize`。
         if let Some(tool) = &ctx.last_tool_use {
-            if tool.tool_name.contains(m) {
+            let raw_name = tool.tool_name.as_str();
+            let canon_name = crate::tools::canonicalize_tool_name(raw_name);
+            let canon_m = crate::tools::canonicalize_tool_name(m);
+            if raw_name.contains(m)
+                || canon_name.contains(canon_m)
+                || raw_name.contains(canon_m)
+                || canon_name.contains(m)
+            {
                 return true;
             }
         }
@@ -417,6 +429,62 @@ mod tests {
         );
         assert!(hook.matches(&mock_ctx(HookPhase::Stop, None)));
         assert!(hook.matches(&mock_ctx(HookPhase::Stop, Some("anything"))));
+    }
+
+    /// 关键回归（2026-05 grep 重命名）：用户写过 `matcher: "search_files"` 的旧 hook config
+    /// 必须仍然在新 `grep` 事件上触发——这是改名"零行为变更"承诺的核心。
+    #[tokio::test]
+    async fn matcher_search_files_matches_new_grep_event() {
+        let hook = CommandHook::new(
+            "command:test/legacy-search-files-matcher".into(),
+            vec![HookPhase::PostToolUse],
+            "true".into(),
+            Some("search_files".into()),
+            std::env::temp_dir(),
+        );
+        // 新 LLM 发出的事件名是 grep；旧 matcher 仍要命中
+        assert!(
+            hook.matches(&mock_ctx(HookPhase::PostToolUse, Some("grep"))),
+            "legacy matcher `search_files` must match new `grep` events"
+        );
+        // 兜底：仍能匹配原 search_files alias 事件（如果有旧 replay）
+        assert!(hook.matches(&mock_ctx(HookPhase::PostToolUse, Some("search_files"))));
+    }
+
+    /// 反方向：用户用新 `matcher: "grep"` 配置 hook，遇到历史 replay 的 `search_files`
+    /// 事件也应该匹配——否则查问题时旧 timeline 上 hook 全部缺席，难调试。
+    #[tokio::test]
+    async fn matcher_grep_matches_legacy_search_files_event() {
+        let hook = CommandHook::new(
+            "command:test/new-grep-matcher".into(),
+            vec![HookPhase::PostToolUse],
+            "true".into(),
+            Some("grep".into()),
+            std::env::temp_dir(),
+        );
+        assert!(
+            hook.matches(&mock_ctx(HookPhase::PostToolUse, Some("search_files"))),
+            "new matcher `grep` should also match legacy `search_files` events"
+        );
+        assert!(hook.matches(&mock_ctx(HookPhase::PostToolUse, Some("grep"))));
+    }
+
+    /// 边界：宽匹配（如 `matcher: "file"`）不应因 canonicalize 改变语义——
+    /// `file` 不在 alias 表里，仍走原始子串匹配。
+    #[tokio::test]
+    async fn matcher_canonicalize_does_not_break_wide_substring_match() {
+        let hook = CommandHook::new(
+            "command:test/wide-file".into(),
+            vec![HookPhase::PostToolUse],
+            "true".into(),
+            Some("file".into()),
+            std::env::temp_dir(),
+        );
+        assert!(hook.matches(&mock_ctx(HookPhase::PostToolUse, Some("read_file"))));
+        assert!(hook.matches(&mock_ctx(HookPhase::PostToolUse, Some("write_file"))));
+        assert!(hook.matches(&mock_ctx(HookPhase::PostToolUse, Some("list_files"))));
+        // grep 不含 "file" 子串
+        assert!(!hook.matches(&mock_ctx(HookPhase::PostToolUse, Some("grep"))));
     }
 
     #[test]

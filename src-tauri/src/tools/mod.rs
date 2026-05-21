@@ -10,4 +10,6 @@ pub use definitions::{
     todo_write_tool_definition, ASK_USER_QUESTION_TOOL, ENTER_PLAN_MODE_TOOL,
     PROPOSE_FOLLOWUP_TOOL, TASK_COMPLETE_TOOL, TODO_WRITE_TOOL,
 };
-pub use registry::{lookup as lookup_tool_spec, ToolSpec, TOOLS};
+pub use registry::{
+    canonicalize as canonicalize_tool_name, lookup as lookup_tool_spec, ToolSpec, TOOLS,
+};

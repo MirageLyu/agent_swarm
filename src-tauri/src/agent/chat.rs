@@ -285,7 +285,7 @@ impl ChatAgent {
              ## Completed Tasks\n{tasks_md}\n\
              ## Published Artifacts\n{artifacts_md}\n\
              ## Tools\n\
-             - `read_file` / `write_file` / `search_files` / `list_files` / `shell_exec` for code edits.\n\
+             - `read_file` / `write_file` / `edit_file` / `grep` / `glob` / `list_files` / `shell_exec` for code edits.\n\
              - `propose_followup_mission` to escalate large requests.\n\
              - `task_complete` to signal you're done; the system will then commit the working \
                directory to `{main}`.\n\
