@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod benchmark;
 pub mod commands;
 pub mod db;
 pub mod error_code;
@@ -73,7 +74,10 @@ fn init_logging(data_dir: &Path) {
     };
 
     if let Err(e) = result {
-        eprintln!("[init_logging] global subscriber already set, skipping: {}", e);
+        eprintln!(
+            "[init_logging] global subscriber already set, skipping: {}",
+            e
+        );
     }
 }
 
@@ -122,13 +126,14 @@ pub fn run() {
                 loop {
                     ticker.tick().await;
                     let db = approval_app_handle.state::<Database>();
-                    let expired_ids = match db.with_conn(|conn| queries::expire_overdue_approvals(conn)) {
-                        Ok(ids) => ids,
-                        Err(e) => {
-                            tracing::warn!("[approval] expire sweep failed: {e}");
-                            continue;
-                        }
-                    };
+                    let expired_ids =
+                        match db.with_conn(|conn| queries::expire_overdue_approvals(conn)) {
+                            Ok(ids) => ids,
+                            Err(e) => {
+                                tracing::warn!("[approval] expire sweep failed: {e}");
+                                continue;
+                            }
+                        };
                     for id in expired_ids {
                         approval_coord_for_task.forget(&id).await;
                         let _ = approval_app_handle.emit(

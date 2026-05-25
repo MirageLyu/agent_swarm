@@ -63,7 +63,11 @@ pub async fn send_chat_message(
     app: tauri::AppHandle,
     request: SendChatMessageRequest,
 ) -> Result<ChatTurnSummary, String> {
-    let SendChatMessageRequest { mission_id, content, force_direct } = request;
+    let SendChatMessageRequest {
+        mission_id,
+        content,
+        force_direct,
+    } = request;
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return Err("Message content must not be empty".into());
@@ -73,11 +77,7 @@ pub async fn send_chat_message(
 
     // 获取 repo_path & main_branch
     let db = app.state::<crate::db::Database>();
-    let (repo_path_opt, main_branch_opt, status): (
-        Option<String>,
-        Option<String>,
-        String,
-    ) = db
+    let (repo_path_opt, main_branch_opt, status): (Option<String>, Option<String>, String) = db
         .with_conn(|c| {
             c.query_row(
                 "SELECT repo_path, main_branch, status FROM missions WHERE id = ?1",
@@ -102,11 +102,13 @@ pub async fn send_chat_message(
         ));
     }
 
-    let repo_path_str =
-        repo_path_opt.ok_or_else(|| "Mission has no repo_path; cannot run chat agent".to_string())?;
+    let repo_path_str = repo_path_opt
+        .ok_or_else(|| "Mission has no repo_path; cannot run chat agent".to_string())?;
     let repo_path = PathBuf::from(&repo_path_str);
     if !repo_path.is_dir() {
-        return Err(format!("Mission repo_path '{repo_path_str}' is not a directory"));
+        return Err(format!(
+            "Mission repo_path '{repo_path_str}' is not a directory"
+        ));
     }
 
     // main_branch 缺失时探测
@@ -159,10 +161,12 @@ pub fn confirm_followup_proposal(
             c.query_row(
                 "SELECT repo_path, repo_origin FROM missions WHERE id = ?1",
                 [&request.parent_mission_id],
-                |r| Ok((
-                    r.get::<_, Option<String>>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                )),
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                    ))
+                },
             )
             .map_err(anyhow::Error::from)
         })

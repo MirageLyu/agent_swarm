@@ -18,15 +18,13 @@ use git2::{Repository, Signature};
 ///
 /// **不会**对已有仓库的 HEAD / 工作区做任何修改，可安全反复调用。
 pub fn ensure_git_repo(path: &Path) -> Result<()> {
-    std::fs::create_dir_all(path)
-        .with_context(|| format!("create_dir_all {}", path.display()))?;
+    std::fs::create_dir_all(path).with_context(|| format!("create_dir_all {}", path.display()))?;
 
     if Repository::open(path).is_ok() {
         return Ok(());
     }
 
-    let repo = Repository::init(path)
-        .with_context(|| format!("git init {}", path.display()))?;
+    let repo = Repository::init(path).with_context(|| format!("git init {}", path.display()))?;
 
     let sig = repo
         .signature()

@@ -20,9 +20,7 @@ use serde_json::json;
 use tokio::sync::Mutex;
 
 use crate::agent::planner::PlannerOutput;
-use crate::agent::planner_fetch::{
-    self, FetchError, FetchPolicy,
-};
+use crate::agent::planner_fetch::{self, FetchError, FetchPolicy};
 use crate::agent::planner_state::{
     PlannerState, PlannerStateError, ProposeTaskInput, ReviseTaskInput,
 };
@@ -87,10 +85,9 @@ pub fn planner_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "read_file".into(),
-            description:
-                "Read the contents of a file inside the repository (read-only). \
+            description: "Read the contents of a file inside the repository (read-only). \
                 File must be ≤ 200KB. Use to inspect existing code / config / docs."
-                    .into(),
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -398,10 +395,9 @@ impl ReadOnlyExplorer {
             },
             ToolDefinition {
                 name: "read_file".into(),
-                description:
-                    "Read the contents of a file inside the repository (read-only). \
+                description: "Read the contents of a file inside the repository (read-only). \
                     File must be ≤ 200KB. Use to inspect existing code / config / docs."
-                        .into(),
+                    .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -747,7 +743,10 @@ impl PlannerToolExecutor {
             Some(s) => s.trim().to_string(),
             None => return PlannerToolResult::err("parameter_error", "Missing 'url'"),
         };
-        let reason = input["reason"].as_str().unwrap_or("(no reason provided)").to_string();
+        let reason = input["reason"]
+            .as_str()
+            .unwrap_or("(no reason provided)")
+            .to_string();
 
         // 1) URL parse + blocklist
         let (host, normalized_url) = match planner_fetch::parse_and_check_host(&url_raw) {
@@ -756,12 +755,15 @@ impl PlannerToolExecutor {
         };
 
         // 2) 配额：先看 session 内已经用了多少次 fetch_url
-        let used = match db.with_conn(|conn| {
-            crate::db::queries::count_planner_fetch_calls(conn, &rt.session_id)
-        }) {
+        let used = match db
+            .with_conn(|conn| crate::db::queries::count_planner_fetch_calls(conn, &rt.session_id))
+        {
             Ok(c) => c as u32,
             Err(e) => {
-                return PlannerToolResult::err("internal", &format!("count_planner_fetch_calls: {e}"))
+                return PlannerToolResult::err(
+                    "internal",
+                    &format!("count_planner_fetch_calls: {e}"),
+                )
             }
         };
         // 注意：PlannerEngine 已经把本次 tool_call 行写进 planner_steps，
@@ -857,22 +859,16 @@ impl PlannerToolExecutor {
             let cancel = tokio_util::sync::CancellationToken::new();
             let db_state = rt.app_handle.state::<Database>();
 
-            let (request_id, outcome) = match approval::submit_and_wait(
-                &coord,
-                db_state.inner(),
-                &spec,
-                &cancel,
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    return PlannerToolResult::err(
-                        "internal",
-                        &format!("submit_and_wait(fetch): {e}"),
-                    )
-                }
-            };
+            let (request_id, outcome) =
+                match approval::submit_and_wait(&coord, db_state.inner(), &spec, &cancel).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return PlannerToolResult::err(
+                            "internal",
+                            &format!("submit_and_wait(fetch): {e}"),
+                        )
+                    }
+                };
 
             // approval-requested + planner-fetch-confirmation 都补发（订阅方可能已经在 list 上看到，
             // 但事件能让旧弹窗组件继续工作）。
@@ -964,10 +960,7 @@ impl PlannerToolExecutor {
             None => return PlannerToolResult::err("parameter_error", "Missing 'mission_title'"),
         };
         if title.is_empty() {
-            return PlannerToolResult::err(
-                "parameter_error",
-                "mission_title must not be empty",
-            );
+            return PlannerToolResult::err("parameter_error", "mission_title must not be empty");
         }
         let mut state = self.state.lock().await;
         match state.finalize(title) {
@@ -982,7 +975,6 @@ impl PlannerToolExecutor {
             Err(e) => state_error(&e),
         }
     }
-
 }
 
 fn planner_fetch_error(e: &FetchError) -> PlannerToolResult {
@@ -1052,7 +1044,11 @@ fn walk_dir(
             continue;
         }
         let path = entry.path();
-        let rel = path.strip_prefix(root).unwrap_or(&path).display().to_string();
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
         let is_dir = path.is_dir();
         let suffix = if is_dir { "/" } else { "" };
         out.push(format!("{rel}{suffix}"));
@@ -1261,7 +1257,9 @@ mod tests {
             .execute("finalize_plan", &json!({ "mission_title": "Auth feature" }))
             .await;
         assert!(!r.output.is_error, "{}", r.output.content);
-        let out = r.finalized.expect("finalize_plan should yield PlannerOutput");
+        let out = r
+            .finalized
+            .expect("finalize_plan should yield PlannerOutput");
         assert_eq!(out.tasks.len(), 2);
         assert_eq!(out.mission_title, "Auth feature");
     }

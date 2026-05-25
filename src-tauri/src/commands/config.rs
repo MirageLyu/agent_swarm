@@ -205,17 +205,37 @@ pub struct ApprovalPolicy {
     pub chat_commit_soft_lines: u32,
 }
 
-fn default_planner_max_steps() -> u32 { 80 }
-fn default_planner_timeout_seconds() -> u64 { 600 }
-fn default_planner_max_fetches() -> u32 { 10 }
-fn default_max_agent_steps() -> u32 { 80 }
-fn default_agent_timeout_seconds() -> u64 { 1800 }
-fn default_agent_step_idle_seconds() -> u64 { 60 }
-fn default_agent_max_output_tokens() -> u32 { 16384 }
-fn default_stream_network_retries() -> u32 { 5 }
-fn default_stream_initial_retry_delay_ms() -> u64 { 1000 }
+fn default_planner_max_steps() -> u32 {
+    80
+}
+fn default_planner_timeout_seconds() -> u64 {
+    600
+}
+fn default_planner_max_fetches() -> u32 {
+    10
+}
+fn default_max_agent_steps() -> u32 {
+    80
+}
+fn default_agent_timeout_seconds() -> u64 {
+    1800
+}
+fn default_agent_step_idle_seconds() -> u64 {
+    60
+}
+fn default_agent_max_output_tokens() -> u32 {
+    16384
+}
+fn default_stream_network_retries() -> u32 {
+    5
+}
+fn default_stream_initial_retry_delay_ms() -> u64 {
+    1000
+}
 
-fn default_approval_timeout_seconds() -> u32 { 600 }
+fn default_approval_timeout_seconds() -> u32 {
+    600
+}
 fn default_protected_paths() -> Vec<String> {
     vec![
         "package.json".into(),
@@ -242,10 +262,16 @@ fn default_destructive_commands() -> Vec<String> {
         "cargo publish".into(),
     ]
 }
-fn default_budget_warn_ratio() -> f32 { 0.8 }
-fn default_chat_commit_soft_lines() -> u32 { 10 }
+fn default_budget_warn_ratio() -> f32 {
+    0.8
+}
+fn default_chat_commit_soft_lines() -> u32 {
+    10
+}
 
-fn default_language() -> String { "en-US".to_string() }
+fn default_language() -> String {
+    "en-US".to_string()
+}
 
 /// 默认 tool_summary 小模型：`deepseek-v4-flash`。
 ///
@@ -267,24 +293,38 @@ fn default_language() -> String { "en-US".to_string() }
 /// 用户在 settings 里可以换成任何非 reasoning 小模型；reseller 切换或
 /// 模型升级出问题时，[`crate::commands::test_tool_summarizer_connection`]
 /// 命令可以一键 dial-test 看 health_check 结果。
-fn default_tool_summary_model() -> String { "deepseek-v4-flash".to_string() }
+fn default_tool_summary_model() -> String {
+    "deepseek-v4-flash".to_string()
+}
 /// 默认 base_url 跟随主 LLM 的 reseller（默认 bitfun）。原先写死
 /// `api.deepseek.com` 配 reseller key 必然 401（生产 ****zvdf 案例）。
 /// 用户实际部署里"主模型 reseller + summary 走官方"是少数派，让默认值
 /// 跟主 base_url 一致更不易出错。
-fn default_tool_summary_base_url() -> String { "https://api.openbitfun.com/v1".to_string() }
-fn default_tool_summary_provider() -> String { "openai_compat".to_string() }
-fn default_tool_summary_threshold_chars() -> u32 { 8 * 1024 }
-fn default_evaluator_timeout_seconds() -> u64 { 600 }
+fn default_tool_summary_base_url() -> String {
+    "https://api.openbitfun.com/v1".to_string()
+}
+fn default_tool_summary_provider() -> String {
+    "openai_compat".to_string()
+}
+fn default_tool_summary_threshold_chars() -> u32 {
+    8 * 1024
+}
+fn default_evaluator_timeout_seconds() -> u64 {
+    600
+}
 
 // Single-Agent Uplift P0-2 / P1-2 默认值。
 //
 // P0-2: 0 = 关闭。我们**默认关闭**预算控制原因——max_steps 已经是兜底，
 // 且不少用户依赖"agent 跑满 80 step 才停"的行为；预算控制属于 opt-in 优化。
 // Settings UI 里会推荐"约 context window 的 30%"作为典型起点。
-fn default_agent_output_token_budget() -> u64 { 0 }
+fn default_agent_output_token_budget() -> u64 {
+    0
+}
 // P1-2: 默认 sticky=true。详见字段注释。
-fn default_agent_fallback_sticky() -> bool { true }
+fn default_agent_fallback_sticky() -> bool {
+    true
+}
 
 impl Default for ApprovalPolicy {
     fn default() -> Self {
@@ -354,6 +394,13 @@ impl ConfigManager {
         }
     }
 
+    pub fn from_config(config: AppConfig, config_path: PathBuf) -> Self {
+        Self {
+            config: Mutex::new(config),
+            config_path,
+        }
+    }
+
     pub fn get_api_key(&self, provider: &str) -> Option<String> {
         let config = self.config.lock().unwrap();
         config.api_keys.get(provider).cloned()
@@ -398,8 +445,8 @@ pub struct ConfigResponse {
 pub fn get_config(app: tauri::AppHandle) -> Result<ConfigResponse, String> {
     let mgr = app.state::<ConfigManager>();
     let config = mgr.config.lock().unwrap();
-    let has_key = config.api_keys.contains_key(&config.provider)
-        || config.api_keys.contains_key("default");
+    let has_key =
+        config.api_keys.contains_key(&config.provider) || config.api_keys.contains_key("default");
     Ok(ConfigResponse {
         default_model: config.default_model.clone(),
         base_url: config.base_url.clone(),
@@ -458,10 +505,7 @@ pub struct UpdateConfigRequest {
 }
 
 #[tauri::command]
-pub fn update_config(
-    app: tauri::AppHandle,
-    request: UpdateConfigRequest,
-) -> Result<(), String> {
+pub fn update_config(app: tauri::AppHandle, request: UpdateConfigRequest) -> Result<(), String> {
     let mgr = app.state::<ConfigManager>();
     {
         let mut config = mgr.config.lock().unwrap();
@@ -766,11 +810,11 @@ pub async fn test_tool_summarizer_connection(
         .unwrap_or_else(|| snapshot.tool_summary_provider.clone());
 
     if model.is_empty() {
-        return Err(IpcError::no_api_key(
-            serde_json::Value::String("tool_summary".to_string()),
-        )
-        .with_detail("tool_summary_model is empty — set a non-reasoning model first")
-        .to_string());
+        return Err(
+            IpcError::no_api_key(serde_json::Value::String("tool_summary".to_string()))
+                .with_detail("tool_summary_model is empty — set a non-reasoning model first")
+                .to_string(),
+        );
     }
 
     // API key fallback：保持和 agent.rs 启动 summarizer 时一致的查找链——
@@ -781,14 +825,13 @@ pub async fn test_tool_summarizer_connection(
         .or_else(|| mgr.get_api_key("default"))
         .ok_or_else(|| IpcError::no_api_key(provider_name.clone()).to_string())?;
 
-    let summarizer = crate::agent::tool_summarizer::ToolSummarizer::try_openai_compat(
-        api_key, base_url, model,
-    )
-    .ok_or_else(|| {
-        IpcError::no_api_key(serde_json::Value::String("tool_summary".to_string()))
-            .with_detail("ToolSummarizer construction failed (empty model or key)")
-            .to_string()
-    })?;
+    let summarizer =
+        crate::agent::tool_summarizer::ToolSummarizer::try_openai_compat(api_key, base_url, model)
+            .ok_or_else(|| {
+                IpcError::no_api_key(serde_json::Value::String("tool_summary".to_string()))
+                    .with_detail("ToolSummarizer construction failed (empty model or key)")
+                    .to_string()
+            })?;
 
     Ok(summarizer.health_check().await)
 }

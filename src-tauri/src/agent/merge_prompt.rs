@@ -72,8 +72,8 @@ pub fn build_merge_task_desc(
 ) -> Result<String> {
     let json = merge_parents_json
         .ok_or_else(|| anyhow!("merge task {task_id} has NULL merge_parents column"))?;
-    let parents: Vec<String> = serde_json::from_str(json)
-        .map_err(|e| anyhow!("merge_parents JSON parse failed: {e}"))?;
+    let parents: Vec<String> =
+        serde_json::from_str(json).map_err(|e| anyhow!("merge_parents JSON parse failed: {e}"))?;
     if parents.len() < 2 {
         return Err(anyhow!(
             "merge task {task_id} expects >= 2 parents, got {} (this is a planner bug)",
@@ -82,8 +82,8 @@ pub fn build_merge_task_desc(
     }
 
     let n = parents.len();
-    let per_parent_budget = (BUDGET_BASE_CHARS / n)
-        .clamp(MIN_PER_PARENT_CHARS, MAX_PER_PARENT_CHARS);
+    let per_parent_budget =
+        (BUDGET_BASE_CHARS / n).clamp(MIN_PER_PARENT_CHARS, MAX_PER_PARENT_CHARS);
 
     // 预先 lookup 全部 parent（任一失败立即 bail）
     let mut parent_infos: Vec<(String, String, String, Option<String>)> = Vec::with_capacity(n);
@@ -120,7 +120,10 @@ pub fn build_merge_task_desc(
     for (idx, (pid, title, desc, branch)) in parent_infos.iter().enumerate() {
         out.push_str(&format!("### Parent {} — `{pid}`\n", idx + 1));
         out.push_str(&format!("- **Title**: {title}\n"));
-        out.push_str(&format!("- **Goal**: {}\n", truncate(desc, per_parent_budget)));
+        out.push_str(&format!(
+            "- **Goal**: {}\n",
+            truncate(desc, per_parent_budget)
+        ));
         if let Some(branch) = branch {
             out.push_str(&format!("- **Branch**: `{branch}`\n"));
             out.push_str(&format!(
@@ -142,9 +145,7 @@ pub fn build_merge_task_desc(
         for (parent_id, files) in &conflicts_by_parent {
             out.push_str(&format!("From parent `{parent_id}`:\n"));
             for (file, resolution) in files {
-                out.push_str(&format!(
-                    "- `{file}` — auto-resolved as `{resolution}`\n"
-                ));
+                out.push_str(&format!("- `{file}` — auto-resolved as `{resolution}`\n"));
             }
             out.push('\n');
         }
@@ -239,13 +240,8 @@ mod tests {
     #[test]
     fn fewer_than_two_parents_errors() {
         let db = Database::open_in_memory().unwrap();
-        let err =
-            build_merge_task_desc("m1", "t1", Some(r#"["only-one"]"#), &db).unwrap_err();
-        assert!(
-            err.to_string().contains(">= 2 parents"),
-            "got: {}",
-            err
-        );
+        let err = build_merge_task_desc("m1", "t1", Some(r#"["only-one"]"#), &db).unwrap_err();
+        assert!(err.to_string().contains(">= 2 parents"), "got: {}", err);
     }
 
     /// 端到端：两个 parent 都存在 → 拼出完整 merge prompt。
@@ -280,13 +276,8 @@ mod tests {
         })
         .unwrap();
 
-        let out = build_merge_task_desc(
-            "m1",
-            "mg",
-            Some(r#"["p1","p2"]"#),
-            &db,
-        )
-        .expect("should build prompt");
+        let out = build_merge_task_desc("m1", "mg", Some(r#"["p1","p2"]"#), &db)
+            .expect("should build prompt");
 
         assert!(out.contains("Merge Context"));
         assert!(out.contains("**2 parallel tasks**"));
@@ -354,16 +345,14 @@ mod tests {
         })
         .unwrap();
 
-        let out = build_merge_task_desc(
-            "m1",
-            "mg",
-            Some(r#"["p1","p2","p3","p4"]"#),
-            &db,
-        )
-        .expect("should build N=4 prompt");
+        let out = build_merge_task_desc("m1", "mg", Some(r#"["p1","p2","p3","p4"]"#), &db)
+            .expect("should build N=4 prompt");
 
         // 关键：4 个 parent 段落都要渲染
-        assert!(out.contains("**4 parallel tasks**"), "header should mention N=4");
+        assert!(
+            out.contains("**4 parallel tasks**"),
+            "header should mention N=4"
+        );
         assert!(out.contains("Parent 1 — `p1`"));
         assert!(out.contains("Parent 2 — `p2`"));
         assert!(out.contains("Parent 3 — `p3`"));
@@ -389,9 +378,13 @@ mod tests {
                 "INSERT INTO missions (id, title, repo_path) VALUES ('m1', 'Mission One', '/tmp')",
                 [],
             )?;
-            let mut stmt = "INSERT INTO tasks (id, mission_id, title, description, complexity) VALUES ".to_string();
+            let mut stmt =
+                "INSERT INTO tasks (id, mission_id, title, description, complexity) VALUES "
+                    .to_string();
             let mut rows: Vec<String> = (0..8)
-                .map(|i| format!("('p{i}', 'm1', 'T{i}', 'description for parent number {i}', 'low')"))
+                .map(|i| {
+                    format!("('p{i}', 'm1', 'T{i}', 'description for parent number {i}', 'low')")
+                })
                 .collect();
             rows.push("('mg', 'm1', 'M', 'm', 'low')".to_string());
             stmt.push_str(&rows.join(","));
@@ -400,10 +393,8 @@ mod tests {
         })
         .unwrap();
 
-        let parents_json = serde_json::to_string(
-            &(0..8).map(|i| format!("p{i}")).collect::<Vec<_>>(),
-        )
-        .unwrap();
+        let parents_json =
+            serde_json::to_string(&(0..8).map(|i| format!("p{i}")).collect::<Vec<_>>()).unwrap();
 
         let out = build_merge_task_desc("m1", "mg", Some(&parents_json), &db).unwrap();
         assert!(out.contains("**8 parallel tasks**"));

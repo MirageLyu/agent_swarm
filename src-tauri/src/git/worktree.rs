@@ -1,11 +1,9 @@
 use anyhow::{Context, Result};
-use git2::{Repository, BranchType};
+use git2::{BranchType, Repository};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-use super::merge_strategy::{
-    merge_branch_ref_only, ConflictResolution, MergeLayer, MergeStrategy,
-};
+use super::merge_strategy::{merge_branch_ref_only, ConflictResolution, MergeLayer, MergeStrategy};
 
 #[derive(Debug, Serialize, Clone)]
 pub struct DiffFile {
@@ -100,8 +98,7 @@ impl WorktreeManager {
         agent_id: &str,
         base_branch: &str,
     ) -> Result<PathBuf> {
-        let repo = Repository::open(&self.repo_path)
-            .context("Failed to open repository")?;
+        let repo = Repository::open(&self.repo_path).context("Failed to open repository")?;
 
         let branch_name = format!("agent/{agent_id}");
         let worktree_path = self.repo_path.join(".worktrees").join(agent_id);
@@ -123,11 +120,13 @@ impl WorktreeManager {
         repo.worktree(
             agent_id,
             &worktree_path,
-            Some(git2::WorktreeAddOptions::new().reference(Some(
-                &repo
-                    .find_branch(&branch_name, BranchType::Local)?
-                    .into_reference(),
-            ))),
+            Some(
+                git2::WorktreeAddOptions::new().reference(Some(
+                    &repo
+                        .find_branch(&branch_name, BranchType::Local)?
+                        .into_reference(),
+                )),
+            ),
         )?;
 
         Ok(worktree_path)
@@ -186,9 +185,7 @@ impl WorktreeManager {
                 &format!("merge {source_branch} into {base_branch}"),
                 strategy,
             )
-            .with_context(|| {
-                format!("failed merging '{source_branch}' into '{base_branch}'")
-            })?;
+            .with_context(|| format!("failed merging '{source_branch}' into '{base_branch}'"))?;
 
             for conflict in outcome.conflicts.iter() {
                 all_conflicts.push(TaskBaseConflict {
@@ -246,8 +243,8 @@ impl WorktreeManager {
     /// Returns the commit hash, or None if there was nothing to commit.
     pub fn commit_worktree(&self, agent_id: &str, message: &str) -> Result<Option<String>> {
         let worktree_path = self.worktree_path(agent_id);
-        let repo = Repository::open(&worktree_path)
-            .context("Failed to open worktree repository")?;
+        let repo =
+            Repository::open(&worktree_path).context("Failed to open worktree repository")?;
 
         let mut index = repo.index()?;
         index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
@@ -266,14 +263,7 @@ impl WorktreeManager {
             .or_else(|_| git2::Signature::now("Miragenty Agent", "agent@miragenty.local"))
             .context("Failed to create signature")?;
 
-        let oid = repo.commit(
-            Some("HEAD"),
-            &sig,
-            &sig,
-            message,
-            &tree,
-            &[&head_commit],
-        )?;
+        let oid = repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&head_commit])?;
 
         Ok(Some(oid.to_string()))
     }
@@ -284,17 +274,17 @@ impl WorktreeManager {
     /// - `git add -A`（含未跟踪文件）
     /// - 计算改动行数并返回，便于上层做 30 行硬阈值校验
     /// - 仅在有 staged 变化时才创建 commit；否则返回 `Ok(None)`
-    pub fn commit_main_workdir(
-        &self,
-        commit_message: &str,
-    ) -> Result<Option<MainCommitOutcome>> {
-        let repo = Repository::open(&self.repo_path)
-            .context("Failed to open repository")?;
+    pub fn commit_main_workdir(&self, commit_message: &str) -> Result<Option<MainCommitOutcome>> {
+        let repo = Repository::open(&self.repo_path).context("Failed to open repository")?;
         let main_branch = self.resolve_main_branch()?;
         let main_ref = format!("refs/heads/{main_branch}");
 
         // 确保 HEAD 在主分支
-        let need_checkout = match repo.head().ok().and_then(|h| h.shorthand().map(String::from)) {
+        let need_checkout = match repo
+            .head()
+            .ok()
+            .and_then(|h| h.shorthand().map(String::from))
+        {
             Some(name) if name == main_branch => false,
             _ => true,
         };
@@ -387,8 +377,7 @@ impl WorktreeManager {
             anyhow::bail!("apply_llm_resolutions called with empty files map");
         }
 
-        let repo = Repository::open(&self.repo_path)
-            .context("Failed to open repository")?;
+        let repo = Repository::open(&self.repo_path).context("Failed to open repository")?;
         let main_branch = self.resolve_main_branch()?;
         let main_ref = format!("refs/heads/{main_branch}");
 
@@ -398,7 +387,10 @@ impl WorktreeManager {
         repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
             .with_context(|| format!("Failed to checkout '{main_branch}'"))?;
 
-        let workdir = repo.workdir().context("Repository has no worktree")?.to_path_buf();
+        let workdir = repo
+            .workdir()
+            .context("Repository has no worktree")?
+            .to_path_buf();
         let mut index = repo.index().context("Failed to load index")?;
 
         for (rel_path, content) in files {
@@ -407,8 +399,7 @@ impl WorktreeManager {
                 fs::create_dir_all(parent)
                     .with_context(|| format!("Failed to create dir for '{rel_path}'"))?;
             }
-            fs::write(&abs, content)
-                .with_context(|| format!("Failed to write '{rel_path}'"))?;
+            fs::write(&abs, content).with_context(|| format!("Failed to write '{rel_path}'"))?;
             index
                 .add_path(Path::new(rel_path))
                 .with_context(|| format!("Failed to git-add '{rel_path}'"))?;
@@ -425,7 +416,14 @@ impl WorktreeManager {
             .context("Failed to create signature")?;
 
         let oid = repo
-            .commit(Some(&main_ref), &sig, &sig, commit_message, &tree, &[&parent])
+            .commit(
+                Some(&main_ref),
+                &sig,
+                &sig,
+                commit_message,
+                &tree,
+                &[&parent],
+            )
             .context("Failed to create LLM-resolution commit")?;
 
         // 让工作区跟上新 commit
@@ -446,8 +444,7 @@ impl WorktreeManager {
         agent_id: &str,
         strategy: MergeStrategy,
     ) -> Result<crate::git::LayeredMergeOutcome> {
-        let repo = Repository::open(&self.repo_path)
-            .context("Failed to open repository")?;
+        let repo = Repository::open(&self.repo_path).context("Failed to open repository")?;
 
         let main_branch = self.resolve_main_branch()?;
         let source_branch = format!("agent/{agent_id}");
@@ -478,8 +475,7 @@ impl WorktreeManager {
     /// FM-15 Phase 2 (FR-12): 不再硬编码 `main`；目标分支按 manager 持有的 `main_branch` 或
     /// 运行时探测得到。
     pub fn merge_agent_branch(&self, agent_id: &str) -> Result<MergeOutcome> {
-        let repo = Repository::open(&self.repo_path)
-            .context("Failed to open main repository")?;
+        let repo = Repository::open(&self.repo_path).context("Failed to open main repository")?;
 
         let main_branch = self.resolve_main_branch()?;
         let main_ref = format!("refs/heads/{main_branch}");
@@ -494,14 +490,18 @@ impl WorktreeManager {
         }
 
         let branch_name = format!("agent/{agent_id}");
-        let branch = repo.find_branch(&branch_name, BranchType::Local)
+        let branch = repo
+            .find_branch(&branch_name, BranchType::Local)
             .context(format!("Branch {branch_name} not found"))?;
-        let their_commit = branch.get().peel_to_commit()
+        let their_commit = branch
+            .get()
+            .peel_to_commit()
             .context("Failed to resolve branch to commit")?;
 
         let head = repo.head()?.peel_to_commit()?;
 
-        let merge_base = repo.merge_base(head.id(), their_commit.id())
+        let merge_base = repo
+            .merge_base(head.id(), their_commit.id())
             .context("No merge base found")?;
 
         // Fast-forward: main hasn't diverged since this agent branched
@@ -532,7 +532,9 @@ impl WorktreeManager {
                 index.conflicts()?.filter_map(|c| c.ok()).collect();
 
             for conflict in conflicts {
-                let path = conflict.their.as_ref()
+                let path = conflict
+                    .their
+                    .as_ref()
                     .or(conflict.our.as_ref())
                     .and_then(|entry| std::str::from_utf8(&entry.path).ok())
                     .unwrap_or("<unknown>")
@@ -565,7 +567,10 @@ impl WorktreeManager {
         let resolved_note = if auto_resolved.is_empty() {
             String::new()
         } else {
-            format!("\n\nAuto-resolved conflicts (accepted theirs): {}", auto_resolved.join(", "))
+            format!(
+                "\n\nAuto-resolved conflicts (accepted theirs): {}",
+                auto_resolved.join(", ")
+            )
         };
         let msg = format!("Merge branch '{branch_name}' into {main_branch}{resolved_note}");
 
@@ -607,14 +612,17 @@ impl WorktreeManager {
     /// Return structured per-file diff between the merge-base and the agent branch HEAD.
     /// Requires the agent branch to still exist.
     pub fn get_structured_diff(&self, agent_id: &str) -> Result<Vec<DiffFile>> {
-        let repo = Repository::open(&self.repo_path)
-            .context("Failed to open main repository")?;
+        let repo = Repository::open(&self.repo_path).context("Failed to open main repository")?;
 
         let branch_name = format!("agent/{agent_id}");
         let agent_branch = repo
             .find_branch(&branch_name, BranchType::Local)
-            .context(format!("Agent branch '{branch_name}' not found — worktree may have been removed"))?;
-        let agent_commit = agent_branch.get().peel_to_commit()
+            .context(format!(
+                "Agent branch '{branch_name}' not found — worktree may have been removed"
+            ))?;
+        let agent_commit = agent_branch
+            .get()
+            .peel_to_commit()
             .context("Failed to resolve agent branch to commit")?;
 
         let main_head = repo.head()?.peel_to_commit()?;
@@ -635,18 +643,19 @@ impl WorktreeManager {
         base_hash: &str,
         head_hash: &str,
     ) -> Result<Vec<DiffFile>> {
-        let repo = Repository::open(&self.repo_path)
-            .context("Failed to open main repository")?;
+        let repo = Repository::open(&self.repo_path).context("Failed to open main repository")?;
 
-        let base_oid = git2::Oid::from_str(base_hash)
-            .context("Invalid base commit hash")?;
-        let head_oid = git2::Oid::from_str(head_hash)
-            .context("Invalid head commit hash")?;
+        let base_oid = git2::Oid::from_str(base_hash).context("Invalid base commit hash")?;
+        let head_oid = git2::Oid::from_str(head_hash).context("Invalid head commit hash")?;
 
-        let base_tree = repo.find_commit(base_oid)
-            .context("Base commit not found in repository")?.tree()?;
-        let head_tree = repo.find_commit(head_oid)
-            .context("Head commit not found in repository")?.tree()?;
+        let base_tree = repo
+            .find_commit(base_oid)
+            .context("Base commit not found in repository")?
+            .tree()?;
+        let head_tree = repo
+            .find_commit(head_oid)
+            .context("Head commit not found in repository")?
+            .tree()?;
 
         Self::diff_trees(&repo, &base_tree, &head_tree)
     }
@@ -809,7 +818,13 @@ mod tests {
             .expect("checkout head");
     }
 
-    fn commit_file_in_repo(repo: &Repository, dir: &Path, filename: &str, content: &str, message: &str) {
+    fn commit_file_in_repo(
+        repo: &Repository,
+        dir: &Path,
+        filename: &str,
+        content: &str,
+        message: &str,
+    ) {
         let file_path = dir.join(filename);
         fs::write(&file_path, content).expect("write file");
         let mut index = repo.index().expect("index");
@@ -833,17 +848,24 @@ mod tests {
         let wt_path = wt.create_worktree("agent-ff").expect("create worktree");
 
         fs::write(wt_path.join("new_file.txt"), "agent output").expect("write in worktree");
-        wt.commit_worktree("agent-ff", "agent work").expect("commit worktree");
+        wt.commit_worktree("agent-ff", "agent work")
+            .expect("commit worktree");
 
         let outcome = wt.merge_agent_branch("agent-ff").expect("merge");
         match outcome {
             MergeOutcome::Merged { auto_resolved, .. } => {
-                assert!(auto_resolved.is_empty(), "ff merge should have no auto-resolved files");
+                assert!(
+                    auto_resolved.is_empty(),
+                    "ff merge should have no auto-resolved files"
+                );
             }
         }
 
         let merged_file = repo_path.join("new_file.txt");
-        assert!(merged_file.exists(), "new_file.txt should exist after ff merge");
+        assert!(
+            merged_file.exists(),
+            "new_file.txt should exist after ff merge"
+        );
         assert_eq!(fs::read_to_string(&merged_file).unwrap(), "agent output");
     }
 
@@ -858,21 +880,37 @@ mod tests {
         let wt_path = wt.create_worktree("agent-nc").expect("create worktree");
 
         // Diverge main: add a different file
-        commit_file_in_repo(&repo, &repo_path, "main_file.txt", "from main", "main commit");
+        commit_file_in_repo(
+            &repo,
+            &repo_path,
+            "main_file.txt",
+            "from main",
+            "main commit",
+        );
 
         // Agent adds yet another file (no overlap)
         fs::write(wt_path.join("agent_file.txt"), "from agent").expect("write in worktree");
-        wt.commit_worktree("agent-nc", "agent work").expect("commit worktree");
+        wt.commit_worktree("agent-nc", "agent work")
+            .expect("commit worktree");
 
         let outcome = wt.merge_agent_branch("agent-nc").expect("merge");
         match outcome {
             MergeOutcome::Merged { auto_resolved, .. } => {
-                assert!(auto_resolved.is_empty(), "non-conflicting merge should have no auto-resolved");
+                assert!(
+                    auto_resolved.is_empty(),
+                    "non-conflicting merge should have no auto-resolved"
+                );
             }
         }
 
-        assert_eq!(fs::read_to_string(repo_path.join("main_file.txt")).unwrap(), "from main");
-        assert_eq!(fs::read_to_string(repo_path.join("agent_file.txt")).unwrap(), "from agent");
+        assert_eq!(
+            fs::read_to_string(repo_path.join("main_file.txt")).unwrap(),
+            "from main"
+        );
+        assert_eq!(
+            fs::read_to_string(repo_path.join("agent_file.txt")).unwrap(),
+            "from agent"
+        );
     }
 
     #[test]
@@ -886,24 +924,47 @@ mod tests {
         let wt_path = wt.create_worktree("agent-cr").expect("create worktree");
 
         // Diverge main: modify the same file differently
-        commit_file_in_repo(&repo, &repo_path, "shared.txt", "main's version", "main edit");
+        commit_file_in_repo(
+            &repo,
+            &repo_path,
+            "shared.txt",
+            "main's version",
+            "main edit",
+        );
 
         // Agent modifies the same file
         fs::write(wt_path.join("shared.txt"), "agent's version").expect("write in worktree");
-        wt.commit_worktree("agent-cr", "agent edit").expect("commit worktree");
+        wt.commit_worktree("agent-cr", "agent edit")
+            .expect("commit worktree");
 
         let outcome = wt.merge_agent_branch("agent-cr").expect("merge");
         match outcome {
             MergeOutcome::Merged { auto_resolved, .. } => {
-                assert_eq!(auto_resolved, vec!["shared.txt"], "shared.txt should be auto-resolved");
+                assert_eq!(
+                    auto_resolved,
+                    vec!["shared.txt"],
+                    "shared.txt should be auto-resolved"
+                );
             }
         }
 
         let content = fs::read_to_string(repo_path.join("shared.txt")).unwrap();
-        assert_eq!(content, "agent's version", "conflict should be resolved to agent's version");
-        assert!(!content.contains("<<<<"), "must not contain conflict markers");
-        assert!(!content.contains(">>>>"), "must not contain conflict markers");
-        assert!(!content.contains("======="), "must not contain conflict markers");
+        assert_eq!(
+            content, "agent's version",
+            "conflict should be resolved to agent's version"
+        );
+        assert!(
+            !content.contains("<<<<"),
+            "must not contain conflict markers"
+        );
+        assert!(
+            !content.contains(">>>>"),
+            "must not contain conflict markers"
+        );
+        assert!(
+            !content.contains("======="),
+            "must not contain conflict markers"
+        );
     }
 
     #[test]
@@ -927,7 +988,8 @@ mod tests {
         // Agent edits both files differently
         fs::write(wt_path.join("file_a.txt"), "a-agent").expect("write");
         fs::write(wt_path.join("file_b.txt"), "b-agent").expect("write");
-        wt.commit_worktree("agent-mf", "agent edits").expect("commit");
+        wt.commit_worktree("agent-mf", "agent edits")
+            .expect("commit");
 
         let outcome = wt.merge_agent_branch("agent-mf").expect("merge");
         match outcome {
@@ -957,7 +1019,9 @@ mod tests {
         let wt = WorktreeManager::new(repo_path.clone());
         wt.create_worktree("agent-noop").expect("create worktree");
 
-        let result = wt.commit_worktree("agent-noop", "empty commit").expect("commit");
+        let result = wt
+            .commit_worktree("agent-noop", "empty commit")
+            .expect("commit");
         assert!(result.is_none(), "should return None when no changes");
     }
 
@@ -973,9 +1037,12 @@ mod tests {
         let wt_path = wt.create_worktree("agent-sd1").expect("create worktree");
 
         fs::write(wt_path.join("hello.txt"), "modified content").expect("write");
-        wt.commit_worktree("agent-sd1", "modify file").expect("commit");
+        wt.commit_worktree("agent-sd1", "modify file")
+            .expect("commit");
 
-        let files = wt.get_structured_diff("agent-sd1").expect("structured diff");
+        let files = wt
+            .get_structured_diff("agent-sd1")
+            .expect("structured diff");
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "hello.txt");
         assert_eq!(files[0].status, "modified");
@@ -994,9 +1061,12 @@ mod tests {
 
         fs::write(wt_path.join("a.txt"), "aaa-modified").expect("write");
         fs::write(wt_path.join("b.txt"), "new file b").expect("write");
-        wt.commit_worktree("agent-sd2", "multi-file changes").expect("commit");
+        wt.commit_worktree("agent-sd2", "multi-file changes")
+            .expect("commit");
 
-        let files = wt.get_structured_diff("agent-sd2").expect("structured diff");
+        let files = wt
+            .get_structured_diff("agent-sd2")
+            .expect("structured diff");
         assert_eq!(files.len(), 2, "should have 2 changed files");
 
         let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
@@ -1018,7 +1088,9 @@ mod tests {
         let wt = WorktreeManager::new(repo_path.clone());
         wt.create_worktree("agent-sd3").expect("create worktree");
 
-        let files = wt.get_structured_diff("agent-sd3").expect("structured diff");
+        let files = wt
+            .get_structured_diff("agent-sd3")
+            .expect("structured diff");
         assert!(files.is_empty(), "should return empty list when no changes");
     }
 
@@ -1029,14 +1101,23 @@ mod tests {
         init_repo_with_file(&repo_path, "hello.txt", "original");
 
         let repo = Repository::open(&repo_path).unwrap();
-        let base_hash = repo.head().unwrap().peel_to_commit().unwrap().id().to_string();
+        let base_hash = repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id()
+            .to_string();
         drop(repo);
 
         let wt = WorktreeManager::new(repo_path.clone());
         let wt_path = wt.create_worktree("agent-hash").expect("create worktree");
 
         fs::write(wt_path.join("hello.txt"), "changed").expect("write");
-        let head_hash = wt.commit_worktree("agent-hash", "edit").expect("commit").unwrap();
+        let head_hash = wt
+            .commit_worktree("agent-hash", "edit")
+            .expect("commit")
+            .unwrap();
 
         // Merge and delete the branch (simulating post-mission cleanup)
         wt.merge_agent_branch("agent-hash").expect("merge");
@@ -1046,7 +1127,8 @@ mod tests {
         assert!(wt.get_structured_diff("agent-hash").is_err());
 
         // Hash-based diff should still work
-        let files = wt.get_structured_diff_by_hashes(&base_hash, &head_hash)
+        let files = wt
+            .get_structured_diff_by_hashes(&base_hash, &head_hash)
             .expect("hash-based diff should work after branch deletion");
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "hello.txt");
@@ -1134,7 +1216,8 @@ mod tests {
             let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
             repo.branch("master", &head_commit, false).unwrap();
             repo.set_head("refs/heads/master").unwrap();
-            repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).unwrap();
+            repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+                .unwrap();
             drop(head_commit);
             let mut main_branch = repo.find_branch("main", BranchType::Local).unwrap();
             main_branch.delete().unwrap();
@@ -1143,20 +1226,32 @@ mod tests {
         let wt = WorktreeManager::with_main_branch(repo_path.clone(), "master");
         let wt_path = wt.create_worktree("agent-master").expect("create worktree");
         fs::write(wt_path.join("note.txt"), "agent output").expect("write");
-        wt.commit_worktree("agent-master", "agent work").expect("commit");
+        wt.commit_worktree("agent-master", "agent work")
+            .expect("commit");
 
         let outcome = wt.merge_agent_branch("agent-master").expect("merge");
         match outcome {
             MergeOutcome::Merged { auto_resolved, .. } => {
-                assert!(auto_resolved.is_empty(), "ff merge should have no auto-resolved");
+                assert!(
+                    auto_resolved.is_empty(),
+                    "ff merge should have no auto-resolved"
+                );
             }
         }
 
         // master HEAD 现在应指向 agent 分支的 commit
         let repo = Repository::open(&repo_path).unwrap();
-        let master_branch = repo.find_branch("master", BranchType::Local).expect("master exists");
-        assert!(master_branch.get().peel_to_commit().is_ok(), "master should have a commit");
-        assert!(repo_path.join("note.txt").exists(), "merged file should be present in worktree");
+        let master_branch = repo
+            .find_branch("master", BranchType::Local)
+            .expect("master exists");
+        assert!(
+            master_branch.get().peel_to_commit().is_ok(),
+            "master should have a commit"
+        );
+        assert!(
+            repo_path.join("note.txt").exists(),
+            "merged file should be present in worktree"
+        );
     }
 
     // ---- FM-15 Phase 2 (FR-07.1): prepare_task_base 菱形 DAG ----
@@ -1173,20 +1268,26 @@ mod tests {
         let wt = WorktreeManager::with_main_branch(repo_path.clone(), "main");
 
         // ---- 模拟 agent A 完成（在 main 上加 a.txt 并合并）----
-        let wt_a = wt.create_worktree_from_branch("agent-A", "main").expect("wt A");
+        let wt_a = wt
+            .create_worktree_from_branch("agent-A", "main")
+            .expect("wt A");
         fs::write(wt_a.join("a.txt"), "from A").expect("write a");
         wt.commit_worktree("agent-A", "A: add a").expect("commit A");
         // 立即把 agent/A 合回 main，让 B/C 都能从 main 派生（即都包含 A 的产物）
         wt.merge_agent_branch("agent-A").expect("merge A");
 
         // ---- agent B 在 main（已含 A）上加 b.txt ----
-        let wt_b = wt.create_worktree_from_branch("agent-B", "main").expect("wt B");
+        let wt_b = wt
+            .create_worktree_from_branch("agent-B", "main")
+            .expect("wt B");
         fs::write(wt_b.join("b.txt"), "from B").expect("write b");
         wt.commit_worktree("agent-B", "B: add b").expect("commit B");
         // B 不立即合回 main——仍保留在 agent/B 分支上
 
         // ---- agent C 在 main（已含 A）上加 c.txt ----
-        let wt_c = wt.create_worktree_from_branch("agent-C", "main").expect("wt C");
+        let wt_c = wt
+            .create_worktree_from_branch("agent-C", "main")
+            .expect("wt C");
         fs::write(wt_c.join("c.txt"), "from C").expect("write c");
         wt.commit_worktree("agent-C", "C: add c").expect("commit C");
 
@@ -1214,9 +1315,18 @@ mod tests {
             .unwrap()
             .tree()
             .unwrap();
-        assert!(tree.get_path(Path::new("a.txt")).is_ok(), "a.txt must be in task-base");
-        assert!(tree.get_path(Path::new("b.txt")).is_ok(), "b.txt must be in task-base");
-        assert!(tree.get_path(Path::new("c.txt")).is_ok(), "c.txt must be in task-base");
+        assert!(
+            tree.get_path(Path::new("a.txt")).is_ok(),
+            "a.txt must be in task-base"
+        );
+        assert!(
+            tree.get_path(Path::new("b.txt")).is_ok(),
+            "b.txt must be in task-base"
+        );
+        assert!(
+            tree.get_path(Path::new("c.txt")).is_ok(),
+            "c.txt must be in task-base"
+        );
 
         // 主仓库 HEAD 仍在 main——不应被 ref-only 操作触动
         assert_eq!(repo.head().unwrap().shorthand().unwrap(), "main");
@@ -1237,7 +1347,9 @@ mod tests {
 
         // ---- Task A (root) ----
         // dispatch: 没有父 → 直接从 main 派生
-        let wt_a = wt.create_worktree_from_branch("ag-A", "main").expect("wt A");
+        let wt_a = wt
+            .create_worktree_from_branch("ag-A", "main")
+            .expect("wt A");
         fs::write(wt_a.join("a.txt"), "from A").expect("write a");
         wt.commit_worktree("ag-A", "A: add a").expect("commit A");
 
@@ -1278,10 +1390,7 @@ mod tests {
         let base_d = wt
             .prepare_task_base(
                 "T-D",
-                &[
-                    ("T-B".into(), "ag-B".into()),
-                    ("T-C".into(), "ag-C".into()),
-                ],
+                &[("T-B".into(), "ag-B".into()), ("T-C".into(), "ag-C".into())],
                 MergeStrategy::LlmResolve,
             )
             .expect("prepare base D");
@@ -1325,14 +1434,22 @@ mod tests {
         // 准备一个简单的 task-base 分支（直接基于 main，再加一个文件）
         {
             let repo = Repository::open(&repo_path).unwrap();
-            let main_tip = repo.find_branch("main", BranchType::Local).unwrap().get().peel_to_commit().unwrap();
+            let main_tip = repo
+                .find_branch("main", BranchType::Local)
+                .unwrap()
+                .get()
+                .peel_to_commit()
+                .unwrap();
             repo.branch("task-base/T1", &main_tip, false).unwrap();
         }
 
         // 在 task-base/T1 临时 worktree 上加文件，模拟 prepare_task_base 后状态
-        let stage = wt.create_worktree_from_branch("stage-prep", "task-base/T1").expect("stage wt");
+        let stage = wt
+            .create_worktree_from_branch("stage-prep", "task-base/T1")
+            .expect("stage wt");
         fs::write(stage.join("preamble.txt"), "from base").expect("write preamble");
-        wt.commit_worktree("stage-prep", "base prep").expect("commit prep");
+        wt.commit_worktree("stage-prep", "base prep")
+            .expect("commit prep");
         // 把这次 commit 推回 task-base/T1（merge_agent_branch 默认合到 main，不合适；这里手工 ref 操作）
         {
             let repo = Repository::open(&repo_path).unwrap();
@@ -1342,7 +1459,8 @@ mod tests {
                 .get()
                 .peel_to_commit()
                 .unwrap();
-            repo.reference("refs/heads/task-base/T1", stage_tip.id(), true, "stage").unwrap();
+            repo.reference("refs/heads/task-base/T1", stage_tip.id(), true, "stage")
+                .unwrap();
         }
 
         // 真正模拟 dispatch：从 task-base/T1 派生 agent worktree

@@ -166,7 +166,11 @@ fn build_merge_title(parent_titles: &[String], downstream_title: &str) -> String
 }
 
 /// 构造 merge node description：列出所有上游 task id（不截断；上游通常 ≤8 个）。
-fn build_merge_description(parents: &[String], downstream_id: &str, downstream_title: &str) -> String {
+fn build_merge_description(
+    parents: &[String],
+    downstream_id: &str,
+    downstream_title: &str,
+) -> String {
     let parents_list = parents
         .iter()
         .map(|p| format!("`{p}`"))
@@ -232,7 +236,10 @@ mod tests {
         assert_eq!(merge_id, "merge-X");
         assert_eq!(tasks[3].kind, NodeKind::Merge);
         assert_eq!(tasks[3].depends_on, vec!["A".to_string(), "B".to_string()]);
-        assert_eq!(tasks[3].merge_parents, vec!["A".to_string(), "B".to_string()]);
+        assert_eq!(
+            tasks[3].merge_parents,
+            vec!["A".to_string(), "B".to_string()]
+        );
         assert_eq!(tasks[2].depends_on, vec![merge_id.clone()]);
     }
 
@@ -266,8 +273,7 @@ mod tests {
         let parent_ids: Vec<String> = (0..8).map(|i| format!("P{i}")).collect();
         let parent_refs: Vec<&str> = parent_ids.iter().map(|s| s.as_str()).collect();
 
-        let mut tasks: Vec<PlannerTask> =
-            parent_ids.iter().map(|p| work(p, &[])).collect();
+        let mut tasks: Vec<PlannerTask> = parent_ids.iter().map(|p| work(p, &[])).collect();
         tasks.push(work("X", &parent_refs));
 
         let added = inject_merge_nodes(&mut tasks, InjectOptions { enabled: true });
@@ -299,7 +305,13 @@ mod tests {
         let merge = tasks.iter().find(|t| t.id == "merge-X").unwrap();
         assert_eq!(
             merge.depends_on,
-            vec!["A".to_string(), "B".to_string(), "C".to_string(), "D".to_string(), "E".to_string()]
+            vec![
+                "A".to_string(),
+                "B".to_string(),
+                "C".to_string(),
+                "D".to_string(),
+                "E".to_string()
+            ]
         );
     }
 
@@ -365,7 +377,11 @@ mod tests {
 
         inject_merge_nodes(&mut tasks, InjectOptions { enabled: true });
         let merge = tasks.iter().find(|t| t.kind == NodeKind::Merge).unwrap();
-        assert!(merge.title.contains("(6 parents)"), "got title: {}", merge.title);
+        assert!(
+            merge.title.contains("(6 parents)"),
+            "got title: {}",
+            merge.title
+        );
         assert!(merge.title.contains("Task P0"));
         assert!(merge.title.contains("Task P5"));
     }

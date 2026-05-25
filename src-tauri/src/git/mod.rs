@@ -5,8 +5,8 @@ mod worktree;
 
 pub use init::ensure_git_repo;
 pub use llm_merge::{
-    apply_resolved_merge, collect_conflict_blobs, merge_with_llm, ConflictBlob, LlmConflictResolver,
-    LlmMergeOutcome,
+    apply_resolved_merge, collect_conflict_blobs, merge_with_llm, ConflictBlob,
+    LlmConflictResolver, LlmMergeOutcome,
 };
 pub use merge_strategy::{
     merge_branch_ref_only, ConflictResolution, LayeredMergeOutcome, MergeLayer, MergeStrategy,

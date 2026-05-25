@@ -352,9 +352,9 @@ impl PlannerEngine {
             }
             Ok(Err(e)) => {
                 let msg = e.to_string();
-                if let Err(db_err) = db.with_conn(|conn| {
-                    queries::fail_planner_session(conn, &session_id, 0, 0, &msg)
-                }) {
+                if let Err(db_err) = db
+                    .with_conn(|conn| queries::fail_planner_session(conn, &session_id, 0, 0, &msg))
+                {
                     tracing::warn!("fail_planner_session failed: {db_err}");
                 }
                 self.emit_step(&PlannerStepEvent {
@@ -373,9 +373,9 @@ impl PlannerEngine {
             Err(_) => {
                 let secs = wall_timeout.as_secs();
                 let msg = format!("Planner exceeded wall-clock cap of {secs}s");
-                if let Err(db_err) = db.with_conn(|conn| {
-                    queries::fail_planner_session(conn, &session_id, 0, 0, &msg)
-                }) {
+                if let Err(db_err) = db
+                    .with_conn(|conn| queries::fail_planner_session(conn, &session_id, 0, 0, &msg))
+                {
                     tracing::warn!("fail_planner_session failed: {db_err}");
                 }
                 self.emit_status(&session_id, "failed");
@@ -410,9 +410,7 @@ impl PlannerEngine {
                 policy,
             });
         } else {
-            tracing::warn!(
-                "[planner_engine] fetch_url disabled: ConfigManager not registered"
-            );
+            tracing::warn!("[planner_engine] fetch_url disabled: ConfigManager not registered");
         }
 
         let tools = planner_tool_definitions();
@@ -614,8 +612,8 @@ impl PlannerEngine {
                 let serialized = serde_json::to_string(&out).map_err(|e| {
                     PlannerEngineError::Llm(format!("Cannot serialize finalized plan: {e}"))
                 })?;
-                let revalidated = parse_and_validate(&serialized)
-                    .map_err(PlannerEngineError::GuardrailFailed)?;
+                let revalidated =
+                    parse_and_validate(&serialized).map_err(PlannerEngineError::GuardrailFailed)?;
                 return Ok(PlannerLoopOutcome {
                     session_id: session_id.to_string(),
                     output: revalidated,
@@ -747,7 +745,10 @@ fn load_contract_payload(
         Ok(rs) => rs,
         Err(e) => {
             tracing::warn!("load_contract_payload failed: {e}");
-            return ("(contract not available)".into(), ContractGuardrail::default());
+            return (
+                "(contract not available)".into(),
+                ContractGuardrail::default(),
+            );
         }
     };
     if items.is_empty() {

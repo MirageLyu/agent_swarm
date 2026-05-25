@@ -100,9 +100,7 @@ pub struct ToolExecutor {
 
 impl ToolExecutor {
     pub fn new(workspace_root: PathBuf) -> Self {
-        let workspace_root = workspace_root
-            .canonicalize()
-            .unwrap_or(workspace_root);
+        let workspace_root = workspace_root.canonicalize().unwrap_or(workspace_root);
         Self {
             workspace_root,
             read_paths: Arc::new(Mutex::new(HashMap::new())),
@@ -112,10 +110,7 @@ impl ToolExecutor {
 
     /// Builder：注入 cancel_token，让 shell_exec 等长跑工具能响应用户取消。
     /// AgentEngine 在创建 ToolExecutor 后立刻调一次。
-    pub fn with_cancel_token(
-        mut self,
-        token: tokio_util::sync::CancellationToken,
-    ) -> Self {
+    pub fn with_cancel_token(mut self, token: tokio_util::sync::CancellationToken) -> Self {
         self.cancel_token = Some(token);
         self
     }
@@ -168,10 +163,13 @@ impl ToolExecutor {
         agent_id: &str,
     ) -> ToolOutput {
         if tool_name == "shell_exec" {
-            self.shell_exec(input, Some(StreamCtx {
-                app: app.clone(),
-                agent_id: agent_id.to_string(),
-            }))
+            self.shell_exec(
+                input,
+                Some(StreamCtx {
+                    app: app.clone(),
+                    agent_id: agent_id.to_string(),
+                }),
+            )
             .await
         } else {
             self.execute(tool_name, input).await
@@ -200,10 +198,12 @@ impl ToolExecutor {
     async fn read_file(&self, input: &serde_json::Value) -> ToolOutput {
         let rel_path = match input["path"].as_str() {
             Some(p) => p,
-            None => return ToolOutput::error(
-                "parameter_error",
-                &format!("Missing 'path' parameter. Received: {input}"),
-            ),
+            None => {
+                return ToolOutput::error(
+                    "parameter_error",
+                    &format!("Missing 'path' parameter. Received: {input}"),
+                )
+            }
         };
         let offset = input.get("offset").and_then(|v| v.as_u64());
         let limit = input.get("limit").and_then(|v| v.as_u64());
@@ -213,7 +213,9 @@ impl ToolExecutor {
             Ok(p) => p,
             Err(e) => return ToolOutput::error("sandbox_violation", &e.to_string()),
         };
-        let canonical = full_path.canonicalize().unwrap_or_else(|_| full_path.clone());
+        let canonical = full_path
+            .canonicalize()
+            .unwrap_or_else(|_| full_path.clone());
 
         // 读 metadata；NotFound 单独处理。
         let metadata = match tokio::fs::metadata(&full_path).await {
@@ -328,7 +330,10 @@ impl ToolExecutor {
 
         // 完整读（无 paging）才更新 mtime cache；分页读不刷新——避免后续整体 read 的 stub 误判。
         if !is_paged_request {
-            self.read_paths.lock().unwrap().insert(canonical, current_mtime);
+            self.read_paths
+                .lock()
+                .unwrap()
+                .insert(canonical, current_mtime);
         } else {
             // 分页时也至少登记"看过"，让 edit_file 不再卡 read precondition（但 mtime 用占位值
             // 表示"未必最新"，下次整体读会失效 stub）。
@@ -363,11 +368,15 @@ impl ToolExecutor {
     async fn edit_file(&self, input: &serde_json::Value) -> ToolOutput {
         let rel_path = match input["path"].as_str() {
             Some(p) => p,
-            None => return ToolOutput::error(
-                "parameter_error",
-                &format!("Missing 'path' parameter. Received keys: {:?}",
-                    input.as_object().map(|o| o.keys().collect::<Vec<_>>())),
-            ),
+            None => {
+                return ToolOutput::error(
+                    "parameter_error",
+                    &format!(
+                        "Missing 'path' parameter. Received keys: {:?}",
+                        input.as_object().map(|o| o.keys().collect::<Vec<_>>())
+                    ),
+                )
+            }
         };
 
         // 解析 edits 列表：multi-edit 优先，否则单 edit fallback。
@@ -388,45 +397,69 @@ impl ToolExecutor {
             for (i, item) in arr.iter().enumerate() {
                 let old_s = match item.get("old_string").and_then(|v| v.as_str()) {
                     Some(s) => s.to_string(),
-                    None => return ToolOutput::error(
-                        "parameter_error",
-                        &format!("edits[{i}] missing 'old_string'."),
-                    ),
+                    None => {
+                        return ToolOutput::error(
+                            "parameter_error",
+                            &format!("edits[{i}] missing 'old_string'."),
+                        )
+                    }
                 };
-                let new_s = match item.get("new_string").and_then(|v| v.as_str()) {
+                let new_s =
+                    match item.get("new_string").and_then(|v| v.as_str()) {
+                        Some(s) => s.to_string(),
+                        None => return ToolOutput::error(
+                            "parameter_error",
+                            &format!(
+                                "edits[{i}] missing 'new_string' (pass empty string to delete)."
+                            ),
+                        ),
+                    };
+                let ra = item
+                    .get("replace_all")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                edits.push(EditOp {
+                    old_string: old_s,
+                    new_string: new_s,
+                    replace_all: ra,
+                });
+            }
+        } else {
+            let old_s =
+                match input["old_string"].as_str() {
                     Some(s) => s.to_string(),
                     None => return ToolOutput::error(
                         "parameter_error",
-                        &format!("edits[{i}] missing 'new_string' (pass empty string to delete)."),
+                        "Missing 'old_string' parameter (or pass an `edits` array for multi-edit).",
                     ),
                 };
-                let ra = item.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
-                edits.push(EditOp { old_string: old_s, new_string: new_s, replace_all: ra });
-            }
-        } else {
-            let old_s = match input["old_string"].as_str() {
-                Some(s) => s.to_string(),
-                None => return ToolOutput::error(
-                    "parameter_error",
-                    "Missing 'old_string' parameter (or pass an `edits` array for multi-edit).",
-                ),
-            };
             let new_s = match input["new_string"].as_str() {
                 Some(s) => s.to_string(),
-                None => return ToolOutput::error(
-                    "parameter_error",
-                    "Missing 'new_string' parameter (pass empty string to delete).",
-                ),
+                None => {
+                    return ToolOutput::error(
+                        "parameter_error",
+                        "Missing 'new_string' parameter (pass empty string to delete).",
+                    )
+                }
             };
-            let ra = input.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
-            edits.push(EditOp { old_string: old_s, new_string: new_s, replace_all: ra });
+            let ra = input
+                .get("replace_all")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            edits.push(EditOp {
+                old_string: old_s,
+                new_string: new_s,
+                replace_all: ra,
+            });
         }
 
         let full_path = match self.resolve_path(rel_path) {
             Ok(p) => p,
             Err(e) => return ToolOutput::error("sandbox_violation", &e.to_string()),
         };
-        let canonical = full_path.canonicalize().unwrap_or_else(|_| full_path.clone());
+        let canonical = full_path
+            .canonicalize()
+            .unwrap_or_else(|_| full_path.clone());
 
         if !self.has_been_seen(&canonical) {
             return ToolOutput::error(
@@ -503,17 +536,24 @@ impl ToolExecutor {
     async fn write_file(&self, input: &serde_json::Value) -> ToolOutput {
         let rel_path = match input["path"].as_str() {
             Some(p) => p,
-            None => return ToolOutput::error(
-                "parameter_error",
-                &format!("Missing 'path' parameter. Received: {input}"),
-            ),
+            None => {
+                return ToolOutput::error(
+                    "parameter_error",
+                    &format!("Missing 'path' parameter. Received: {input}"),
+                )
+            }
         };
         let content = match input["content"].as_str() {
             Some(c) => c,
-            None => return ToolOutput::error(
-                "parameter_error",
-                &format!("Missing 'content' parameter. Received keys: {:?}", input.as_object().map(|o| o.keys().collect::<Vec<_>>())),
-            ),
+            None => {
+                return ToolOutput::error(
+                    "parameter_error",
+                    &format!(
+                        "Missing 'content' parameter. Received keys: {:?}",
+                        input.as_object().map(|o| o.keys().collect::<Vec<_>>())
+                    ),
+                )
+            }
         };
         let full_path = match self.resolve_path(rel_path) {
             Ok(p) => p,
@@ -548,10 +588,12 @@ impl ToolExecutor {
     async fn glob_files(&self, input: &serde_json::Value) -> ToolOutput {
         let pattern = match input["pattern"].as_str() {
             Some(p) => p,
-            None => return ToolOutput::error(
-                "parameter_error",
-                "Missing 'pattern' parameter (e.g. `**/*.rs`).",
-            ),
+            None => {
+                return ToolOutput::error(
+                    "parameter_error",
+                    "Missing 'pattern' parameter (e.g. `**/*.rs`).",
+                )
+            }
         };
         let base_rel = input["path"].as_str().unwrap_or(".");
         let base = match self.resolve_path(base_rel) {
@@ -568,18 +610,16 @@ impl ToolExecutor {
         let full_pattern = base.join(pattern);
         let pattern_str = match full_pattern.to_str() {
             Some(s) => s,
-            None => return ToolOutput::error(
-                "parameter_error",
-                "Pattern path contains non-UTF8 bytes",
-            ),
+            None => {
+                return ToolOutput::error("parameter_error", "Pattern path contains non-UTF8 bytes")
+            }
         };
 
         let walk = match glob::glob(pattern_str) {
             Ok(it) => it,
-            Err(e) => return ToolOutput::error(
-                "parameter_error",
-                &format!("invalid glob pattern: {e}"),
-            ),
+            Err(e) => {
+                return ToolOutput::error("parameter_error", &format!("invalid glob pattern: {e}"))
+            }
         };
 
         let workspace_canonical = self
@@ -596,9 +636,9 @@ impl ToolExecutor {
             }
             // 只列文件，不列目录——和 GlobTool 语义一致；LLM 列目录用 list_files。
             let mtime = match tokio::fs::metadata(&path).await {
-                Ok(meta) if meta.is_file() => meta
-                    .modified()
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                Ok(meta) if meta.is_file() => {
+                    meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                }
                 _ => continue,
             };
             entries.push((mtime, path));
@@ -653,10 +693,12 @@ impl ToolExecutor {
     async fn grep(&self, input: &serde_json::Value) -> ToolOutput {
         let pattern = match input["pattern"].as_str() {
             Some(p) => p,
-            None => return ToolOutput::error(
-                "parameter_error",
-                &format!("Missing 'pattern' parameter. Received: {input}"),
-            ),
+            None => {
+                return ToolOutput::error(
+                    "parameter_error",
+                    &format!("Missing 'pattern' parameter. Received: {input}"),
+                )
+            }
         };
         let search_path = match input["path"].as_str() {
             Some(p) => match self.resolve_path(p) {
@@ -672,7 +714,10 @@ impl ToolExecutor {
             .get("case_insensitive")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let multiline = input.get("multiline").and_then(|v| v.as_bool()).unwrap_or(false);
+        let multiline = input
+            .get("multiline")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let context_before = input.get("context_before").and_then(|v| v.as_u64());
         let context_after = input.get("context_after").and_then(|v| v.as_u64());
         let context = input.get("context").and_then(|v| v.as_u64());
@@ -754,7 +799,9 @@ impl ToolExecutor {
         if exit_code == 1 {
             return ToolOutput::ok(format!(
                 "No matches for pattern `{pattern}`{}.",
-                glob_pat.map(|g| format!(" (glob `{g}`)")).unwrap_or_default()
+                glob_pat
+                    .map(|g| format!(" (glob `{g}`)"))
+                    .unwrap_or_default()
             ));
         }
         if exit_code >= 2 {
@@ -768,7 +815,11 @@ impl ToolExecutor {
         let lines: Vec<&str> = stdout.lines().collect();
         let total = lines.len();
         let truncated = total > head_limit;
-        let kept = if truncated { &lines[..head_limit] } else { &lines[..] };
+        let kept = if truncated {
+            &lines[..head_limit]
+        } else {
+            &lines[..]
+        };
         let mut body = kept.join("\n");
         if truncated {
             body.push_str(&format!(
@@ -798,20 +849,33 @@ impl ToolExecutor {
     ) -> ToolOutput {
         let command = match input["command"].as_str() {
             Some(c) => c,
-            None => return ToolOutput::error(
-                "parameter_error",
-                &format!("Missing 'command' parameter. Received: {input}"),
-            ),
+            None => {
+                return ToolOutput::error(
+                    "parameter_error",
+                    &format!("Missing 'command' parameter. Received: {input}"),
+                )
+            }
         };
         let expect_long_running = input
             .get("expect_long_running")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let (idle_secs, wall_secs) = if expect_long_running {
+        let (default_idle_secs, default_wall_secs) = if expect_long_running {
             (SHELL_LONG_IDLE_SECS, SHELL_LONG_WALL_SECS)
         } else {
             (SHELL_DEFAULT_IDLE_SECS, SHELL_DEFAULT_WALL_SECS)
         };
+        let idle_secs = input
+            .get("idle_timeout_seconds")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(default_idle_secs)
+            .clamp(1, SHELL_LONG_IDLE_SECS);
+        let wall_secs = input
+            .get("timeout_seconds")
+            .or_else(|| input.get("wall_timeout_seconds"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(default_wall_secs)
+            .clamp(1, SHELL_LONG_WALL_SECS);
 
         // 启动元信息：让前端 Workspace 流上立即出现一条命令开始的 marker
         if let Some(ctx) = &stream_ctx {
@@ -900,43 +964,42 @@ impl ToolExecutor {
 
         // 把"子进程退出"语义抽成一个 helper，被 wait() / try_wait() 兜底两条路径共用。
         // wait() 走 SIGCHLD path（fast，几乎无延迟）；try_wait() 走 polling path（兜底 race）。
-        let finalize =
-            |status: std::io::Result<std::process::ExitStatus>,
-             termination_reason: Option<String>,
-             stdout_text: String,
-             stderr_text: String,
-             elapsed: std::time::Duration| {
-                match status {
-                    Ok(status) if termination_reason.is_some() => Self::format_killed(
-                        termination_reason.unwrap(),
-                        status.code(),
-                        stdout_text,
-                        stderr_text,
-                        elapsed,
-                    ),
-                    Ok(status) if status.success() => {
-                        let mut combined = stdout_text;
-                        if !stderr_text.is_empty() {
-                            if !combined.is_empty() {
-                                combined.push('\n');
-                            }
-                            combined.push_str("[stderr] ");
-                            combined.push_str(&stderr_text);
+        let finalize = |status: std::io::Result<std::process::ExitStatus>,
+                        termination_reason: Option<String>,
+                        stdout_text: String,
+                        stderr_text: String,
+                        elapsed: std::time::Duration| {
+            match status {
+                Ok(status) if termination_reason.is_some() => Self::format_killed(
+                    termination_reason.unwrap(),
+                    status.code(),
+                    stdout_text,
+                    stderr_text,
+                    elapsed,
+                ),
+                Ok(status) if status.success() => {
+                    let mut combined = stdout_text;
+                    if !stderr_text.is_empty() {
+                        if !combined.is_empty() {
+                            combined.push('\n');
                         }
-                        ToolOutput::ok(combined)
+                        combined.push_str("[stderr] ");
+                        combined.push_str(&stderr_text);
                     }
-                    Ok(status) => {
-                        let code = status.code().unwrap_or(-1);
-                        let msg = format!(
-                            "Command failed (exit code {code}, elapsed {:.1}s)\n\
-                             [stdout]\n{stdout_text}\n[stderr]\n{stderr_text}",
-                            elapsed.as_secs_f64()
-                        );
-                        ToolOutput::error("shell_error", &msg)
-                    }
-                    Err(e) => ToolOutput::error("shell_error", &e.to_string()),
+                    ToolOutput::ok(combined)
                 }
-            };
+                Ok(status) => {
+                    let code = status.code().unwrap_or(-1);
+                    let msg = format!(
+                        "Command failed (exit code {code}, elapsed {:.1}s)\n\
+                             [stdout]\n{stdout_text}\n[stderr]\n{stderr_text}",
+                        elapsed.as_secs_f64()
+                    );
+                    ToolOutput::error("shell_error", &msg)
+                }
+                Err(e) => ToolOutput::error("shell_error", &e.to_string()),
+            }
+        };
 
         loop {
             tokio::select! {
@@ -1021,12 +1084,12 @@ impl ToolExecutor {
                     let elapsed = started.elapsed();
                     let idle = last_byte_at.lock().unwrap().elapsed();
 
-                    if elapsed.as_secs() > wall_secs {
+                    if elapsed.as_secs() >= wall_secs {
                         termination_reason = Some(format!(
                             "wall_clock {wall_secs}s exceeded (elapsed {:.1}s)",
                             elapsed.as_secs_f64()
                         ));
-                    } else if idle.as_secs() > idle_secs {
+                    } else if idle.as_secs() >= idle_secs {
                         termination_reason = Some(format!(
                             "idle {idle_secs}s (last output {:.1}s ago, total elapsed {:.1}s)",
                             idle.as_secs_f64(),
@@ -1196,7 +1259,8 @@ fn apply_single_edit(
 
     // 2. strip 行号前缀 fallback
     if let Some(stripped_old) = strip_line_number_prefix(old_string) {
-        let stripped_new = strip_line_number_prefix(new_string).unwrap_or_else(|| new_string.to_string());
+        let stripped_new =
+            strip_line_number_prefix(new_string).unwrap_or_else(|| new_string.to_string());
         let count = content.matches(&stripped_old).count();
         if count == 1 || (count >= 1 && replace_all) {
             let updated = if replace_all {
@@ -1239,7 +1303,7 @@ fn apply_single_edit(
             "old_string not found in the file (tried exact match, line-number-prefix strip, and \
              curly-quote/whitespace normalization). Did the file change since you last read it? \
              Re-run read_file and copy old_string verbatim from the output."
-            .into(),
+                .into(),
     })
 }
 
@@ -1338,7 +1402,11 @@ struct TruncatedBuffer {
 
 impl TruncatedBuffer {
     fn new(cap: usize) -> Self {
-        Self { cap, inner: Vec::new(), truncated_head_bytes: 0 }
+        Self {
+            cap,
+            inner: Vec::new(),
+            truncated_head_bytes: 0,
+        }
     }
 
     fn push(&mut self, bytes: &[u8]) {
@@ -1453,10 +1521,7 @@ mod tests {
     async fn shell_success_returns_stdout() {
         let (_dir, exec) = setup();
         let out = exec
-            .execute(
-                "shell_exec",
-                &serde_json::json!({"command": "echo hello"}),
-            )
+            .execute("shell_exec", &serde_json::json!({"command": "echo hello"}))
             .await;
         assert!(!out.is_error);
         assert!(out.content.contains("hello"));
@@ -1466,10 +1531,7 @@ mod tests {
     async fn shell_failure_returns_structured_error() {
         let (_dir, exec) = setup();
         let out = exec
-            .execute(
-                "shell_exec",
-                &serde_json::json!({"command": "exit 1"}),
-            )
+            .execute("shell_exec", &serde_json::json!({"command": "exit 1"}))
             .await;
         assert!(out.is_error);
         let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
@@ -1495,10 +1557,7 @@ mod tests {
     async fn read_file_not_found() {
         let (_dir, exec) = setup();
         let out = exec
-            .execute(
-                "read_file",
-                &serde_json::json!({"path": "nonexistent.txt"}),
-            )
+            .execute("read_file", &serde_json::json!({"path": "nonexistent.txt"}))
             .await;
         assert!(out.is_error);
         let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
@@ -1581,6 +1640,21 @@ mod tests {
         assert!(out.content.contains("hi"));
     }
 
+    #[tokio::test]
+    async fn shell_explicit_timeout_seconds_is_enforced() {
+        let (_dir, exec) = setup();
+        let out = exec
+            .execute(
+                "shell_exec",
+                &serde_json::json!({"command": "sleep 2", "timeout_seconds": 1}),
+            )
+            .await;
+        assert!(out.is_error);
+        let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+        assert_eq!(v["error"], "shell_killed");
+        assert!(v["reason"].as_str().unwrap().contains("wall_clock 1s exceeded"));
+    }
+
     /// TruncatedBuffer：超过 cap 时丢头保尾。
     #[test]
     fn truncated_buffer_keeps_tail() {
@@ -1626,7 +1700,10 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
         assert_eq!(v["error"], "edit_without_read");
         // 文件没被改
-        assert_eq!(fs::read_to_string(dir.path().join("a.txt")).unwrap(), "hello world");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "hello world"
+        );
     }
 
     /// 读过 → 唯一替换 → 成功并落盘 + 返回结构化 payload。
@@ -1652,7 +1729,10 @@ mod tests {
         assert!(!out.is_error, "got error: {}", out.content);
         let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
         assert_eq!(v["replacements"], 1);
-        assert_eq!(fs::read_to_string(dir.path().join("a.txt")).unwrap(), "hello rust");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "hello rust"
+        );
     }
 
     /// 多处匹配 + replace_all=false → 拒绝，让 LLM 加 context 重试。
@@ -1679,7 +1759,10 @@ mod tests {
         assert_eq!(v["error"], "edit_not_unique");
         assert!(v["message"].as_str().unwrap().contains("3 times"));
         // 文件未改
-        assert_eq!(fs::read_to_string(dir.path().join("b.txt")).unwrap(), "x x x");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("b.txt")).unwrap(),
+            "x x x"
+        );
     }
 
     /// replace_all=true → 全部替换。
@@ -1705,7 +1788,10 @@ mod tests {
         assert!(!out.is_error);
         let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
         assert_eq!(v["replacements"], 3);
-        assert_eq!(fs::read_to_string(dir.path().join("c.txt")).unwrap(), "bar bar bar");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("c.txt")).unwrap(),
+            "bar bar bar"
+        );
     }
 
     /// old_string 不存在 → 拒绝。
@@ -1755,7 +1841,10 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
         assert_eq!(v["error"], "edit_would_blank_file");
         // 原文件保留
-        assert_eq!(fs::read_to_string(dir.path().join("e.txt")).unwrap(), "content");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("e.txt")).unwrap(),
+            "content"
+        );
     }
 
     // ---- Single-Agent Uplift Phase 1.3: glob 单测 ----
@@ -1809,7 +1898,11 @@ mod tests {
             .await;
         assert!(!out.is_error, "expected ok, got: {}", out.content);
         // 行号格式：右对齐 6 位 + |
-        assert!(out.content.contains("     1|alpha"), "got:\n{}", out.content);
+        assert!(
+            out.content.contains("     1|alpha"),
+            "got:\n{}",
+            out.content
+        );
         assert!(out.content.contains("     2|beta"));
         assert!(out.content.contains("     3|gamma"));
     }
@@ -1827,10 +1920,17 @@ mod tests {
             )
             .await;
         assert!(!out.is_error);
-        assert!(out.content.contains("    10|line10"), "got:\n{}", out.content);
+        assert!(
+            out.content.contains("    10|line10"),
+            "got:\n{}",
+            out.content
+        );
         assert!(out.content.contains("    11|line11"));
         assert!(out.content.contains("    12|line12"));
-        assert!(!out.content.contains("    13|line13"), "should not include past limit");
+        assert!(
+            !out.content.contains("    13|line13"),
+            "should not include past limit"
+        );
         // 应当告知有截断（end_idx=12 < 50）
         assert!(out.content.contains("truncated at line 12 of 50"));
     }
@@ -1896,7 +1996,11 @@ mod tests {
                 }),
             )
             .await;
-        assert!(!out_e.is_error, "edit_file should accept just-written file: {}", out_e.content);
+        assert!(
+            !out_e.is_error,
+            "edit_file should accept just-written file: {}",
+            out_e.content
+        );
         assert_eq!(
             fs::read_to_string(dir.path().join("freshly_written.txt")).unwrap(),
             "goodbye world"
@@ -1929,7 +2033,10 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
         assert_eq!(v["edits_applied"], 2);
         assert_eq!(v["replacements"], 2);
-        assert_eq!(fs::read_to_string(dir.path().join("m.txt")).unwrap(), "ALPHA beta GAMMA");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("m.txt")).unwrap(),
+            "ALPHA beta GAMMA"
+        );
     }
 
     #[tokio::test]
@@ -1965,7 +2072,11 @@ mod tests {
     #[tokio::test]
     async fn edit_file_strips_line_number_prefix_in_old_string() {
         let (dir, exec) = setup();
-        fs::write(dir.path().join("ln.txt"), "fn foo() {\n    println!(\"hi\");\n}\n").unwrap();
+        fs::write(
+            dir.path().join("ln.txt"),
+            "fn foo() {\n    println!(\"hi\");\n}\n",
+        )
+        .unwrap();
         let _ = exec
             .execute("read_file", &serde_json::json!({"path": "ln.txt"}))
             .await;

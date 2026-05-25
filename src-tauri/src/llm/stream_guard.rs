@@ -44,9 +44,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::stream_diagnostics::{
-    probe_endpoint, StatsSnapshot, StreamRegistry, StreamStats,
-};
+use super::stream_diagnostics::{probe_endpoint, StatsSnapshot, StreamRegistry, StreamStats};
 use super::{LlmProvider, LlmRequest, LlmResponse, StreamChunk};
 
 /// 检测到 stream "看起来卡住"（首/中段静默达此值）时，**主动**做一次 in-process
@@ -242,15 +240,20 @@ pub async fn stream_chat_with_idle_guard_full(
         match res {
             Ok(r) => return Ok(r),
             Err(StreamGuardError::Cancelled) => return Err(StreamGuardError::Cancelled),
-            Err(StreamGuardError::IdleTimeout { idle_secs, threshold_secs }) => {
-                return Err(StreamGuardError::IdleTimeout { idle_secs, threshold_secs });
+            Err(StreamGuardError::IdleTimeout {
+                idle_secs,
+                threshold_secs,
+            }) => {
+                return Err(StreamGuardError::IdleTimeout {
+                    idle_secs,
+                    threshold_secs,
+                });
             }
             Err(StreamGuardError::Join(e)) => return Err(StreamGuardError::Join(e)),
             Err(StreamGuardError::Llm(msg)) => {
                 let received = chunks_received.load(Ordering::Relaxed);
-                let can_retry = received == 0
-                    && attempt < policy.max_retries
-                    && !cancel_token.is_cancelled();
+                let can_retry =
+                    received == 0 && attempt < policy.max_retries && !cancel_token.is_cancelled();
                 if !can_retry {
                     if received > 0 {
                         tracing::warn!(
@@ -392,9 +395,7 @@ async fn stream_chat_with_idle_guard_inner(
             // 时跑一次 probe + dump，captures the moment 主 stream 开始挂起但还活着，
             // 区别"快速失败网络断"和"reseller 慢吞吞"。
             let trigger_ms = stall_diagnostic_trigger(idle_timeout).as_millis() as u64;
-            if idle_ms >= trigger_ms
-                && !diagnostic_fired_wd.load(Ordering::Relaxed)
-            {
+            if idle_ms >= trigger_ms && !diagnostic_fired_wd.load(Ordering::Relaxed) {
                 diagnostic_fired_wd.store(true, Ordering::Relaxed);
                 let endpoint = probe_endpoint_wd.clone();
                 let provider_name = probe_provider_wd.clone();
@@ -729,7 +730,10 @@ mod tests {
             Duration::from_secs(5),
         ));
 
-        let response = handle.await.unwrap().expect("downstream 关闭不应导致 helper 失败");
+        let response = handle
+            .await
+            .unwrap()
+            .expect("downstream 关闭不应导致 helper 失败");
         assert_eq!(response.stop_reason, "end_turn");
     }
 

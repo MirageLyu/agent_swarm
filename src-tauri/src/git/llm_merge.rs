@@ -331,7 +331,8 @@ mod tests {
             .peel_to_commit()
             .unwrap();
         repo.set_head(&format!("refs/heads/{branch}")).unwrap();
-        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+            .unwrap();
         let work = repo.workdir().unwrap();
         fs::write(work.join(file), content).unwrap();
         let mut index = repo.index().unwrap();
@@ -340,7 +341,8 @@ mod tests {
         let tree_id = index.write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
         let sig = git2::Signature::now("Test", "test@test.local").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "commit", &tree, &[&parent]).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "commit", &tree, &[&parent])
+            .unwrap();
     }
 
     struct MockResolver {
@@ -415,7 +417,10 @@ mod tests {
         let blob = repo
             .find_blob(tree.get_path(Path::new("shared.txt")).unwrap().id())
             .unwrap();
-        assert_eq!(std::str::from_utf8(blob.content()).unwrap(), "MERGED BY LLM\n");
+        assert_eq!(
+            std::str::from_utf8(blob.content()).unwrap(),
+            "MERGED BY LLM\n"
+        );
     }
 
     #[tokio::test]

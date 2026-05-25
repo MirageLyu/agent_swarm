@@ -117,10 +117,7 @@ pub fn load_workspace_hooks(
             return HookLoadOutcome {
                 loaded: 0,
                 skipped: 0,
-                error: Some(format!(
-                    "failed to read {}: {e}",
-                    hooks_file.display()
-                )),
+                error: Some(format!("failed to read {}: {e}", hooks_file.display())),
             };
         }
     };

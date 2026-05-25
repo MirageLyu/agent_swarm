@@ -114,7 +114,9 @@ pub enum ArtifactError {
     LocalNameNotSnake(String),
     #[error("invalid artifact type `{got}` (allowed: {allowed})")]
     InvalidType { got: String, allowed: String },
-    #[error("file_paths is empty for artifact `{0}` — `publish_artifact` requires at least one path")]
+    #[error(
+        "file_paths is empty for artifact `{0}` — `publish_artifact` requires at least one path"
+    )]
     EmptyFilePaths(String),
     #[error("file `{0}` does not exist under repo root")]
     FileMissing(String),

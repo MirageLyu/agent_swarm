@@ -140,8 +140,8 @@ pub async fn run_agent(
                 config.tool_summary_base_url.clone(),
                 config.tool_summary_model.clone(),
             ) {
-                engine = engine
-                    .with_tool_summarizer(s, config.tool_summary_threshold_chars as usize);
+                engine =
+                    engine.with_tool_summarizer(s, config.tool_summary_threshold_chars as usize);
             }
         }
     }
@@ -215,10 +215,7 @@ pub fn get_agent_events(
 }
 
 #[tauri::command]
-pub fn get_agent_detail(
-    app: tauri::AppHandle,
-    agent_id: String,
-) -> Result<AgentDetail, String> {
+pub fn get_agent_detail(app: tauri::AppHandle, agent_id: String) -> Result<AgentDetail, String> {
     let db = app.state::<Database>();
     db.with_conn(|conn| {
         conn.query_row(
@@ -441,7 +438,10 @@ pub async fn start_mission_execution(
             .with_conn(|conn| queries::reset_orphaned_running_tasks(conn, &request.mission_id))
             .map_err(|e| e.to_string())?;
         if reset > 0 {
-            tracing::info!("Reset {reset} orphaned running tasks for mission {}", request.mission_id);
+            tracing::info!(
+                "Reset {reset} orphaned running tasks for mission {}",
+                request.mission_id
+            );
         }
     }
 
@@ -458,7 +458,10 @@ pub async fn start_mission_execution(
         })
         .map_err(|e| e.to_string())?;
     if promoted > 0 {
-        tracing::info!("Promoted {promoted} root tasks to ready for mission {}", request.mission_id);
+        tracing::info!(
+            "Promoted {promoted} root tasks to ready for mission {}",
+            request.mission_id
+        );
     }
 
     let worktrees_dir = repo_path.join(".worktrees");
@@ -633,9 +636,7 @@ pub fn inject_agent_note(
         .map_err(|e| e.to_string())?;
 
     if agent_status != "running" {
-        return Err(format!(
-            "Agent is not running (status: {agent_status})"
-        ));
+        return Err(format!("Agent is not running (status: {agent_status})"));
     }
 
     let note_id = Uuid::new_v4().to_string();
@@ -689,13 +690,7 @@ pub fn inject_mission_note(
 
         for agent_id in &running_agents {
             let note_id = Uuid::new_v4().to_string();
-            queries::insert_note_for_mission(
-                conn,
-                &note_id,
-                agent_id,
-                &request.mission_id,
-                &note,
-            )?;
+            queries::insert_note_for_mission(conn, &note_id, agent_id, &request.mission_id, &note)?;
             note_ids.push(note_id);
         }
         Ok(())

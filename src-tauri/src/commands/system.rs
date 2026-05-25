@@ -8,10 +8,7 @@ pub struct AppInfo {
 
 #[tauri::command]
 pub fn get_app_info(app: tauri::AppHandle) -> Result<AppInfo, String> {
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?;
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
 
     Ok(AppInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -26,7 +23,9 @@ pub fn get_db_status(app: tauri::AppHandle) -> Result<String, String> {
     let db = app.state::<crate::db::Database>();
     db.with_conn(|conn| {
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
             .map_err(|e| anyhow::anyhow!(e))?;
         Ok(format!("{count} migrations applied"))
     })
@@ -289,7 +288,9 @@ fn redact(line: &str) -> String {
 
     // home 用户名脱敏
     let username = HOME_USERNAME.get_or_init(|| {
-        std::env::var("USER").ok().or_else(|| std::env::var("USERNAME").ok())
+        std::env::var("USER")
+            .ok()
+            .or_else(|| std::env::var("USERNAME").ok())
     });
     if let Some(user) = username.as_deref() {
         if !user.is_empty() && user != "root" {
@@ -316,7 +317,9 @@ fn redact_api_keys_simple(line: &str) -> String {
                     None => earliest = Some((idx, prefix)),
                     Some((cur_idx, _)) if idx < cur_idx => earliest = Some((idx, prefix)),
                     // 同位置时，更长的 prefix（更具体的 sk-ant- 等）优先
-                    Some((cur_idx, cur_prefix)) if idx == cur_idx && prefix.len() > cur_prefix.len() => {
+                    Some((cur_idx, cur_prefix))
+                        if idx == cur_idx && prefix.len() > cur_prefix.len() =>
+                    {
                         earliest = Some((idx, prefix))
                     }
                     _ => {}
@@ -329,7 +332,9 @@ fn redact_api_keys_simple(line: &str) -> String {
                 out.push_str(&rest[..idx]);
                 let after = &rest[idx + prefix.len()..];
                 let end = after
-                    .find(|c: char| c.is_whitespace() || c == '"' || c == ',' || c == ';' || c == '\'')
+                    .find(|c: char| {
+                        c.is_whitespace() || c == '"' || c == ',' || c == ';' || c == '\''
+                    })
                     .unwrap_or(after.len());
                 if end >= 12 {
                     out.push_str("<redacted-api-key>");
@@ -354,10 +359,7 @@ pub fn export_diagnostics(
     app: tauri::AppHandle,
     request: ExportDiagnosticsRequest,
 ) -> Result<ExportDiagnosticsResponse, String> {
-    let tail_lines = request
-        .log_tail_lines
-        .unwrap_or(2000)
-        .min(MAX_LOG_TAIL);
+    let tail_lines = request.log_tail_lines.unwrap_or(2000).min(MAX_LOG_TAIL);
 
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let logs_dir = data_dir.join("logs");
@@ -365,11 +367,12 @@ pub fn export_diagnostics(
     let mut buf = String::with_capacity(64 * 1024);
     buf.push_str("# Miragenty Diagnostic Bundle\n\n");
     buf.push_str(&format!("Generated: {}\n", chrono::Utc::now().to_rfc3339()));
+    buf.push_str(&format!("App version: {}\n", env!("CARGO_PKG_VERSION")));
     buf.push_str(&format!(
-        "App version: {}\n",
-        env!("CARGO_PKG_VERSION")
+        "Target: {} {}\n",
+        std::env::consts::OS,
+        std::env::consts::ARCH
     ));
-    buf.push_str(&format!("Target: {} {}\n", std::env::consts::OS, std::env::consts::ARCH));
     buf.push_str(&format!(
         "Data dir: {}\n",
         redact(&data_dir.to_string_lossy())
@@ -428,7 +431,11 @@ pub fn export_diagnostics(
             buf.push_str("```\n");
         }
         Err(e) => {
-            buf.push_str(&format!("(failed to read logs from {}: {})\n", logs_dir.display(), e));
+            buf.push_str(&format!(
+                "(failed to read logs from {}: {})\n",
+                logs_dir.display(),
+                e
+            ));
         }
     }
 
@@ -443,8 +450,13 @@ pub fn export_diagnostics(
         }
     }
 
-    std::fs::write(&path, buf.as_bytes())
-        .map_err(|e| format!("failed to write diagnostic bundle to {}: {}", path.display(), e))?;
+    std::fs::write(&path, buf.as_bytes()).map_err(|e| {
+        format!(
+            "failed to write diagnostic bundle to {}: {}",
+            path.display(),
+            e
+        )
+    })?;
 
     Ok(ExportDiagnosticsResponse {
         bytes_written: buf.len() as u64,
@@ -464,11 +476,7 @@ fn collect_recent_log_lines(
     }
     let mut files: Vec<_> = std::fs::read_dir(logs_dir)?
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with("miragenty.log")
-        })
+        .filter(|e| e.file_name().to_string_lossy().starts_with("miragenty.log"))
         .collect();
     files.sort_by_key(|e| std::cmp::Reverse(e.file_name()));
 
@@ -481,10 +489,7 @@ fn collect_recent_log_lines(
             Ok(f) => f,
             Err(_) => continue,
         };
-        let lines: Vec<String> = BufReader::new(f)
-            .lines()
-            .filter_map(|l| l.ok())
-            .collect();
+        let lines: Vec<String> = BufReader::new(f).lines().filter_map(|l| l.ok()).collect();
         // 反转后再 append，方便最后再翻回来
         let mut rev: Vec<String> = lines.into_iter().rev().collect();
         all_lines.append(&mut rev);
@@ -552,7 +557,10 @@ mod tests {
 
     #[test]
     fn collect_recent_log_lines_reads_tail() {
-        let tmp = std::env::temp_dir().join(format!("miragenty_test_logs_{}", uuid::Uuid::new_v4().simple()));
+        let tmp = std::env::temp_dir().join(format!(
+            "miragenty_test_logs_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         std::fs::create_dir_all(&tmp).unwrap();
 
         // 写两个文件，模拟 rolling
@@ -561,11 +569,7 @@ mod tests {
             "line1\nline2\nline3\n",
         )
         .unwrap();
-        std::fs::write(
-            tmp.join("miragenty.log.2026-04-29"),
-            "todayA\ntodayB\n",
-        )
-        .unwrap();
+        std::fs::write(tmp.join("miragenty.log.2026-04-29"), "todayA\ntodayB\n").unwrap();
 
         // 取最近 3 行：应该是 today 文件的全部 + yesterday 的最后一行
         let (lines, files) = collect_recent_log_lines(&tmp, 3).unwrap();

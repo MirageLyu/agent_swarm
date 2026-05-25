@@ -210,7 +210,9 @@ mod tests {
         t.record_step(2000);
         let d = t.decide(10_000);
         match d {
-            BudgetDecision::Continue { accumulated, pct, .. } => {
+            BudgetDecision::Continue {
+                accumulated, pct, ..
+            } => {
                 assert_eq!(accumulated, 2000);
                 assert!((pct - 0.2).abs() < 1e-9);
             }
@@ -280,8 +282,10 @@ mod tests {
         let d = t.decide(100_000);
         // 此时 continuation_count >= 3, current_delta=100, last_delta=5000
         // → !(current<500 && last<500)，不算 diminishing
-        assert!(matches!(d, BudgetDecision::Continue { .. }),
-            "上一轮大产出应重置 diminishing 判定");
+        assert!(
+            matches!(d, BudgetDecision::Continue { .. }),
+            "上一轮大产出应重置 diminishing 判定"
+        );
     }
 
     #[test]
@@ -302,8 +306,10 @@ mod tests {
         for _ in 0..10 {
             t.record_step(10_000);
             let d = t.decide(0);
-            assert!(matches!(d, BudgetDecision::Continue { .. }),
-                "budget=0 时永远不应 Stop");
+            assert!(
+                matches!(d, BudgetDecision::Continue { .. }),
+                "budget=0 时永远不应 Stop"
+            );
         }
     }
 
@@ -314,19 +320,31 @@ mod tests {
         let mut t = BudgetTracker::new();
         t.record_step(100);
         let d1 = t.decide(100_000);
-        assert!(matches!(d1, BudgetDecision::Continue { .. }), "step 1 不应 stop");
+        assert!(
+            matches!(d1, BudgetDecision::Continue { .. }),
+            "step 1 不应 stop"
+        );
         t.record_step(100);
         let d2 = t.decide(100_000);
-        assert!(matches!(d2, BudgetDecision::Continue { .. }), "step 2 不应 stop");
+        assert!(
+            matches!(d2, BudgetDecision::Continue { .. }),
+            "step 2 不应 stop"
+        );
         t.record_step(100);
         let d3 = t.decide(100_000);
-        assert!(matches!(d3, BudgetDecision::Continue { .. }), "step 3 不应 stop");
+        assert!(
+            matches!(d3, BudgetDecision::Continue { .. }),
+            "step 3 不应 stop"
+        );
         // 第 4 步才可能 stop（continuation_count >= 3 + 两轮 last delta < 500）
         t.record_step(100);
         let d4 = t.decide(100_000);
         assert!(matches!(
             d4,
-            BudgetDecision::Stop { reason: BudgetStopReason::DiminishingReturns, .. }
+            BudgetDecision::Stop {
+                reason: BudgetStopReason::DiminishingReturns,
+                ..
+            }
         ));
     }
 
@@ -346,14 +364,23 @@ mod tests {
         // 此时 delta=95000 > 500 → 不算 diminishing → 走 BudgetExhausted
         assert!(matches!(
             d,
-            BudgetDecision::Stop { reason: BudgetStopReason::BudgetExhausted, .. }
+            BudgetDecision::Stop {
+                reason: BudgetStopReason::BudgetExhausted,
+                ..
+            }
         ));
     }
 
     #[test]
     fn as_str_returns_stable_labels() {
         // 防御：这两个字串会进 event meta 落库，前端解析约定不能改
-        assert_eq!(BudgetStopReason::DiminishingReturns.as_str(), "diminishing_returns");
-        assert_eq!(BudgetStopReason::BudgetExhausted.as_str(), "budget_exhausted");
+        assert_eq!(
+            BudgetStopReason::DiminishingReturns.as_str(),
+            "diminishing_returns"
+        );
+        assert_eq!(
+            BudgetStopReason::BudgetExhausted.as_str(),
+            "budget_exhausted"
+        );
     }
 }

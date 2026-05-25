@@ -146,7 +146,9 @@ pub struct ApprovalCoordinator {
 
 impl ApprovalCoordinator {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self { pending: Mutex::new(HashMap::new()) })
+        Arc::new(Self {
+            pending: Mutex::new(HashMap::new()),
+        })
     }
 
     /// 内部：注册等待槽。返回 receiver 给等待方。
@@ -393,9 +395,11 @@ mod tests {
 
         let agent_status: String = db
             .with_conn(|c| {
-                Ok(c.query_row("SELECT status FROM agents WHERE id='ag-1'", [], |r| {
-                    r.get::<_, String>(0)
-                })?)
+                Ok(
+                    c.query_row("SELECT status FROM agents WHERE id='ag-1'", [], |r| {
+                        r.get::<_, String>(0)
+                    })?,
+                )
             })
             .unwrap();
         assert_eq!(agent_status, "running");
@@ -453,9 +457,11 @@ mod tests {
         // agent 也应被恢复
         let agent_status: String = db
             .with_conn(|c| {
-                Ok(c.query_row("SELECT status FROM agents WHERE id='ag-1'", [], |r| {
-                    r.get::<_, String>(0)
-                })?)
+                Ok(
+                    c.query_row("SELECT status FROM agents WHERE id='ag-1'", [], |r| {
+                        r.get::<_, String>(0)
+                    })?,
+                )
             })
             .unwrap();
         assert_eq!(agent_status, "running");

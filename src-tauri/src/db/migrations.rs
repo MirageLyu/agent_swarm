@@ -1,7 +1,8 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-const MIGRATIONS: &[(&str, &str)] = &[(
+const MIGRATIONS: &[(&str, &str)] = &[
+    (
         "001_initial",
         r#"
         CREATE TABLE IF NOT EXISTS missions (
@@ -905,6 +906,162 @@ const MIGRATIONS: &[(&str, &str)] = &[(
         ALTER TABLE missions ADD COLUMN verify_command TEXT;
         "#,
     ),
+    (
+        // Coding Agent Benchmark Evaluation Harness:
+        // - suite/case registry for imported GA-style datasets
+        // - run/result tables for reproducible benchmark execution
+        // - metric snapshots and grader artifacts for task completion, token efficiency,
+        //   and tool-use efficiency analysis
+        "030_benchmark_evaluation",
+        r#"
+        CREATE TABLE IF NOT EXISTS benchmark_suites (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            source_kind TEXT NOT NULL
+                CHECK (source_kind IN ('ga_tool_efficiency', 'ga_sop_bench', 'ga_lifelong_agentbench', 'ga_realfin_benchmark', 'custom')),
+            source_path TEXT NOT NULL,
+            source_ref TEXT,
+            manifest_json TEXT NOT NULL DEFAULT '{}',
+            case_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_benchmark_suites_source_kind
+            ON benchmark_suites(source_kind);
+
+        CREATE TABLE IF NOT EXISTS benchmark_cases (
+            id TEXT PRIMARY KEY,
+            suite_id TEXT NOT NULL REFERENCES benchmark_suites(id) ON DELETE CASCADE,
+            task_id TEXT NOT NULL,
+            task_type TEXT NOT NULL DEFAULT '',
+            source_suite TEXT NOT NULL DEFAULT '',
+            target_tool_or_capability TEXT NOT NULL DEFAULT '',
+            prompt TEXT NOT NULL,
+            assets_json TEXT NOT NULL DEFAULT '[]',
+            expected_outputs_json TEXT NOT NULL DEFAULT '[]',
+            grader_json TEXT,
+            expected_output TEXT,
+            raw_json TEXT NOT NULL DEFAULT '{}',
+            case_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(suite_id, task_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_benchmark_cases_suite
+            ON benchmark_cases(suite_id, task_id);
+        CREATE INDEX IF NOT EXISTS idx_benchmark_cases_type
+            ON benchmark_cases(task_type);
+
+        CREATE TABLE IF NOT EXISTS benchmark_runs (
+            id TEXT PRIMARY KEY,
+            suite_id TEXT NOT NULL REFERENCES benchmark_suites(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'created'
+                CHECK (status IN ('created', 'running', 'completed', 'completed_with_failures', 'failed', 'cancelled', 'timeout')),
+            agent_kind TEXT NOT NULL DEFAULT 'coding'
+                CHECK (agent_kind IN ('coding', 'planner', 'evaluator', 'chat')),
+            provider TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '',
+            base_url_hash TEXT,
+            agent_config_json TEXT NOT NULL DEFAULT '{}',
+            git_commit TEXT,
+            git_dirty INTEGER NOT NULL DEFAULT 0,
+            benchmark_source_path TEXT NOT NULL DEFAULT '',
+            case_ids_json TEXT NOT NULL DEFAULT '[]',
+            timeout_seconds INTEGER,
+            max_steps INTEGER,
+            token_budget INTEGER,
+            cost_budget_usd REAL,
+            workspace_root TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            started_at TEXT,
+            completed_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_benchmark_runs_suite
+            ON benchmark_runs(suite_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_benchmark_runs_status
+            ON benchmark_runs(status);
+
+        CREATE TABLE IF NOT EXISTS benchmark_results (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+            case_id TEXT NOT NULL REFERENCES benchmark_cases(id) ON DELETE CASCADE,
+            agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+            workspace_path TEXT,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled', 'timeout', 'unsupported')),
+            success INTEGER,
+            grading_status TEXT NOT NULL DEFAULT 'not_started'
+                CHECK (grading_status IN ('not_started', 'passed', 'failed', 'ungraded')),
+            final_response TEXT,
+            artifact_refs_json TEXT NOT NULL DEFAULT '[]',
+            error_message TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(run_id, case_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_benchmark_results_run
+            ON benchmark_results(run_id, status);
+        CREATE INDEX IF NOT EXISTS idx_benchmark_results_case
+            ON benchmark_results(case_id);
+        CREATE INDEX IF NOT EXISTS idx_benchmark_results_agent
+            ON benchmark_results(agent_id);
+
+        CREATE TABLE IF NOT EXISTS benchmark_metric_snapshots (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+            result_id TEXT REFERENCES benchmark_results(id) ON DELETE CASCADE,
+            scope TEXT NOT NULL
+                CHECK (scope IN ('case', 'run')),
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            cost_usd REAL NOT NULL DEFAULT 0.0,
+            llm_request_count INTEGER NOT NULL DEFAULT 0,
+            tool_call_count INTEGER NOT NULL DEFAULT 0,
+            tool_result_count INTEGER NOT NULL DEFAULT 0,
+            tool_error_count INTEGER NOT NULL DEFAULT 0,
+            tool_call_count_by_name_json TEXT NOT NULL DEFAULT '{}',
+            runtime_ms INTEGER,
+            successful_case_count INTEGER,
+            graded_case_count INTEGER,
+            total_case_count INTEGER,
+            all_cases_tsr REAL,
+            graded_cases_tsr REAL,
+            token_per_success REAL,
+            tool_calls_per_success REAL,
+            requests_per_success REAL,
+            tool_error_rate REAL,
+            guardrail_retry_count INTEGER NOT NULL DEFAULT 0,
+            recovery_attempt_count INTEGER NOT NULL DEFAULT 0,
+            read_only_loop_hint_count INTEGER NOT NULL DEFAULT 0,
+            raw_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_benchmark_metrics_run
+            ON benchmark_metric_snapshots(run_id, scope, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_benchmark_metrics_result
+            ON benchmark_metric_snapshots(result_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS benchmark_grader_artifacts (
+            id TEXT PRIMARY KEY,
+            result_id TEXT NOT NULL REFERENCES benchmark_results(id) ON DELETE CASCADE,
+            grader_kind TEXT NOT NULL DEFAULT 'python',
+            command_json TEXT NOT NULL DEFAULT '[]',
+            exit_code INTEGER,
+            stdout_json TEXT,
+            stderr TEXT NOT NULL DEFAULT '',
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_benchmark_grader_result
+            ON benchmark_grader_artifacts(result_id, created_at DESC);
+        "#,
+    ),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
@@ -923,10 +1080,7 @@ pub fn run(conn: &Connection) -> Result<()> {
         )?;
         if !applied {
             conn.execute_batch(sql)?;
-            conn.execute(
-                "INSERT INTO schema_migrations (name) VALUES (?)",
-                [name],
-            )?;
+            conn.execute("INSERT INTO schema_migrations (name) VALUES (?)", [name])?;
             tracing::info!("Applied migration: {name}");
         }
     }
@@ -965,21 +1119,30 @@ mod migration_023_tests {
             "SELECT status, signed_at FROM mission_contracts WHERE id = ?",
             [contract_id],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     fn insert_mission(conn: &Connection, id: &str, status: &str) {
         conn.execute(
             "INSERT INTO missions (id, title, description, status) VALUES (?, ?, ?, ?)",
             rusqlite::params![id, "T", "D", status],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
-    fn insert_contract(conn: &Connection, id: &str, mission_id: &str, status: &str, signed_at: Option<&str>) {
+    fn insert_contract(
+        conn: &Connection,
+        id: &str,
+        mission_id: &str,
+        status: &str,
+        signed_at: Option<&str>,
+    ) {
         conn.execute(
             "INSERT INTO mission_contracts (id, mission_id, status, signed_at) VALUES (?, ?, ?, ?)",
             rusqlite::params![id, mission_id, status, signed_at],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     fn insert_task(conn: &Connection, id: &str, mission_id: &str) {
@@ -995,25 +1158,40 @@ mod migration_023_tests {
     fn rolls_back_stuck_signed_contract_with_no_tasks() {
         let conn = setup_db_pre_023();
         insert_mission(&conn, "m-stuck", "preflight");
-        insert_contract(&conn, "c-stuck", "m-stuck", "signed", Some("2025-05-12 00:00:00"));
+        insert_contract(
+            &conn,
+            "c-stuck",
+            "m-stuck",
+            "signed",
+            Some("2025-05-12 00:00:00"),
+        );
         // 也插入若干 contract_items，断言回退后不丢
         conn.execute(
             "INSERT INTO contract_items (id, contract_id, section, text) VALUES (?, ?, 'scope', ?)",
             rusqlite::params!["ci-1", "c-stuck", "build calculator"],
-        ).unwrap();
+        )
+        .unwrap();
 
         run(&conn).unwrap();
 
         let (status, signed_at) = read_contract_status(&conn, "c-stuck");
-        assert_eq!(status, "drafting", "脏 contract 必须回退到 drafting，否则签约按钮永久消失");
+        assert_eq!(
+            status, "drafting",
+            "脏 contract 必须回退到 drafting，否则签约按钮永久消失"
+        );
         assert!(signed_at.is_none(), "回退后 signed_at 必须清空");
 
-        let item_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM contract_items WHERE contract_id = 'c-stuck'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
-        assert_eq!(item_count, 1, "contract_items 必须保留 —— 用户写的 scope 不能丢");
+        let item_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM contract_items WHERE contract_id = 'c-stuck'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            item_count, 1,
+            "contract_items 必须保留 —— 用户写的 scope 不能丢"
+        );
     }
 
     /// 成功签约的 mission（mission.status='planned' + 有 tasks）→ 必须保持 signed。
@@ -1028,7 +1206,10 @@ mod migration_023_tests {
         run(&conn).unwrap();
 
         let (status, signed_at) = read_contract_status(&conn, "c-ok");
-        assert_eq!(status, "signed", "已成功签约 + 有 tasks 的 contract 不能被回退");
+        assert_eq!(
+            status, "signed",
+            "已成功签约 + 有 tasks 的 contract 不能被回退"
+        );
         assert!(signed_at.is_some(), "signed_at 必须保留");
     }
 
@@ -1038,7 +1219,13 @@ mod migration_023_tests {
     fn does_not_touch_signed_preflight_with_tasks_present() {
         let conn = setup_db_pre_023();
         insert_mission(&conn, "m-weird", "preflight");
-        insert_contract(&conn, "c-weird", "m-weird", "signed", Some("2025-05-12 00:00:00"));
+        insert_contract(
+            &conn,
+            "c-weird",
+            "m-weird",
+            "signed",
+            Some("2025-05-12 00:00:00"),
+        );
         insert_task(&conn, "t-weird", "m-weird");
 
         run(&conn).unwrap();
@@ -1052,7 +1239,13 @@ mod migration_023_tests {
     fn is_idempotent() {
         let conn = setup_db_pre_023();
         insert_mission(&conn, "m-idem", "preflight");
-        insert_contract(&conn, "c-idem", "m-idem", "signed", Some("2025-05-12 00:00:00"));
+        insert_contract(
+            &conn,
+            "c-idem",
+            "m-idem",
+            "signed",
+            Some("2025-05-12 00:00:00"),
+        );
 
         run(&conn).unwrap();
         let (status1, _) = read_contract_status(&conn, "c-idem");
@@ -1191,7 +1384,12 @@ mod migration_024_tests {
             r#"[{"local_name":"architecture_doc","type":"design_doc","summary":"x"}]"#,
         );
         insert_task_with_produces(&conn, "impl", "m1", "[]");
-        insert_dep(&conn, "impl", "architect", r#"["architect.architecture_doc"]"#);
+        insert_dep(
+            &conn,
+            "impl",
+            "architect",
+            r#"["architect.architecture_doc"]"#,
+        );
 
         rerun_backfill(&conn);
 

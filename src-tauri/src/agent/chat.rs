@@ -26,9 +26,7 @@ use crate::llm::{
     stream_chat_with_idle_guard, ContentBlock, LlmProvider, LlmRequest, Message, MessageRole,
     StreamChunk, StreamChunkKind, DEFAULT_STREAM_IDLE_TIMEOUT,
 };
-use crate::tools::{
-    chat_agent_tools, ToolExecutor, PROPOSE_FOLLOWUP_TOOL, TASK_COMPLETE_TOOL,
-};
+use crate::tools::{chat_agent_tools, ToolExecutor, PROPOSE_FOLLOWUP_TOOL, TASK_COMPLETE_TOOL};
 
 /// FR-15.5 硬阈值。LLM 自由发挥 → 实际 commit diff 行数超过 30 即拒绝并要求走 propose。
 pub const CHAT_LINES_HARD_LIMIT: usize = 30;
@@ -83,7 +81,13 @@ impl ChatAgent {
         main_branch: String,
         app_handle: tauri::AppHandle,
     ) -> Self {
-        Self { provider, model, repo_path, main_branch, app_handle }
+        Self {
+            provider,
+            model,
+            repo_path,
+            main_branch,
+            app_handle,
+        }
     }
 
     /// 处理一条用户消息，运行一轮 chat-agent loop。
@@ -225,10 +229,7 @@ impl ChatAgent {
                 )?;
                 let rows = stmt
                     .query_map([mission_id], |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, Option<String>>(1)?,
-                        ))
+                        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
                 anyhow::Ok(rows)
@@ -390,7 +391,11 @@ impl ChatAgent {
                     continue;
                 }
 
-                let title = input.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let title = input
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let rationale = input
                     .get("rationale")
                     .and_then(|v| v.as_str())
@@ -470,9 +475,7 @@ impl ChatAgent {
                     context_summary: context_summary_text.as_str(),
                     timeout_seconds: timeout_secs,
                 };
-                if let Err(e) =
-                    db.with_conn(|c| crate::db::queries::insert_approval(c, &new_req))
-                {
+                if let Err(e) = db.with_conn(|c| crate::db::queries::insert_approval(c, &new_req)) {
                     tracing::warn!(
                         "[chat] failed to mirror followup proposal to approval_requests: {e}"
                     );
@@ -523,7 +526,8 @@ impl ChatAgent {
                         .await
                         .map_err(|e| anyhow!("commit task panicked: {e}"))?;
 
-                let combined_text = format!("{}\n\n[task_complete] {}", text_parts.join("\n"), summary);
+                let combined_text =
+                    format!("{}\n\n[task_complete] {}", text_parts.join("\n"), summary);
 
                 match outcome_res {
                     Ok(Some(outcome)) => {
@@ -553,14 +557,7 @@ impl ChatAgent {
                                 )?;
                                 let warn_id = Uuid::new_v4().to_string();
                                 queries::insert_mission_chat(
-                                    c,
-                                    &warn_id,
-                                    mission_id,
-                                    "system",
-                                    &warn,
-                                    None,
-                                    None,
-                                    None,
+                                    c, &warn_id, mission_id, "system", &warn, None, None, None,
                                 )
                             })
                             .ok();
@@ -740,7 +737,9 @@ fn history_to_messages(history: &[queries::MissionChatRow]) -> Vec<Message> {
         };
         out.push(Message {
             role,
-            content: vec![ContentBlock::Text { text: row.content.clone() }],
+            content: vec![ContentBlock::Text {
+                text: row.content.clone(),
+            }],
             cache_control: None,
         });
     }

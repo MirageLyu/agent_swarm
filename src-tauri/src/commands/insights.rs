@@ -178,8 +178,7 @@ fn detect_anomalies(conn: &Connection, mission_id: Option<&str>) -> anyhow::Resu
     anomalies.sort_by(|a, b| {
         let sa = severity_rank(&a.severity);
         let sb = severity_rank(&b.severity);
-        sb.cmp(&sa)
-            .then_with(|| b.occurred_at.cmp(&a.occurred_at))
+        sb.cmp(&sa).then_with(|| b.occurred_at.cmp(&a.occurred_at))
     });
     Ok(anomalies)
 }
@@ -328,17 +327,14 @@ fn detect_long_running(
             row.get(6)?,
         ))
     };
-    let rows: Vec<(String, String, String, i64, String, String, String)> = if let Some(mid) =
-        mission_id
-    {
-        stmt.query_map(params![mid], mapper)?
-            .filter_map(|r| r.ok())
-            .collect()
-    } else {
-        stmt.query_map([], mapper)?
-            .filter_map(|r| r.ok())
-            .collect()
-    };
+    let rows: Vec<(String, String, String, i64, String, String, String)> =
+        if let Some(mid) = mission_id {
+            stmt.query_map(params![mid], mapper)?
+                .filter_map(|r| r.ok())
+                .collect()
+        } else {
+            stmt.query_map([], mapper)?.filter_map(|r| r.ok()).collect()
+        };
 
     for (agent_id, _task_id, started_at, elapsed, mission_id, mission_title, task_title) in rows {
         let severity = if elapsed > 1800 {
@@ -427,16 +423,21 @@ fn detect_failed_agents(
             row.get(6)?,
         ))
     };
-    let rows: Vec<(String, String, String, String, String, String, Option<String>)> =
-        if let Some(mid) = mission_id {
-            stmt.query_map(params![mid], mapper)?
-                .filter_map(|r| r.ok())
-                .collect()
-        } else {
-            stmt.query_map([], mapper)?
-                .filter_map(|r| r.ok())
-                .collect()
-        };
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+    )> = if let Some(mid) = mission_id {
+        stmt.query_map(params![mid], mapper)?
+            .filter_map(|r| r.ok())
+            .collect()
+    } else {
+        stmt.query_map([], mapper)?.filter_map(|r| r.ok()).collect()
+    };
 
     for (agent_id, _task_id, occurred_at, mission_id, mission_title, task_title, last_message) in
         rows
@@ -523,13 +524,7 @@ mod tests {
         .unwrap();
     }
 
-    fn insert_cost(
-        conn: &Connection,
-        id: &str,
-        agent_id: &str,
-        task_id: &str,
-        cost: f64,
-    ) {
+    fn insert_cost(conn: &Connection, id: &str, agent_id: &str, task_id: &str, cost: f64) {
         conn.execute(
             "INSERT INTO cost_records (id, agent_id, task_id, model, input_tokens, output_tokens, cost_usd)
              VALUES (?1, ?2, ?3, 'sonnet', 100, 200, ?4)",

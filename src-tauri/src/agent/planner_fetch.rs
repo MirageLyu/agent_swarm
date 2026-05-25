@@ -20,14 +20,8 @@ use uuid::Uuid;
 
 /// 永远拒绝的主机模式（不区分大小写、点号边界匹配）。
 /// 设计原则：阻断典型的 SSRF 与内网探测。
-const HOST_BLOCKLIST_SUFFIXES: &[&str] = &[
-    ".local",
-    ".internal",
-    ".lan",
-    ".intranet",
-    ".corp",
-    ".home",
-];
+const HOST_BLOCKLIST_SUFFIXES: &[&str] =
+    &[".local", ".internal", ".lan", ".intranet", ".corp", ".home"];
 
 /// 单次 fetch 响应大小上限（字节），防止 LLM context 被巨型页面塞爆。
 pub const MAX_FETCH_BYTES: usize = 256 * 1024;
@@ -322,7 +316,10 @@ mod tests {
         for (url, kind) in cases {
             let err = parse_and_check_host(url).unwrap_err();
             match kind {
-                "scheme" => assert!(matches!(err, FetchError::UnsupportedScheme(_)), "{url}: {err}"),
+                "scheme" => assert!(
+                    matches!(err, FetchError::UnsupportedScheme(_)),
+                    "{url}: {err}"
+                ),
                 _ => unreachable!(),
             }
         }

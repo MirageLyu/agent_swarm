@@ -134,9 +134,7 @@ mod tests {
                 ContentBlock::Reasoning {
                     text: "let me think".into(),
                 },
-                ContentBlock::Text {
-                    text: "4".into(),
-                },
+                ContentBlock::Text { text: "4".into() },
             ]),
             user(vec![ContentBlock::ToolResult {
                 tool_use_id: "tu_1".into(),

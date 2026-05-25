@@ -91,7 +91,8 @@ impl EvaluatorAgent {
         let db = self.app_handle.state::<Database>();
 
         // Prevent duplicate evaluation (BT-07)
-        let already_evaluated = db.with_conn(|conn| queries::has_evaluator_review(conn, agent_id))?;
+        let already_evaluated =
+            db.with_conn(|conn| queries::has_evaluator_review(conn, agent_id))?;
         if already_evaluated {
             tracing::info!("Evaluator: agent {agent_id} already has a review, skipping");
             return Ok(());
@@ -106,8 +107,13 @@ impl EvaluatorAgent {
             let review_id = Uuid::new_v4().to_string();
             db.with_conn(|conn| {
                 queries::insert_evaluator_review(
-                    conn, &review_id, agent_id, mission_id,
-                    10.0, "No changes to review.", None,
+                    conn,
+                    &review_id,
+                    agent_id,
+                    mission_id,
+                    10.0,
+                    "No changes to review.",
+                    None,
                 )
             })?;
             self.emit_complete(agent_id, 10.0, 0);
@@ -131,8 +137,13 @@ impl EvaluatorAgent {
 
         db.with_conn(|conn| {
             queries::insert_evaluator_review(
-                conn, &review_id, agent_id, mission_id,
-                score, &output.summary, contract_compliance.as_deref(),
+                conn,
+                &review_id,
+                agent_id,
+                mission_id,
+                score,
+                &output.summary,
+                contract_compliance.as_deref(),
             )
         })?;
 
@@ -145,11 +156,19 @@ impl EvaluatorAgent {
 
                 db.with_conn(|conn| {
                     queries::insert_evaluator_annotation(
-                        conn, &ann_id, &review_id, agent_id,
-                        &file_review.file_path, ann.line,
-                        &ann_type, &severity, &ann.message,
-                        ann.suggestion.as_deref(), ann.auto_fixable,
-                        ann.original_code.as_deref(), ann.fixed_code.as_deref(),
+                        conn,
+                        &ann_id,
+                        &review_id,
+                        agent_id,
+                        &file_review.file_path,
+                        ann.line,
+                        &ann_type,
+                        &severity,
+                        &ann.message,
+                        ann.suggestion.as_deref(),
+                        ann.auto_fixable,
+                        ann.original_code.as_deref(),
+                        ann.fixed_code.as_deref(),
                     )
                 })?;
                 annotation_count += 1;
@@ -173,12 +192,17 @@ impl EvaluatorAgent {
         Ok(())
     }
 
-    fn get_diff_for_agent(&self, agent_id: &str, wt_manager: &WorktreeManager) -> Result<Vec<DiffFile>> {
+    fn get_diff_for_agent(
+        &self,
+        agent_id: &str,
+        wt_manager: &WorktreeManager,
+    ) -> Result<Vec<DiffFile>> {
         match wt_manager.get_structured_diff(agent_id) {
             Ok(files) => Ok(files),
             Err(_) => {
                 let db = self.app_handle.state::<Database>();
-                let hashes = db.with_conn(|conn| queries::get_agent_commit_hashes(conn, agent_id))?;
+                let hashes =
+                    db.with_conn(|conn| queries::get_agent_commit_hashes(conn, agent_id))?;
                 match (hashes.base_commit_hash, hashes.head_commit_hash) {
                     (Some(base), Some(head)) => wt_manager
                         .get_structured_diff_by_hashes(&base, &head)
@@ -294,7 +318,9 @@ impl EvaluatorAgent {
             messages: vec![Message {
                 role: MessageRole::User,
                 content: vec![ContentBlock::Text {
-                    text: "Please review the code changes above and output your evaluation as JSON.".to_string(),
+                    text:
+                        "Please review the code changes above and output your evaluation as JSON."
+                            .to_string(),
                 }],
                 cache_control: None,
             }],
@@ -440,9 +466,8 @@ impl EvaluatorAgent {
         repo_path: &PathBuf,
     ) -> Result<u32> {
         let db = self.app_handle.state::<Database>();
-        let annotations = db.with_conn(|conn| {
-            queries::get_annotations_for_agent(conn, agent_id, None)
-        })?;
+        let annotations =
+            db.with_conn(|conn| queries::get_annotations_for_agent(conn, agent_id, None))?;
 
         let fixable: Vec<_> = annotations
             .iter()
@@ -472,7 +497,10 @@ impl EvaluatorAgent {
                     if content.contains(original) {
                         let new_content = content.replacen(original, fixed, 1);
                         if let Err(e) = std::fs::write(&file_full_path, &new_content) {
-                            tracing::warn!("Evaluator: failed to write fix to {}: {e}", ann.file_path);
+                            tracing::warn!(
+                                "Evaluator: failed to write fix to {}: {e}",
+                                ann.file_path
+                            );
                             continue;
                         }
                         db.with_conn(|conn| {
@@ -504,7 +532,8 @@ impl EvaluatorAgent {
             match wt_manager.commit_worktree(agent_id, &commit_msg) {
                 Ok(Some(hash)) => {
                     tracing::info!("Evaluator: auto-fix commit {hash}");
-                    let _ = db.with_conn(|conn| queries::save_agent_head_commit(conn, agent_id, &hash));
+                    let _ =
+                        db.with_conn(|conn| queries::save_agent_head_commit(conn, agent_id, &hash));
                 }
                 Ok(None) => {
                     tracing::info!("Evaluator: auto-fix commit empty (no actual changes)");
@@ -531,23 +560,18 @@ impl EvaluatorAgent {
         Ok(PathBuf::from(path))
     }
 
-    fn check_quality_threshold(
-        &self,
-        agent_id: &str,
-        mission_id: &str,
-        score: f64,
-    ) -> Result<()> {
+    fn check_quality_threshold(&self, agent_id: &str, mission_id: &str, score: f64) -> Result<()> {
         let db = self.app_handle.state::<Database>();
-        let threshold = db.with_conn(|conn| {
-            queries::get_contract_quality_threshold(conn, mission_id)
-        })?;
+        let threshold =
+            db.with_conn(|conn| queries::get_contract_quality_threshold(conn, mission_id))?;
 
         if let Some(threshold) = threshold {
             if score < threshold {
                 tracing::info!(
                     "Evaluator: agent {agent_id} score {score} < threshold {threshold}, marking needs_revision"
                 );
-                let task_id = db.with_conn(|conn| queries::get_task_id_for_agent(conn, agent_id))?;
+                let task_id =
+                    db.with_conn(|conn| queries::get_task_id_for_agent(conn, agent_id))?;
                 if let Some(tid) = task_id {
                     let _ = db.with_conn(|conn| queries::mark_task_needs_revision(conn, &tid));
                 }
@@ -699,7 +723,8 @@ mod tests {
 
     #[test]
     fn strip_markdown_json() {
-        let wrapped = "```json\n{\"file_reviews\":[],\"overall_score\":8.0,\"summary\":\"ok\"}\n```";
+        let wrapped =
+            "```json\n{\"file_reviews\":[],\"overall_score\":8.0,\"summary\":\"ok\"}\n```";
         let result = EvaluatorAgent::parse_evaluation_json(wrapped).unwrap();
         assert_eq!(result.overall_score, 8.0);
     }

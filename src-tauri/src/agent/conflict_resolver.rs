@@ -117,8 +117,12 @@ impl LlmConflictResolver for LlmProviderResolver {
             .collect::<Vec<_>>()
             .join("");
 
-        let merged = post_process(&text)
-            .ok_or_else(|| anyhow!("LLM returned empty / invalid content for `{}`", conflict.path))?;
+        let merged = post_process(&text).ok_or_else(|| {
+            anyhow!(
+                "LLM returned empty / invalid content for `{}`",
+                conflict.path
+            )
+        })?;
 
         if merged.contains("<<<<<<<") || merged.contains(">>>>>>>") {
             return Err(anyhow!(

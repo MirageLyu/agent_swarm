@@ -32,12 +32,25 @@ pub enum Guardrail {
     FilesNonEmpty {
         globs: Vec<String>,
     },
+    SummaryMatches {
+        mode: SummaryMatchMode,
+    },
     LlmJudge {
         criteria: String,
         #[serde(default)]
         model: Option<String>,
     },
 }
+
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryMatchMode {
+    JsonCodeBlock,
+    TextCodeBlock,
+    ExactOk,
+}
+
 
 fn default_cmd_timeout() -> u32 {
     60
@@ -49,6 +62,7 @@ impl Guardrail {
             Self::ArtifactsExist => "artifacts_exist",
             Self::CommandPasses { .. } => "command_passes",
             Self::FilesNonEmpty { .. } => "files_non_empty",
+            Self::SummaryMatches { .. } => "summary_matches",
             Self::LlmJudge { .. } => "llm_judge",
         }
     }
@@ -151,6 +165,7 @@ async fn run_single(
             working_dir,
         } => check_command_passes(cmd, *timeout_sec, working_dir.as_deref(), ctx).await,
         Guardrail::FilesNonEmpty { globs } => check_files_non_empty(globs, ctx),
+        Guardrail::SummaryMatches { mode } => check_summary_matches(mode, ctx),
         Guardrail::LlmJudge { criteria, model } => {
             check_llm_judge(criteria, model.as_deref(), ctx).await
         }
@@ -237,8 +252,12 @@ async fn check_llm_judge(
         })
         .collect::<Vec<_>>()
         .join("");
-    let parsed = parse_judge_response(&text)
-        .with_context(|| format!("LlmJudge: failed to parse model output: {}", truncate(&text, 400)))?;
+    let parsed = parse_judge_response(&text).with_context(|| {
+        format!(
+            "LlmJudge: failed to parse model output: {}",
+            truncate(&text, 400)
+        )
+    })?;
     if parsed.passed {
         Ok(())
     } else {
@@ -259,14 +278,21 @@ struct LlmJudgeVerdict {
 fn parse_judge_response(text: &str) -> Result<LlmJudgeVerdict> {
     let trimmed = text.trim();
     let body = if trimmed.starts_with("```") {
-        let after_first_nl = trimmed.find('\n').map(|i| &trimmed[i + 1..]).unwrap_or(trimmed);
+        let after_first_nl = trimmed
+            .find('\n')
+            .map(|i| &trimmed[i + 1..])
+            .unwrap_or(trimmed);
         let close = after_first_nl.rfind("```").unwrap_or(after_first_nl.len());
         after_first_nl[..close].trim()
     } else {
         trimmed
     };
-    let start = body.find('{').ok_or_else(|| anyhow!("no '{{' in response"))?;
-    let end = body.rfind('}').ok_or_else(|| anyhow!("no '}}' in response"))?;
+    let start = body
+        .find('{')
+        .ok_or_else(|| anyhow!("no '{{' in response"))?;
+    let end = body
+        .rfind('}')
+        .ok_or_else(|| anyhow!("no '}}' in response"))?;
     if end < start {
         anyhow::bail!("malformed JSON braces");
     }
@@ -278,10 +304,7 @@ fn parse_judge_response(text: &str) -> Result<LlmJudgeVerdict> {
 
 // ---- ArtifactsExist ----
 
-async fn check_artifacts_exist(
-    ctx: &GuardrailContext<'_>,
-    db: &crate::db::Database,
-) -> Result<()> {
+async fn check_artifacts_exist(ctx: &GuardrailContext<'_>, db: &crate::db::Database) -> Result<()> {
     if ctx.produces.is_empty() {
         return Ok(());
     }
@@ -388,13 +411,11 @@ fn check_files_non_empty(globs: &[String], ctx: &GuardrailContext<'_>) -> Result
         let pattern = ctx.repo_root.join(g);
         let pattern_str = pattern.to_string_lossy().to_string();
         let mut any_match = false;
-        for entry in glob::glob(&pattern_str)
-            .map_err(|e| anyhow!("invalid glob `{g}`: {e}"))?
-        {
+        for entry in glob::glob(&pattern_str).map_err(|e| anyhow!("invalid glob `{g}`: {e}"))? {
             let path = entry.map_err(|e| anyhow!("glob iter err for `{g}`: {e}"))?;
             any_match = true;
-            let metadata = fs::metadata(&path)
-                .with_context(|| format!("stat `{}` failed", path.display()))?;
+            let metadata =
+                fs::metadata(&path).with_context(|| format!("stat `{}` failed", path.display()))?;
             if !metadata.is_file() {
                 continue;
             }
@@ -404,6 +425,40 @@ fn check_files_non_empty(globs: &[String], ctx: &GuardrailContext<'_>) -> Result
         }
         if !any_match {
             return Err(anyhow!("no files match glob `{g}`"));
+        }
+    }
+    Ok(())
+}
+
+// ---- SummaryMatches ----
+
+fn check_summary_matches(mode: &SummaryMatchMode, ctx: &GuardrailContext<'_>) -> Result<()> {
+    let summary = ctx
+        .completion_summary
+        .as_deref()
+        .unwrap_or("")
+        .trim();
+    match mode {
+        SummaryMatchMode::JsonCodeBlock => {
+            if !summary.contains("```json") || !summary.contains("```") {
+                return Err(anyhow!(
+                    "task_complete.summary must be the final JSON code block requested by the task, including ```json fences; do not summarize what you did"
+                ));
+            }
+        }
+        SummaryMatchMode::TextCodeBlock => {
+            if !summary.contains("```text") || !summary.contains("```") {
+                return Err(anyhow!(
+                    "task_complete.summary must be the final text code block requested by the task, including ```text fences; do not summarize what you did"
+                ));
+            }
+        }
+        SummaryMatchMode::ExactOk => {
+            if summary != "OK" {
+                return Err(anyhow!(
+                    "task_complete.summary must be exactly OK with no extra explanation"
+                ));
+            }
         }
     }
     Ok(())
@@ -441,16 +496,69 @@ mod tests {
             {"type":"artifacts_exist"},
             {"type":"command_passes","cmd":"echo hi","timeout_sec":5},
             {"type":"files_non_empty","globs":["src/**/*.rs"]},
+            {"type":"summary_matches","mode":"json_code_block"},
             {"type":"llm_judge","criteria":"is the code idiomatic?"}
         ]"#;
         let g = parse_guardrails(json);
-        assert_eq!(g.len(), 4);
+        assert_eq!(g.len(), 5);
         assert_eq!(g[0].name(), "artifacts_exist");
         assert_eq!(g[1].name(), "command_passes");
         assert_eq!(g[2].name(), "files_non_empty");
-        assert_eq!(g[3].name(), "llm_judge");
+        assert_eq!(g[3].name(), "summary_matches");
+        assert_eq!(g[4].name(), "llm_judge");
     }
 
+    #[tokio::test]
+    async fn summary_matches_rejects_meta_summary_for_json_block() {
+        let (db, mid, tid) = setup_db_with_mission_task();
+        let dir = TempDir::new().unwrap();
+        let ctx = GuardrailContext {
+            task_id: &tid,
+            mission_id: &mid,
+            repo_root: dir.path(),
+            expected_output: None,
+            produces: vec![],
+            task_description: None,
+            completion_summary: Some("I found the files and output JSON.".to_string()),
+            llm: None,
+            default_model: None,
+        };
+        let r = run_guardrails(
+            &[Guardrail::SummaryMatches {
+                mode: SummaryMatchMode::JsonCodeBlock,
+            }],
+            &ctx,
+            &db,
+        )
+        .await;
+        assert!(!r.all_passed);
+    }
+
+    #[tokio::test]
+    async fn summary_matches_accepts_json_block() {
+        let (db, mid, tid) = setup_db_with_mission_task();
+        let dir = TempDir::new().unwrap();
+        let ctx = GuardrailContext {
+            task_id: &tid,
+            mission_id: &mid,
+            repo_root: dir.path(),
+            expected_output: None,
+            produces: vec![],
+            task_description: None,
+            completion_summary: Some("```json\n{\"ok\": true}\n```".to_string()),
+            llm: None,
+            default_model: None,
+        };
+        let r = run_guardrails(
+            &[Guardrail::SummaryMatches {
+                mode: SummaryMatchMode::JsonCodeBlock,
+            }],
+            &ctx,
+            &db,
+        )
+        .await;
+        assert!(r.all_passed);
+    }
     #[tokio::test]
     async fn artifacts_exist_passes_when_no_produces_declared() {
         let (db, mid, tid) = setup_db_with_mission_task();
@@ -554,7 +662,11 @@ mod tests {
         };
         let r = run_guardrails(&[Guardrail::ArtifactsExist], &ctx, &db).await;
         assert!(!r.all_passed);
-        assert!(r.reports[0].error.as_ref().unwrap().contains("does not exist"));
+        assert!(r.reports[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("does not exist"));
     }
 
     #[tokio::test]
@@ -699,7 +811,11 @@ mod tests {
         };
         let r = run_guardrails(&[g], &ctx, &db).await;
         assert!(!r.all_passed);
-        assert!(r.reports[0].error.as_ref().unwrap().contains("no files match"));
+        assert!(r.reports[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("no files match"));
     }
 
     #[test]
@@ -711,14 +827,20 @@ mod tests {
 
     #[test]
     fn parse_judge_response_accepts_fenced_json() {
-        let v = parse_judge_response("```json\n{\"passed\": false, \"reason\": \"missing tests\"}\n```").unwrap();
+        let v = parse_judge_response(
+            "```json\n{\"passed\": false, \"reason\": \"missing tests\"}\n```",
+        )
+        .unwrap();
         assert!(!v.passed);
         assert!(v.reason.contains("tests"));
     }
 
     #[test]
     fn parse_judge_response_accepts_extra_prose() {
-        let v = parse_judge_response("Here is my verdict:\n{\"passed\": true, \"reason\": \"ok\"}\nDone.").unwrap();
+        let v = parse_judge_response(
+            "Here is my verdict:\n{\"passed\": true, \"reason\": \"ok\"}\nDone.",
+        )
+        .unwrap();
         assert!(v.passed);
     }
 
@@ -748,7 +870,11 @@ mod tests {
             default_model: None,
         };
         let r = run_guardrails(&[g], &ctx, &db).await;
-        assert!(r.all_passed, "expected pass when no provider available, got: {:?}", r.reports);
+        assert!(
+            r.all_passed,
+            "expected pass when no provider available, got: {:?}",
+            r.reports
+        );
     }
 
     #[tokio::test]

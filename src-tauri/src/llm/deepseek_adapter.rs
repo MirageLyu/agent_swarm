@@ -84,9 +84,7 @@ pub fn apply_thinking_off_for_deepseek_v4(request: &mut LlmRequest) {
         return;
     }
 
-    let extras = request
-        .provider_extras
-        .get_or_insert_with(|| json!({}));
+    let extras = request.provider_extras.get_or_insert_with(|| json!({}));
 
     let extras_obj = match extras.as_object_mut() {
         Some(o) => o,

@@ -106,7 +106,9 @@ pub fn parse_skill_md(
     //   <yaml>\n
     //   ---\n
     //   <body>
-    let stripped = content.strip_prefix("---\n").or_else(|| content.strip_prefix("---\r\n"));
+    let stripped = content
+        .strip_prefix("---\n")
+        .or_else(|| content.strip_prefix("---\r\n"));
     let after_open = match stripped {
         Some(s) => s,
         None => return Err(SkillParseError::MissingFrontmatter(source_path)),
@@ -158,11 +160,26 @@ pub fn parse_skill_md(
 /// 内置 6 skill。每个 SKILL.md 通过 `include_str!` 嵌入二进制。
 fn builtin_skills() -> Vec<Skill> {
     let entries: &[(&str, &str)] = &[
-        ("system-design", include_str!("builtin/system-design/SKILL.md")),
-        ("code-implementation", include_str!("builtin/code-implementation/SKILL.md")),
-        ("refactoring-patterns", include_str!("builtin/refactoring-patterns/SKILL.md")),
-        ("test-authoring", include_str!("builtin/test-authoring/SKILL.md")),
-        ("integration-glue", include_str!("builtin/integration-glue/SKILL.md")),
+        (
+            "system-design",
+            include_str!("builtin/system-design/SKILL.md"),
+        ),
+        (
+            "code-implementation",
+            include_str!("builtin/code-implementation/SKILL.md"),
+        ),
+        (
+            "refactoring-patterns",
+            include_str!("builtin/refactoring-patterns/SKILL.md"),
+        ),
+        (
+            "test-authoring",
+            include_str!("builtin/test-authoring/SKILL.md"),
+        ),
+        (
+            "integration-glue",
+            include_str!("builtin/integration-glue/SKILL.md"),
+        ),
         ("research", include_str!("builtin/research/SKILL.md")),
     ];
 
@@ -172,8 +189,10 @@ fn builtin_skills() -> Vec<Skill> {
             match parse_skill_md(content, id, SkillSource::Builtin, format!("builtin://{id}")) {
                 Ok(s) => Some(s),
                 Err(e) => {
-                    tracing::error!("[skills] builtin skill `{id}` failed to parse: {e}. \
-                        This is a bundled-asset bug, please file an issue.");
+                    tracing::error!(
+                        "[skills] builtin skill `{id}` failed to parse: {e}. \
+                        This is a bundled-asset bug, please file an issue."
+                    );
                     None
                 }
             }
@@ -297,14 +316,16 @@ fn scan_dir(root: &Path, source: SkillSource, sink: &mut Vec<Skill>) {
         let content = match std::fs::read_to_string(&skill_md) {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(
-                    "[skills] failed to read {}: {e}",
-                    skill_md.display()
-                );
+                tracing::warn!("[skills] failed to read {}: {e}", skill_md.display());
                 continue;
             }
         };
-        match parse_skill_md(&content, &dir_name, source, skill_md.to_string_lossy().into_owned()) {
+        match parse_skill_md(
+            &content,
+            &dir_name,
+            source,
+            skill_md.to_string_lossy().into_owned(),
+        ) {
             Ok(skill) => sink.push(skill),
             Err(e) => tracing::warn!("[skills] skipping {}: {e}", skill_md.display()),
         }
@@ -375,9 +396,11 @@ mod tests {
             compatible_roles: [implementer]\n\
             ---\n\
             body here";
-        let s =
-            parse_skill_md(md, "rust-async", SkillSource::User, "/tmp/x".into()).unwrap();
-        assert_eq!(s.frontmatter.tools.unwrap(), vec!["read_file", "write_file"]);
+        let s = parse_skill_md(md, "rust-async", SkillSource::User, "/tmp/x".into()).unwrap();
+        assert_eq!(
+            s.frontmatter.tools.unwrap(),
+            vec!["read_file", "write_file"]
+        );
         assert_eq!(s.frontmatter.compatible_roles.unwrap(), vec!["implementer"]);
     }
 
@@ -406,7 +429,11 @@ mod tests {
             "integration-glue",
             "research",
         ] {
-            assert!(ids.contains(&expected), "missing builtin skill: {}", expected);
+            assert!(
+                ids.contains(&expected),
+                "missing builtin skill: {}",
+                expected
+            );
         }
     }
 
@@ -445,11 +472,19 @@ mod tests {
     fn validate_skill_role_compatibility() {
         let reg = build_registry(None);
         // refactoring-patterns 兼容 refactorer / implementer
-        assert!(reg.validate_skill_role("refactoring-patterns", "refactorer").is_ok());
-        assert!(reg.validate_skill_role("refactoring-patterns", "implementer").is_ok());
-        assert!(reg.validate_skill_role("refactoring-patterns", "tester").is_err());
+        assert!(reg
+            .validate_skill_role("refactoring-patterns", "refactorer")
+            .is_ok());
+        assert!(reg
+            .validate_skill_role("refactoring-patterns", "implementer")
+            .is_ok());
+        assert!(reg
+            .validate_skill_role("refactoring-patterns", "tester")
+            .is_err());
         // unknown skill
-        assert!(reg.validate_skill_role("nonexistent", "implementer").is_err());
+        assert!(reg
+            .validate_skill_role("nonexistent", "implementer")
+            .is_err());
     }
 
     #[test]

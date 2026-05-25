@@ -67,7 +67,9 @@ pub struct CacheControl {
 
 impl CacheControl {
     pub fn ephemeral() -> Self {
-        Self { control_type: "ephemeral".to_string() }
+        Self {
+            control_type: "ephemeral".to_string(),
+        }
     }
 }
 
@@ -90,7 +92,9 @@ pub struct TokenUsage {
 
 impl TokenUsage {
     pub fn cache_hit_ratio(&self) -> f64 {
-        if self.input_tokens == 0 { return 0.0; }
+        if self.input_tokens == 0 {
+            return 0.0;
+        }
         self.cache_read_input_tokens as f64 / self.input_tokens as f64
     }
 }

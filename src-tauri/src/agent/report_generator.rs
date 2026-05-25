@@ -253,7 +253,10 @@ pub async fn generate_mission_report(
                     fallback_executive_and_decisions(&aggregate)
                 }
                 Err(_) => {
-                    tracing::warn!(mission_id, "LLM enhancement timed out (30s), using fallback");
+                    tracing::warn!(
+                        mission_id,
+                        "LLM enhancement timed out (30s), using fallback"
+                    );
                     fallback_executive_and_decisions(&aggregate)
                 }
             }
@@ -397,7 +400,10 @@ fn aggregate_data(conn: &Connection, mission_id: &str) -> Result<AggregateData> 
     let task_matrix = collect_task_matrix(conn, mission_id)?;
 
     let tasks_total = task_matrix.len() as i64;
-    let tasks_completed = task_matrix.iter().filter(|t| t.status == "completed").count() as i64;
+    let tasks_completed = task_matrix
+        .iter()
+        .filter(|t| t.status == "completed")
+        .count() as i64;
     let tasks_failed = task_matrix
         .iter()
         .filter(|t| t.status == "failed" || t.status == "cancelled")
@@ -481,7 +487,9 @@ fn aggregate_data(conn: &Connection, mission_id: &str) -> Result<AggregateData> 
                     t.title,
                     agent,
                     t.status,
-                    t.score.map(|s| format!("{:.1}", s)).unwrap_or_else(|| "-".into())
+                    t.score
+                        .map(|s| format!("{:.1}", s))
+                        .unwrap_or_else(|| "-".into())
                 ))
             })
             .collect(),
@@ -532,7 +540,16 @@ fn collect_task_matrix(conn: &Connection, mission_id: &str) -> Result<Vec<Report
          ORDER BY t.created_at ASC",
     )?;
 
-    let rows: Vec<(String, String, String, String, Option<String>, Option<String>, Option<String>, f64)> = stmt
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        f64,
+    )> = stmt
         .query_map([mission_id], |r| {
             Ok((
                 r.get(0)?,
@@ -585,10 +602,7 @@ fn collect_task_matrix(conn: &Connection, mission_id: &str) -> Result<Vec<Report
     Ok(out)
 }
 
-fn collect_evaluator_review(
-    conn: &Connection,
-    mission_id: &str,
-) -> Result<ReportEvaluatorReview> {
+fn collect_evaluator_review(conn: &Connection, mission_id: &str) -> Result<ReportEvaluatorReview> {
     // 所有 evaluator_reviews + 关联的 task title + annotation 计数
     let mut stmt = conn.prepare(
         "SELECT er.id, er.agent_id, er.overall_score, er.summary, er.created_at,
@@ -602,7 +616,15 @@ fn collect_evaluator_review(
 
     let rows: Vec<(String, String, f64, String, String, String, Option<String>)> = stmt
         .query_map([mission_id], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
@@ -617,7 +639,12 @@ fn collect_evaluator_review(
                 "SELECT COUNT(*), SUM(CASE WHEN status = 'auto_fixed' THEN 1 ELSE 0 END)
                  FROM evaluator_annotations WHERE review_id = ?1",
                 [&review_id],
-                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?.unwrap_or(0))),
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    ))
+                },
             )
             .unwrap_or((0, 0));
 
@@ -722,9 +749,7 @@ fn collect_cost_breakdown(
         .ok()
         .flatten();
 
-    let budget_used_ratio = budget_usd
-        .filter(|b| *b > 0.0)
-        .map(|b| total_cost_usd / b);
+    let budget_used_ratio = budget_usd.filter(|b| *b > 0.0).map(|b| total_cost_usd / b);
 
     Ok(ReportCostBreakdown {
         total_usd: summary.total_cost,
@@ -864,8 +889,7 @@ fn derive_limitations(data: &AggregateData) -> Vec<String> {
     }
 
     if data.evaluator_review.rounds.is_empty() && data.metrics.tasks_completed > 0 {
-        limitations
-            .push("Evaluator 未对任一 agent 产生评审记录，质量数据缺失。".to_string());
+        limitations.push("Evaluator 未对任一 agent 产生评审记录，质量数据缺失。".to_string());
     }
 
     limitations
@@ -961,7 +985,10 @@ fn build_llm_prompt(data: &AggregateData) -> String {
     let mut prompt = String::with_capacity(2048);
     prompt.push_str("Mission summary data (extract decisions and write executive summary):\n\n");
     prompt.push_str(&format!("Title: {}\n", data.llm_hint.mission_title));
-    prompt.push_str(&format!("Description: {}\n", data.llm_hint.mission_description));
+    prompt.push_str(&format!(
+        "Description: {}\n",
+        data.llm_hint.mission_description
+    ));
     prompt.push_str(&format!("Status: {}\n", data.llm_hint.status));
     prompt.push_str(&format!(
         "Tasks: {} total, {} completed, {} failed\n",
@@ -1037,7 +1064,9 @@ fn parse_llm_enhancement(text: &str) -> Result<LlmEnhancement> {
         .trim();
 
     // 截取第一个 { 到匹配的 }
-    let start = cleaned.find('{').context("no JSON object in LLM response")?;
+    let start = cleaned
+        .find('{')
+        .context("no JSON object in LLM response")?;
     let json_str = &cleaned[start..];
     // 简单平衡花括号；嵌套深度 >100 直接放弃
     let mut depth = 0i32;
@@ -1061,9 +1090,7 @@ fn parse_llm_enhancement(text: &str) -> Result<LlmEnhancement> {
     Ok(parsed)
 }
 
-fn fallback_executive_and_decisions(
-    data: &AggregateData,
-) -> (String, Vec<ReportDecision>) {
+fn fallback_executive_and_decisions(data: &AggregateData) -> (String, Vec<ReportDecision>) {
     let m = &data.metrics;
     let executive = format!(
         "Mission「{}」当前状态为 {}。共 {} 个任务，{} 个完成、{} 个失败/取消，\
@@ -1118,12 +1145,13 @@ fn fallback_executive_and_decisions(
 pub fn render_markdown(report: &MissionReport) -> String {
     let mut md = String::with_capacity(4096);
 
-    md.push_str(&format!("# Mission Report — {}\n\n", escape_md(&report.mission.title)));
+    md.push_str(&format!(
+        "# Mission Report — {}\n\n",
+        escape_md(&report.mission.title)
+    ));
     md.push_str(&format!(
         "> Status: **{}** · Duration: {}s · Cost: ${:.4}\n\n",
-        report.mission.status,
-        report.mission.duration_seconds,
-        report.mission.total_cost_usd
+        report.mission.status, report.mission.duration_seconds, report.mission.total_cost_usd
     ));
 
     if !report.mission.description.is_empty() {
@@ -1152,7 +1180,10 @@ pub fn render_markdown(report: &MissionReport) -> String {
     if let Some(s) = report.summary.metrics.avg_quality_score {
         md.push_str(&format!("| Avg Quality Score | {:.2} |\n", s));
     }
-    md.push_str(&format!("| Auto-fixes | {} |\n", report.summary.metrics.auto_fixes));
+    md.push_str(&format!(
+        "| Auto-fixes | {} |\n",
+        report.summary.metrics.auto_fixes
+    ));
     // P1-2 Phase B：仅在发生过 fallback 时渲染行，避免 0 值给绝大多数 mission 添噪音
     if report.summary.metrics.fallback_switches_total > 0 {
         md.push_str(&format!(
@@ -1209,7 +1240,9 @@ pub fn render_markdown(report: &MissionReport) -> String {
                 "| {} | {} | {} | ${:.4} | {} |\n",
                 escape_md_cell(&t.title),
                 escape_md_cell(t.agent_name.as_deref().unwrap_or("-")),
-                t.score.map(|s| format!("{:.1}", s)).unwrap_or_else(|| "-".into()),
+                t.score
+                    .map(|s| format!("{:.1}", s))
+                    .unwrap_or_else(|| "-".into()),
                 t.cost_usd,
                 t.status
             ));
@@ -1555,7 +1588,8 @@ mod tests {
              VALUES ('ag1', 'OAuth Agent', 't1', 'completed', '/tmp/wt-1',
                      '2026-04-29 10:05:00', '2026-04-29 10:20:00')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO cost_records (id, agent_id, task_id, model, input_tokens, output_tokens, cost_usd)
              VALUES ('cr1', 'ag1', 't1', 'claude-sonnet-4-5', 1000, 500, 0.05)",
@@ -1573,7 +1607,10 @@ mod tests {
         assert_eq!(report.mission.id, "m1");
         assert_eq!(report.mission.title, "Build login flow");
         assert_eq!(report.mission.status, "completed");
-        assert_eq!(report.mission.duration_seconds, 1800, "10:00 → 10:30 == 1800s");
+        assert_eq!(
+            report.mission.duration_seconds, 1800,
+            "10:00 → 10:30 == 1800s"
+        );
         assert!((report.mission.total_cost_usd - 0.05).abs() < 1e-9);
 
         assert_eq!(report.summary.metrics.tasks_total, 1);
@@ -1652,14 +1689,16 @@ mod tests {
             "INSERT INTO mission_contracts (id, mission_id, status, budget_usd, quality_threshold)
              VALUES ('c1', 'm1', 'signed', 1.0, 7.5)",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO contract_items (id, contract_id, section, text, source) VALUES
              ('ci1', 'c1', 'scope', 'OAuth2 login flow', 'user'),
              ('ci2', 'c1', 'constraints', 'No third-party SDK', 'user'),
              ('ci3', 'c1', 'exclusions', 'No password reset', 'user')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         let report = aggregate_data_for_test(&conn, "m1").unwrap();
 
@@ -1670,10 +1709,28 @@ mod tests {
         assert_eq!(c.items.len(), 3);
 
         // mission completed → scope/constraints achieved=true
-        assert!(c.items.iter().find(|i| i.section == "scope").unwrap().achieved);
-        assert!(c.items.iter().find(|i| i.section == "constraints").unwrap().achieved);
+        assert!(
+            c.items
+                .iter()
+                .find(|i| i.section == "scope")
+                .unwrap()
+                .achieved
+        );
+        assert!(
+            c.items
+                .iter()
+                .find(|i| i.section == "constraints")
+                .unwrap()
+                .achieved
+        );
         // exclusions 默认 true（无需主动验证）
-        assert!(c.items.iter().find(|i| i.section == "exclusions").unwrap().achieved);
+        assert!(
+            c.items
+                .iter()
+                .find(|i| i.section == "exclusions")
+                .unwrap()
+                .achieved
+        );
 
         assert_eq!(report.cost_breakdown.budget_usd, Some(1.0));
         // budget_used_ratio = 0.05 / 1.0 = 0.05
@@ -1693,12 +1750,14 @@ mod tests {
         conn.execute(
             "INSERT INTO mission_contracts (id, mission_id, status) VALUES ('c2', 'm2', 'signed')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO contract_items (id, contract_id, section, text, source)
              VALUES ('ci-x', 'c2', 'scope', 'Build the thing', 'user')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         let report = aggregate_data_for_test(&conn, "m2").unwrap();
         let scope = report
@@ -1719,20 +1778,25 @@ mod tests {
             "INSERT INTO missions (id, title, status, created_at, updated_at)
              VALUES ('m3', 'Mixed', 'completed', '2026-04-29 09:00:00', '2026-04-29 09:30:00')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO tasks (id, mission_id, title, status, created_at) VALUES
              ('t1', 'm3', 'A', 'completed', '2026-04-29 09:05:00'),
              ('t2', 'm3', 'B', 'failed', '2026-04-29 09:10:00'),
              ('t3', 'm3', 'C', 'cancelled', '2026-04-29 09:15:00')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         let report = aggregate_data_for_test(&conn, "m3").unwrap();
         assert_eq!(report.summary.metrics.tasks_total, 3);
         assert_eq!(report.summary.metrics.tasks_completed, 1);
         assert_eq!(report.summary.metrics.tasks_failed, 2);
-        assert!(report.limitations.iter().any(|l| l.contains("2 个任务未完成")));
+        assert!(report
+            .limitations
+            .iter()
+            .any(|l| l.contains("2 个任务未完成")));
     }
 
     #[test]

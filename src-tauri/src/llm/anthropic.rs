@@ -272,8 +272,7 @@ impl LlmProvider for AnthropicProvider {
                                 }
                             }
                             Some("message_start") => {
-                                if let Some(inp) =
-                                    data["message"]["usage"]["input_tokens"].as_u64()
+                                if let Some(inp) = data["message"]["usage"]["input_tokens"].as_u64()
                                 {
                                     usage.input_tokens = inp;
                                 }

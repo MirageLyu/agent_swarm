@@ -53,7 +53,11 @@ pub struct IpcError {
 
 impl IpcError {
     pub fn new(code: impl Into<String>) -> Self {
-        Self { code: code.into(), params: Value::Null, detail: None }
+        Self {
+            code: code.into(),
+            params: Value::Null,
+            detail: None,
+        }
     }
 
     pub fn with_param(mut self, key: &str, value: impl Into<Value>) -> Self {
@@ -161,8 +165,7 @@ mod tests {
 
     #[test]
     fn detail_is_preserved() {
-        let err = IpcError::workspace_invalid("not a directory")
-            .with_detail("path: /tmp/x");
+        let err = IpcError::workspace_invalid("not a directory").with_detail("path: /tmp/x");
         let s = err.to_string();
         assert!(s.contains("\"detail\":\"path: /tmp/x\""));
     }

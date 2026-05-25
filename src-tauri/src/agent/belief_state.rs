@@ -164,16 +164,56 @@ impl PreflightBeliefState {
 
 pub fn default_slot_definitions() -> Vec<SlotDefinition> {
     vec![
-        SlotDefinition { id: "primary_goal".into(), weight: 0.20, section: "scope".into() },
-        SlotDefinition { id: "target_users".into(), weight: 0.10, section: "scope".into() },
-        SlotDefinition { id: "key_features".into(), weight: 0.15, section: "scope".into() },
-        SlotDefinition { id: "tech_constraints".into(), weight: 0.10, section: "constraints".into() },
-        SlotDefinition { id: "performance_targets".into(), weight: 0.05, section: "constraints".into() },
-        SlotDefinition { id: "security_requirements".into(), weight: 0.08, section: "constraints".into() },
-        SlotDefinition { id: "integration_points".into(), weight: 0.07, section: "scope".into() },
-        SlotDefinition { id: "out_of_scope".into(), weight: 0.10, section: "exclusions".into() },
-        SlotDefinition { id: "risk_assumptions".into(), weight: 0.08, section: "assumptions".into() },
-        SlotDefinition { id: "timeline_budget".into(), weight: 0.07, section: "constraints".into() },
+        SlotDefinition {
+            id: "primary_goal".into(),
+            weight: 0.20,
+            section: "scope".into(),
+        },
+        SlotDefinition {
+            id: "target_users".into(),
+            weight: 0.10,
+            section: "scope".into(),
+        },
+        SlotDefinition {
+            id: "key_features".into(),
+            weight: 0.15,
+            section: "scope".into(),
+        },
+        SlotDefinition {
+            id: "tech_constraints".into(),
+            weight: 0.10,
+            section: "constraints".into(),
+        },
+        SlotDefinition {
+            id: "performance_targets".into(),
+            weight: 0.05,
+            section: "constraints".into(),
+        },
+        SlotDefinition {
+            id: "security_requirements".into(),
+            weight: 0.08,
+            section: "constraints".into(),
+        },
+        SlotDefinition {
+            id: "integration_points".into(),
+            weight: 0.07,
+            section: "scope".into(),
+        },
+        SlotDefinition {
+            id: "out_of_scope".into(),
+            weight: 0.10,
+            section: "exclusions".into(),
+        },
+        SlotDefinition {
+            id: "risk_assumptions".into(),
+            weight: 0.08,
+            section: "assumptions".into(),
+        },
+        SlotDefinition {
+            id: "timeline_budget".into(),
+            weight: 0.07,
+            section: "constraints".into(),
+        },
     ]
 }
 
@@ -183,26 +223,91 @@ pub fn map_contract_item_to_slot(section: &str, item: &str) -> Option<&'static s
 
     match section {
         "scope" => {
-            if contains_any(&lower, &["目标", "核心", "主要", "goal", "objective", "primary", "purpose"]) {
+            if contains_any(
+                &lower,
+                &[
+                    "目标",
+                    "核心",
+                    "主要",
+                    "goal",
+                    "objective",
+                    "primary",
+                    "purpose",
+                ],
+            ) {
                 Some("primary_goal")
-            } else if contains_any(&lower, &["用户", "角色", "受众", "user", "audience", "target user", "persona"]) {
+            } else if contains_any(
+                &lower,
+                &[
+                    "用户",
+                    "角色",
+                    "受众",
+                    "user",
+                    "audience",
+                    "target user",
+                    "persona",
+                ],
+            ) {
                 Some("target_users")
-            } else if contains_any(&lower, &["集成", "接入", "对接", "integration", "api", "interface", "third-party"]) {
+            } else if contains_any(
+                &lower,
+                &[
+                    "集成",
+                    "接入",
+                    "对接",
+                    "integration",
+                    "api",
+                    "interface",
+                    "third-party",
+                ],
+            ) {
                 Some("integration_points")
-            } else if contains_any(&lower, &["功能", "特性", "模块", "feature", "capability", "implement"]) {
+            } else if contains_any(
+                &lower,
+                &["功能", "特性", "模块", "feature", "capability", "implement"],
+            ) {
                 Some("key_features")
             } else {
                 Some("key_features")
             }
         }
         "constraints" => {
-            if contains_any(&lower, &["技术", "框架", "语言", "tech", "framework", "stack", "language"]) {
+            if contains_any(
+                &lower,
+                &[
+                    "技术",
+                    "框架",
+                    "语言",
+                    "tech",
+                    "framework",
+                    "stack",
+                    "language",
+                ],
+            ) {
                 Some("tech_constraints")
-            } else if contains_any(&lower, &["性能", "速度", "延迟", "performance", "latency", "throughput"]) {
+            } else if contains_any(
+                &lower,
+                &[
+                    "性能",
+                    "速度",
+                    "延迟",
+                    "performance",
+                    "latency",
+                    "throughput",
+                ],
+            ) {
                 Some("performance_targets")
-            } else if contains_any(&lower, &["安全", "权限", "认证", "security", "auth", "encryption"]) {
+            } else if contains_any(
+                &lower,
+                &["安全", "权限", "认证", "security", "auth", "encryption"],
+            ) {
                 Some("security_requirements")
-            } else if contains_any(&lower, &["时间", "预算", "期限", "timeline", "budget", "deadline", "schedule"]) {
+            } else if contains_any(
+                &lower,
+                &[
+                    "时间", "预算", "期限", "timeline", "budget", "deadline", "schedule",
+                ],
+            ) {
                 Some("timeline_budget")
             } else {
                 Some("tech_constraints")
@@ -331,10 +436,20 @@ mod tests {
     #[test]
     fn ut_10_2_4f_slot_no_regress() {
         let mut bs = PreflightBeliefState::new();
-        bs.update_slot("primary_goal", SlotStatus::Confirmed, Some("goal".into()), 1);
+        bs.update_slot(
+            "primary_goal",
+            SlotStatus::Confirmed,
+            Some("goal".into()),
+            1,
+        );
         assert_eq!(bs.slots["primary_goal"].status, SlotStatus::Confirmed);
 
-        bs.update_slot("primary_goal", SlotStatus::Tentative, Some("updated".into()), 2);
+        bs.update_slot(
+            "primary_goal",
+            SlotStatus::Tentative,
+            Some("updated".into()),
+            2,
+        );
         assert_eq!(bs.slots["primary_goal"].status, SlotStatus::Confirmed);
     }
 

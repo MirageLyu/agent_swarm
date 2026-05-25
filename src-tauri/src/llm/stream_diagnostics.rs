@@ -163,14 +163,14 @@ impl StreamRegistry {
     /// 拍一份当前所有活跃 stream 的快照。
     pub fn snapshot_all(&self) -> Vec<(u64, StatsSnapshot)> {
         let guard = self.inner.lock().expect("StreamRegistry mutex poisoned");
-        guard
-            .iter()
-            .map(|(id, s)| (*id, s.snapshot()))
-            .collect()
+        guard.iter().map(|(id, s)| (*id, s.snapshot())).collect()
     }
 
     pub fn active_count(&self) -> usize {
-        self.inner.lock().expect("StreamRegistry mutex poisoned").len()
+        self.inner
+            .lock()
+            .expect("StreamRegistry mutex poisoned")
+            .len()
     }
 
     fn unregister(&self, id: u64) {
@@ -267,10 +267,12 @@ pub async fn probe_endpoint(endpoint_url: &str) -> ProbeOutcome {
 fn url_origin(full: &str) -> Option<String> {
     let scheme_end = full.find("://")?;
     let after_scheme = &full[scheme_end + 3..];
-    let host_end = after_scheme
-        .find('/')
-        .unwrap_or(after_scheme.len());
-    Some(format!("{}://{}/", &full[..scheme_end], &after_scheme[..host_end]))
+    let host_end = after_scheme.find('/').unwrap_or(after_scheme.len());
+    Some(format!(
+        "{}://{}/",
+        &full[..scheme_end],
+        &after_scheme[..host_end]
+    ))
 }
 
 #[cfg(test)]

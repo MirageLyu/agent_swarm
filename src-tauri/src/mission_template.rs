@@ -209,10 +209,7 @@ mod tests {
     use super::*;
     use crate::commands::{MissionInfo, TaskInfo};
 
-    fn make_detail(
-        tasks: Vec<(&str, &str, &str, &str)>,
-        deps: Vec<(&str, &str)>,
-    ) -> MissionDetail {
+    fn make_detail(tasks: Vec<(&str, &str, &str, &str)>, deps: Vec<(&str, &str)>) -> MissionDetail {
         MissionDetail {
             mission: MissionInfo {
                 id: "m1".into(),
@@ -322,12 +319,7 @@ tasks:
                 ("u3", "Right", "right", "medium"),
                 ("u4", "Merge", "merge", "high"),
             ],
-            vec![
-                ("u2", "u1"),
-                ("u3", "u1"),
-                ("u4", "u2"),
-                ("u4", "u3"),
-            ],
+            vec![("u2", "u1"), ("u3", "u1"), ("u4", "u2"), ("u4", "u3")],
         );
         let tpl = build_template(&detail);
 
@@ -408,7 +400,12 @@ tasks:
     #[test]
     fn roundtrip_preserves_special_chars_in_strings() {
         let detail = make_detail(
-            vec![("u1", "Task: \"hello\" & 'world'", "line1\nline2\ttab", "low")],
+            vec![(
+                "u1",
+                "Task: \"hello\" & 'world'",
+                "line1\nline2\ttab",
+                "low",
+            )],
             vec![],
         );
         let tpl = build_template(&detail);
@@ -954,7 +951,8 @@ tasks:
     #[test]
     fn accept_wide_fan_out_dag() {
         let mut tasks_yaml = String::new();
-        tasks_yaml.push_str("  - id: T1\n    title: Root\n    description: d\n    complexity: low\n");
+        tasks_yaml
+            .push_str("  - id: T1\n    title: Root\n    description: d\n    complexity: low\n");
         for i in 2..=50 {
             tasks_yaml.push_str(&format!(
                 "  - id: T{i}\n    title: Fan {i}\n    description: d\n    complexity: low\n    depends_on: [T1]\n"

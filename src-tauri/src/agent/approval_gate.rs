@@ -120,10 +120,9 @@ pub async fn maybe_intercept_tool(
 
     match outcome.decision {
         ApprovalDecision::Approved => ToolGateOutcome::Allow,
-        ApprovalDecision::Rejected => ToolGateOutcome::Rejected(reject_tool_output(
-            tool_name,
-            outcome.note.as_deref(),
-        )),
+        ApprovalDecision::Rejected => {
+            ToolGateOutcome::Rejected(reject_tool_output(tool_name, outcome.note.as_deref()))
+        }
         ApprovalDecision::Expired => ToolGateOutcome::Rejected(ToolOutput {
             content: json!({
                 "error": "approval_expired",
@@ -265,7 +264,10 @@ pub async fn maybe_trigger_budget(
     agent_id: &str,
 ) -> Option<ApprovalDecision> {
     use tauri::Manager;
-    let policy = app.try_state::<ConfigManager>()?.get_config_snapshot().approval_policy;
+    let policy = app
+        .try_state::<ConfigManager>()?
+        .get_config_snapshot()
+        .approval_policy;
     let (used, budget) = budget_check(db, mission_id, policy.budget_warn_ratio)?;
     let timeout_secs = policy.timeout_seconds as i64;
     let pct = ((used / budget) * 100.0).round();
@@ -300,7 +302,11 @@ mod tests {
     fn pol() -> ApprovalPolicy {
         ApprovalPolicy {
             timeout_seconds: 600,
-            protected_paths: vec!["package.json".into(), ".github/".into(), "src/critical.rs".into()],
+            protected_paths: vec![
+                "package.json".into(),
+                ".github/".into(),
+                "src/critical.rs".into(),
+            ],
             destructive_commands: vec!["rm".into(), "git push".into(), "npm publish".into()],
             budget_warn_ratio: 0.8,
             chat_commit_soft_lines: 10,

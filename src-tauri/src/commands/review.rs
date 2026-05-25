@@ -40,8 +40,7 @@ pub fn get_agent_diff(
         })
         .map_err(|e: anyhow::Error| e.to_string())?;
 
-    let worktree_path =
-        worktree_path.ok_or_else(|| "Agent has no worktree path".to_string())?;
+    let worktree_path = worktree_path.ok_or_else(|| "Agent has no worktree path".to_string())?;
 
     let wt_path = PathBuf::from(&worktree_path);
     let repo_path = wt_path
@@ -99,7 +98,9 @@ pub fn submit_review_action(
         ));
     }
 
-    if request.action == "revision_requested" && request.comment.as_deref().unwrap_or("").trim().is_empty() {
+    if request.action == "revision_requested"
+        && request.comment.as_deref().unwrap_or("").trim().is_empty()
+    {
         return Err("Request Revision requires a non-empty comment".to_string());
     }
 
@@ -239,7 +240,10 @@ pub fn get_evaluation_result(
                 .with_conn(|conn| queries::get_annotations_for_agent(conn, &agent_id, None))
                 .map_err(|e| e.to_string())?;
 
-            let auto_fixed_count = annotations.iter().filter(|a| a.status == "auto_fixed").count() as u32;
+            let auto_fixed_count = annotations
+                .iter()
+                .filter(|a| a.status == "auto_fixed")
+                .count() as u32;
             let needs_review_count = annotations
                 .iter()
                 .filter(|a| a.status == "open" || a.status == "revision_requested")
@@ -267,7 +271,11 @@ pub fn get_annotations(
     let db = app.state::<Database>();
     let rows = db
         .with_conn(|conn| {
-            queries::get_annotations_for_agent(conn, &request.agent_id, request.file_path.as_deref())
+            queries::get_annotations_for_agent(
+                conn,
+                &request.agent_id,
+                request.file_path.as_deref(),
+            )
         })
         .map_err(|e| e.to_string())?;
 
@@ -308,7 +316,9 @@ pub fn update_annotation_status(
 
     let db = app.state::<Database>();
     let updated = db
-        .with_conn(|conn| queries::update_annotation_status(conn, &request.annotation_id, &request.status))
+        .with_conn(|conn| {
+            queries::update_annotation_status(conn, &request.annotation_id, &request.status)
+        })
         .map_err(|e| e.to_string())?;
 
     if !updated {

@@ -369,7 +369,9 @@ mod defs {
                 "Execute a shell command (sh -c). Killed by a watchdog when it goes silent for \
                  too long or runs past the wall-clock cap. Default thresholds are 60s idle / \
                  5min wall — set `expect_long_running: true` for known long commands like \
-                 `npm install`, `cargo build`, `cargo test` (raises to 120s idle / 30min wall)."
+                 `npm install`, `cargo build`, `cargo test` (raises to 120s idle / 30min wall), \
+                 or pass `timeout_seconds` / `idle_timeout_seconds` for an explicit command-level cap. \
+                 The subprocess inherits the agent environment, including proxy variables like ALL_PROXY."
                     .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -378,6 +380,14 @@ mod defs {
                     "expect_long_running": {
                         "type": "boolean",
                         "description": "Set to true for installs / heavy builds / long test suites."
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": "Optional wall-clock timeout for this command in seconds. Must be between 1 and 1800."
+                    },
+                    "idle_timeout_seconds": {
+                        "type": "integer",
+                        "description": "Optional idle timeout in seconds with no stdout/stderr. Must be between 1 and 120."
                     }
                 },
                 "required": ["command"]
@@ -439,7 +449,10 @@ mod tests {
         // 给 LLM 看的 tool 列表里必须是 grep，不能漏；search_files 不应作为独立条目重复出现。
         let defs = all_definitions();
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-        assert!(names.contains(&"grep"), "grep must be exposed; got {names:?}");
+        assert!(
+            names.contains(&"grep"),
+            "grep must be exposed; got {names:?}"
+        );
         assert!(
             !names.contains(&"search_files"),
             "search_files should be alias-only (hidden from LLM), got {names:?}"
@@ -451,7 +464,14 @@ mod tests {
         // LLM 命名识别基础：description 第一段应明示 ripgrep + 区分 glob 用途。
         let def = lookup("grep").unwrap().definition();
         let desc = def.description.to_lowercase();
-        assert!(desc.contains("ripgrep"), "desc must mention ripgrep: {}", def.description);
-        assert!(desc.contains("glob"), "desc should hint when to use glob instead");
+        assert!(
+            desc.contains("ripgrep"),
+            "desc must mention ripgrep: {}",
+            def.description
+        );
+        assert!(
+            desc.contains("glob"),
+            "desc should hint when to use glob instead"
+        );
     }
 }

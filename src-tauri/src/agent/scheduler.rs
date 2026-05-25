@@ -123,18 +123,16 @@ impl Scheduler {
         app: &tauri::AppHandle,
     ) -> Result<String> {
         let db = app.state::<Database>();
-        if let Some(existing) = db.with_conn(|conn| queries::get_mission_main_branch(conn, mission_id))? {
-            tracing::debug!(
-                "Scheduler: mission {mission_id} main branch from cache = {existing}"
-            );
+        if let Some(existing) =
+            db.with_conn(|conn| queries::get_mission_main_branch(conn, mission_id))?
+        {
+            tracing::debug!("Scheduler: mission {mission_id} main branch from cache = {existing}");
             return Ok(existing);
         }
         let manager = WorktreeManager::new(repo_path.clone());
         let detected = manager.detect_main_branch()?;
         db.with_conn(|conn| queries::set_mission_main_branch(conn, mission_id, &detected))?;
-        tracing::info!(
-            "Scheduler: detected main branch '{detected}' for mission {mission_id}"
-        );
+        tracing::info!("Scheduler: detected main branch '{detected}' for mission {mission_id}");
         Ok(detected)
     }
 
@@ -208,7 +206,8 @@ impl Scheduler {
         let slots = max_concurrent - running_count;
         if slots <= 0 {
             // Still check terminal in case all running agents just finished
-            let terminal = db.with_conn(|conn| queries::check_mission_terminal(conn, mission_id))?;
+            let terminal =
+                db.with_conn(|conn| queries::check_mission_terminal(conn, mission_id))?;
             return Ok(terminal.is_some());
         }
 
@@ -275,15 +274,14 @@ impl Scheduler {
         let db = app.state::<Database>();
 
         // FM-15 Phase 2 (FR-08.1): 只 merge frontier 任务，避免重复合并。
-        let frontier = match db
-            .with_conn(|conn| queries::get_frontier_completed_tasks(conn, mission_id))
-        {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::error!("Failed to query frontier tasks for merge: {e}");
-                return;
-            }
-        };
+        let frontier =
+            match db.with_conn(|conn| queries::get_frontier_completed_tasks(conn, mission_id)) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::error!("Failed to query frontier tasks for merge: {e}");
+                    return;
+                }
+            };
 
         if frontier.is_empty() {
             tracing::info!("No frontier tasks to merge for mission {mission_id}");
@@ -323,23 +321,25 @@ impl Scheduler {
 
         // FM-15 FR-08.2 (3): 仅在 LlmResolve 模式下尝试构造 LLM resolver；
         // 构造失败（无 API key 等）→ 后续 fallback 到 ref-only theirs。
-        let llm_resolver: Option<std::sync::Arc<dyn LlmConflictResolver>> =
-            if matches!(strategy, MergeStrategy::LlmResolve) {
-                match build_provider(app) {
-                    Ok((provider, model)) => {
-                        Some(std::sync::Arc::new(LlmProviderResolver::new(provider, model))
-                            as std::sync::Arc<dyn LlmConflictResolver>)
-                    }
-                    Err(e) => {
-                        tracing::warn!(
+        let llm_resolver: Option<std::sync::Arc<dyn LlmConflictResolver>> = if matches!(
+            strategy,
+            MergeStrategy::LlmResolve
+        ) {
+            match build_provider(app) {
+                Ok((provider, model)) => Some(std::sync::Arc::new(LlmProviderResolver::new(
+                    provider, model,
+                ))
+                    as std::sync::Arc<dyn LlmConflictResolver>),
+                Err(e) => {
+                    tracing::warn!(
                             "LLM resolver unavailable ({e}); falling back to ref-only theirs for FallbackTheirs files"
                         );
-                        None
-                    }
+                    None
                 }
-            } else {
-                None
-            };
+            }
+        } else {
+            None
+        };
 
         let mut total_merged: u32 = 0;
         let mut all_auto_resolved: Vec<String> = Vec::new();
@@ -369,7 +369,8 @@ impl Scheduler {
             // (b) 同步 ref-only merge（落 theirs 兜底 commit）
             let merge_result = {
                 let agent_id = agent_id.clone();
-                let wt = WorktreeManager::with_main_branch(repo_path.clone(), target_branch.clone());
+                let wt =
+                    WorktreeManager::with_main_branch(repo_path.clone(), target_branch.clone());
                 tokio::task::spawn_blocking(move || {
                     wt.merge_agent_branch_with_strategy(&agent_id, strategy)
                 })
@@ -430,7 +431,8 @@ impl Scheduler {
                                 }
                             }
                             if !resolutions.is_empty() {
-                                let resolved_files: Vec<String> = resolutions.keys().cloned().collect();
+                                let resolved_files: Vec<String> =
+                                    resolutions.keys().cloned().collect();
                                 let wt = WorktreeManager::with_main_branch(
                                     repo_path.clone(),
                                     target_branch.clone(),
@@ -477,11 +479,12 @@ impl Scheduler {
                     //   - 没有真冲突 / 没启用 LLM → None
                     //   - 启用且至少解决 1 个文件 → Some(true)
                     //   - 启用但全部失败回退 → Some(false)
-                    let llm_succeeded: Option<bool> = if llm_resolver.is_some() && !fallback_paths.is_empty() {
-                        Some(!llm_resolved_paths.is_empty())
-                    } else {
-                        None
-                    };
+                    let llm_succeeded: Option<bool> =
+                        if llm_resolver.is_some() && !fallback_paths.is_empty() {
+                            Some(!llm_resolved_paths.is_empty())
+                        } else {
+                            None
+                        };
                     let _ = db.with_conn(|conn| {
                         queries::record_merge_attempt(
                             conn,
@@ -514,7 +517,8 @@ impl Scheduler {
                             repo_path.clone(),
                             target_branch.clone(),
                         );
-                        let res = tokio::task::spawn_blocking(move || wt.remove_worktree(&aid)).await;
+                        let res =
+                            tokio::task::spawn_blocking(move || wt.remove_worktree(&aid)).await;
                         if let Err(e) = res {
                             tracing::warn!("spawn_blocking remove_worktree panicked: {e}");
                         } else if let Ok(Err(e)) = res {
@@ -779,9 +783,8 @@ impl Scheduler {
             Err(e) => {
                 tracing::error!("Worktree creation failed for agent {agent_id}: {e}");
                 let reason = format!("worktree_error: {e}");
-                let _ = db.with_conn(|conn| {
-                    queries::fail_task(conn, task_id, "failed", Some(&reason))
-                });
+                let _ =
+                    db.with_conn(|conn| queries::fail_task(conn, task_id, "failed", Some(&reason)));
                 let _ = app.emit(
                     "task-status-changed",
                     TaskStatusChangedPayload {
@@ -801,8 +804,12 @@ impl Scheduler {
 
         // Capture base commit hash for post-merge code review
         if let Ok(repo) = git2::Repository::open(repo_path) {
-            if let Ok(base_hash) = repo.head().and_then(|h| h.peel_to_commit().map(|c| c.id().to_string())) {
-                let _ = db.with_conn(|conn| queries::save_agent_base_commit(conn, &agent_id, &base_hash));
+            if let Ok(base_hash) = repo
+                .head()
+                .and_then(|h| h.peel_to_commit().map(|c| c.id().to_string()))
+            {
+                let _ = db
+                    .with_conn(|conn| queries::save_agent_base_commit(conn, &agent_id, &base_hash));
             }
         }
 
@@ -822,15 +829,15 @@ impl Scheduler {
                     .or_else(|| cfg_mgr.get_api_key(&cfg.tool_summary_provider))
                     .or_else(|| cfg_mgr.get_api_key("default"));
                 if let Some(k) = key {
-                    if let Some(s) = crate::agent::tool_summarizer::ToolSummarizer::try_openai_compat(
-                        k,
-                        cfg.tool_summary_base_url.clone(),
-                        cfg.tool_summary_model.clone(),
-                    ) {
-                        engine = engine.with_tool_summarizer(
-                            s,
-                            cfg.tool_summary_threshold_chars as usize,
-                        );
+                    if let Some(s) =
+                        crate::agent::tool_summarizer::ToolSummarizer::try_openai_compat(
+                            k,
+                            cfg.tool_summary_base_url.clone(),
+                            cfg.tool_summary_model.clone(),
+                        )
+                    {
+                        engine = engine
+                            .with_tool_summarizer(s, cfg.tool_summary_threshold_chars as usize);
                     }
                 }
             }
@@ -914,17 +921,16 @@ impl Scheduler {
 
         // FM-15 Phase 3 (FR-09 / FR-11): 装载 task 上的 guardrails / produces / expected_output
         // + 全局 max_agent_steps / agent_timeout_seconds 配置，组装 AgentRunOptions。
-        let agent_options =
-            Self::build_agent_run_options(task_id, model.clone(), &db, app)
-                .unwrap_or_else(|e| {
-                    tracing::warn!(
-                        "build_agent_run_options failed for {task_id}: {e}; falling back to defaults"
-                    );
-                    AgentRunOptions {
-                        model: model.clone(),
-                        ..AgentRunOptions::default()
-                    }
-                });
+        let agent_options = Self::build_agent_run_options(task_id, model.clone(), &db, app)
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "build_agent_run_options failed for {task_id}: {e}; falling back to defaults"
+                );
+                AgentRunOptions {
+                    model: model.clone(),
+                    ..AgentRunOptions::default()
+                }
+            });
 
         let repo_path_owned = repo_path.clone();
         let app_clone = app.clone();
@@ -994,7 +1000,8 @@ impl Scheduler {
                 match wt_manager.commit_worktree(&aid, &commit_msg) {
                     Ok(Some(hash)) => {
                         tracing::info!("Agent {aid} work committed: {hash}");
-                        let _ = db.with_conn(|conn| queries::save_agent_head_commit(conn, &aid, &hash));
+                        let _ =
+                            db.with_conn(|conn| queries::save_agent_head_commit(conn, &aid, &hash));
                     }
                     Ok(None) => {
                         tracing::info!("Agent {aid} produced no file changes to commit");
@@ -1004,8 +1011,7 @@ impl Scheduler {
                     }
                 }
 
-                if let Ok(promoted) =
-                    db.with_conn(|conn| queries::advance_dependencies(conn, &tid))
+                if let Ok(promoted) = db.with_conn(|conn| queries::advance_dependencies(conn, &tid))
                 {
                     for promoted_id in promoted {
                         let _ = app_clone.emit(
@@ -1112,20 +1118,21 @@ impl Scheduler {
         }
 
         // produces_artifacts JSON → Vec<(local_name, type)>
-        let produces: Vec<(String, String)> = serde_json::from_str::<serde_json::Value>(&produces_json)
-            .ok()
-            .and_then(|v| {
-                v.as_array().map(|arr| {
-                    arr.iter()
-                        .filter_map(|item| {
-                            let name = item.get("local_name").and_then(|v| v.as_str())?;
-                            let ty = item.get("type").and_then(|v| v.as_str())?;
-                            Some((name.to_string(), ty.to_string()))
-                        })
-                        .collect()
+        let produces: Vec<(String, String)> =
+            serde_json::from_str::<serde_json::Value>(&produces_json)
+                .ok()
+                .and_then(|v| {
+                    v.as_array().map(|arr| {
+                        arr.iter()
+                            .filter_map(|item| {
+                                let name = item.get("local_name").and_then(|v| v.as_str())?;
+                                let ty = item.get("type").and_then(|v| v.as_str())?;
+                                Some((name.to_string(), ty.to_string()))
+                            })
+                            .collect()
+                    })
                 })
-            })
-            .unwrap_or_default();
+                .unwrap_or_default();
 
         Ok(AgentRunOptions {
             model,
@@ -1154,7 +1161,11 @@ impl Scheduler {
             // `fallback_model.as_deref() != Some(current_model)` 守卫避免无意义切换。
             fallback_model: {
                 let s = cfg.agent_fallback_model.trim();
-                if s.is_empty() { None } else { Some(s.to_string()) }
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.to_string())
+                }
             },
             fallback_sticky: cfg.agent_fallback_sticky,
         })
@@ -1173,7 +1184,8 @@ impl Scheduler {
         db: &Database,
         app: &tauri::AppHandle,
     ) -> Result<Option<String>> {
-        let parents = db.with_conn(|conn| queries::get_completed_parent_tasks_for(conn, task_id))?;
+        let parents =
+            db.with_conn(|conn| queries::get_completed_parent_tasks_for(conn, task_id))?;
         if parents.is_empty() {
             return Ok(None);
         }
@@ -1236,11 +1248,7 @@ impl Scheduler {
     /// Spawn an Evaluator Agent in the background for a completed coding agent.
     /// Evaluators don't count against max_concurrent_agents (NFR).
     /// Timeout: 30s (BT-05). Duplicate prevention: BT-07.
-    fn spawn_evaluator(
-        agent_id: &str,
-        repo_path: &PathBuf,
-        app: &tauri::AppHandle,
-    ) {
+    fn spawn_evaluator(agent_id: &str, repo_path: &PathBuf, app: &tauri::AppHandle) {
         let (provider, model) = match build_provider(app) {
             Ok(pm) => pm,
             Err(e) => {
@@ -1250,13 +1258,14 @@ impl Scheduler {
         };
 
         let db = app.state::<Database>();
-        let mission_id = match db.with_conn(|conn| queries::get_mission_id_for_agent(conn, agent_id)) {
-            Ok(Some(mid)) => mid,
-            _ => {
-                tracing::warn!("Evaluator: cannot find mission for agent {agent_id}, skipping");
-                return;
-            }
-        };
+        let mission_id =
+            match db.with_conn(|conn| queries::get_mission_id_for_agent(conn, agent_id)) {
+                Ok(Some(mid)) => mid,
+                _ => {
+                    tracing::warn!("Evaluator: cannot find mission for agent {agent_id}, skipping");
+                    return;
+                }
+            };
 
         let aid = agent_id.to_string();
         let rp = repo_path.clone();

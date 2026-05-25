@@ -41,7 +41,8 @@ fn builtin_role_templates() -> Vec<RoleTemplate> {
             ui_color: "#a78bfa".into(), // violet-400
             ui_icon: "📐".into(),
             description: "高层设计、模块拆分、API 契约设计。\
-                通常产出 design_doc / api_spec，不直接写实现代码。".into(),
+                通常产出 design_doc / api_spec，不直接写实现代码。"
+                .into(),
             default_tools: None,
             default_skills: vec![],
             expected_artifact_types: vec!["design_doc".into(), "api_spec".into()],
@@ -52,7 +53,8 @@ fn builtin_role_templates() -> Vec<RoleTemplate> {
             ui_color: "#60a5fa".into(), // blue-400
             ui_icon: "🛠".into(),
             description: "实际编码实现。基于上游 architect 的 design_doc / api_spec，\
-                把功能写出来。期望产出 code_module 并通过 build。".into(),
+                把功能写出来。期望产出 code_module 并通过 build。"
+                .into(),
             default_tools: None,
             default_skills: vec![],
             expected_artifact_types: vec!["code_module".into()],
@@ -63,7 +65,8 @@ fn builtin_role_templates() -> Vec<RoleTemplate> {
             ui_color: "#22d3ee".into(), // cyan-400
             ui_icon: "♻️".into(),
             description: "在不改变外部行为的前提下重构既有代码。\
-                必须保证既有 test 不被破坏。".into(),
+                必须保证既有 test 不被破坏。"
+                .into(),
             default_tools: None,
             default_skills: vec![],
             expected_artifact_types: vec!["code_module".into()],
@@ -84,7 +87,8 @@ fn builtin_role_templates() -> Vec<RoleTemplate> {
             ui_color: "#fb923c".into(), // orange-400
             ui_icon: "🔌".into(),
             description: "接线、配置、CI/CD、依赖管理。\
-                把 implementer 的产出整合进项目骨架。".into(),
+                把 implementer 的产出整合进项目骨架。"
+                .into(),
             default_tools: None,
             default_skills: vec![],
             expected_artifact_types: vec!["config".into(), "code_module".into()],
@@ -95,7 +99,8 @@ fn builtin_role_templates() -> Vec<RoleTemplate> {
             ui_color: "#94a3b8".into(), // slate-400
             ui_icon: "🔍".into(),
             description: "调研、原型、读外部资料、产出 report。\
-                通常作为 architect/implementer 的前置环节。".into(),
+                通常作为 architect/implementer 的前置环节。"
+                .into(),
             default_tools: None,
             default_skills: vec![],
             expected_artifact_types: vec!["report".into()],

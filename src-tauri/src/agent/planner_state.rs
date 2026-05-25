@@ -193,10 +193,7 @@ pub enum PlannerStateError {
     #[error("Self dependency: task '{0}' cannot depend on itself")]
     SelfDependency(String),
     #[error("Dependency '{depends_on}' for task '{task_id}' does not exist (propose it first)")]
-    UnknownDependency {
-        task_id: String,
-        depends_on: String,
-    },
+    UnknownDependency { task_id: String, depends_on: String },
     #[error("Adding dependency from '{from}' to '{to}' would create a cycle")]
     CyclicDependency { from: String, to: String },
     #[error("Plan must contain at least one task before finalize")]
@@ -207,10 +204,7 @@ pub enum PlannerStateError {
     #[error("Invalid produced artifact for task '{task_id}': {message}")]
     InvalidProducedArtifact { task_id: String, message: String },
     #[error("Duplicate produced artifact local_name '{local_name}' within task '{task_id}'")]
-    DuplicateProducedArtifact {
-        task_id: String,
-        local_name: String,
-    },
+    DuplicateProducedArtifact { task_id: String, local_name: String },
     #[error(
         "consumed artifact '{artifact_id}' for task '{task_id}' is not produced by any task in the plan \
          (expected format `<task_id>.<local_name>` referencing a previously declared artifact)"
@@ -349,7 +343,11 @@ impl PlannerState {
         Ok(id)
     }
 
-    pub fn add_dependency(&mut self, task_id: &str, depends_on: &str) -> Result<(), PlannerStateError> {
+    pub fn add_dependency(
+        &mut self,
+        task_id: &str,
+        depends_on: &str,
+    ) -> Result<(), PlannerStateError> {
         if task_id == depends_on {
             return Err(PlannerStateError::SelfDependency(task_id.to_string()));
         }
@@ -402,7 +400,9 @@ impl PlannerState {
         }
         if let Some(eo) = input.expected_output.as_deref() {
             if eo.trim().is_empty() {
-                return Err(PlannerStateError::EmptyExpectedOutput(input.task_id.clone()));
+                return Err(PlannerStateError::EmptyExpectedOutput(
+                    input.task_id.clone(),
+                ));
             }
         }
 
@@ -451,10 +451,21 @@ impl PlannerState {
         // consumes 校验需要看 plan 全图（包括其他 task 的 produces）；放在最后跑
         if let Some(consumes) = input.consumes_artifacts {
             // 先暂存旧值，校验失败回滚
-            let prev_consumes = self.tasks.get(&input.task_id).unwrap().consumes_artifacts.clone();
-            self.tasks.get_mut(&input.task_id).unwrap().consumes_artifacts = consumes.clone();
+            let prev_consumes = self
+                .tasks
+                .get(&input.task_id)
+                .unwrap()
+                .consumes_artifacts
+                .clone();
+            self.tasks
+                .get_mut(&input.task_id)
+                .unwrap()
+                .consumes_artifacts = consumes.clone();
             if let Err(e) = self.validate_consumes_for(&input.task_id, &consumes) {
-                self.tasks.get_mut(&input.task_id).unwrap().consumes_artifacts = prev_consumes;
+                self.tasks
+                    .get_mut(&input.task_id)
+                    .unwrap()
+                    .consumes_artifacts = prev_consumes;
                 return Err(e);
             }
         }
@@ -851,11 +862,10 @@ fn validate_file_scope_hints(
 /// 这是有意识的"轻量启发式"——只用作 warn，不阻 finalize。
 fn extract_anchors(text: &str) -> Vec<String> {
     const STOP: &[&str] = &[
-        "should", "shall", "must", "make", "build", "create", "support", "feature",
-        "system", "module", "user", "users", "with", "when", "that", "from", "into",
-        "your", "this", "those", "their", "these", "task", "tasks", "agent", "agents",
-        "需要", "实现", "支持", "完成", "提供", "用户", "可以", "能够", "应当", "保证",
-        "处理", "功能", "模块", "系统",
+        "should", "shall", "must", "make", "build", "create", "support", "feature", "system",
+        "module", "user", "users", "with", "when", "that", "from", "into", "your", "this", "those",
+        "their", "these", "task", "tasks", "agent", "agents", "需要", "实现", "支持", "完成",
+        "提供", "用户", "可以", "能够", "应当", "保证", "处理", "功能", "模块", "系统",
     ];
     let mut out: Vec<String> = Vec::new();
     let lower = text.to_lowercase();
@@ -1139,10 +1149,7 @@ mod tests {
     fn ut15_duplicate_local_name_rejected() {
         let mut s = PlannerState::new();
         let mut t1 = p("T1", "architect");
-        t1.produces_artifacts = vec![
-            produces("design", "design_doc"),
-            produces("design", "docs"),
-        ];
+        t1.produces_artifacts = vec![produces("design", "design_doc"), produces("design", "docs")];
         let err = s.propose_task(t1).unwrap_err();
         assert!(matches!(
             err,
@@ -1229,7 +1236,10 @@ mod tests {
         });
         let issues = s.validate_plan();
         let any_error = issues.iter().any(|i| i.severity == IssueSeverity::Error);
-        assert!(!any_error, "guardrail warns should not produce error issues");
+        assert!(
+            !any_error,
+            "guardrail warns should not produce error issues"
+        );
     }
 
     #[test]

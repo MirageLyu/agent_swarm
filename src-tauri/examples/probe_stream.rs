@@ -60,7 +60,10 @@ async fn main() -> Result<()> {
 
     if !resp.status().is_success() {
         let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("HTTP error {status}: {}", &text[..text.len().min(500)]));
+        return Err(anyhow!(
+            "HTTP error {status}: {}",
+            &text[..text.len().min(500)]
+        ));
     }
 
     let mut stream = resp.bytes_stream();
@@ -82,9 +85,7 @@ async fn main() -> Result<()> {
                 if let Some(prev) = last_byte_at {
                     let gap = now.duration_since(prev).as_millis();
                     if gap >= 5_000 {
-                        println!(
-                            "[+{elapsed_ms}ms] !!! BYTE GAP {gap}ms after {total_bytes}B"
-                        );
+                        println!("[+{elapsed_ms}ms] !!! BYTE GAP {gap}ms after {total_bytes}B");
                     }
                 }
                 last_byte_at = Some(now);
@@ -112,15 +113,26 @@ async fn main() -> Result<()> {
                 println!(
                     "[+{elapsed_ms}ms] !!! STREAM ERROR after {total_bytes}B / {events} events: {e}"
                 );
-                println!("    is_decode={} is_request={} is_timeout={} is_connect={} is_body={}",
-                    e.is_decode(), e.is_request(), e.is_timeout(), e.is_connect(), e.is_body());
+                println!(
+                    "    is_decode={} is_request={} is_timeout={} is_connect={} is_body={}",
+                    e.is_decode(),
+                    e.is_request(),
+                    e.is_timeout(),
+                    e.is_connect(),
+                    e.is_body()
+                );
                 if let Some(src) = std::error::Error::source(&e) {
                     println!("    source: {src}");
                     if let Some(src2) = std::error::Error::source(src) {
                         println!("    source^2: {src2}");
                     }
                 }
-                return Err(anyhow!("stream broke after {} bytes / {} events / {}ms", total_bytes, events, elapsed_ms));
+                return Err(anyhow!(
+                    "stream broke after {} bytes / {} events / {}ms",
+                    total_bytes,
+                    events,
+                    elapsed_ms
+                ));
             }
         }
     }

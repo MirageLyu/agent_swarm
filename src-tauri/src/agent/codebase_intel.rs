@@ -97,10 +97,7 @@ pub fn build_intel(
 
 fn build_project_tree(root: &Path) -> String {
     let mut buf = String::new();
-    let label = root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(".");
+    let label = root.file_name().and_then(|n| n.to_str()).unwrap_or(".");
     buf.push_str(label);
     buf.push('\n');
     walk(root, 0, "", &mut buf);
@@ -233,9 +230,7 @@ fn detect_tech_stack(root: &Path) -> String {
 // ---- Upstream context (FR-10.2) ----
 
 fn build_upstream_context(db: &crate::db::Database, task_id: &str) -> String {
-    let upstream = match db.with_conn(|conn| {
-        list_upstream_summaries(conn, task_id)
-    }) {
+    let upstream = match db.with_conn(|conn| list_upstream_summaries(conn, task_id)) {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("upstream context fetch failed: {e}");
@@ -247,7 +242,11 @@ fn build_upstream_context(db: &crate::db::Database, task_id: &str) -> String {
     }
     let mut buf = String::new();
     for u in upstream {
-        buf.push_str(&format!("- task {} ({}):\n", &u.id[..8.min(u.id.len())], u.title));
+        buf.push_str(&format!(
+            "- task {} ({}):\n",
+            &u.id[..8.min(u.id.len())],
+            u.title
+        ));
         if let Some(s) = &u.completion_summary {
             buf.push_str(&format!("    summary: {}\n", indent_block(s, "    ")));
         }
@@ -300,7 +299,11 @@ fn list_upstream_summaries(
         )?;
         let arts: Vec<(String, String, String)> = a_stmt
             .query_map([&row.id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         row.artifacts = arts
@@ -317,7 +320,8 @@ fn list_upstream_summaries(
 // ---- Base conflicts (FR-10.2) ----
 
 fn build_base_conflicts(db: &crate::db::Database, task_id: &str) -> String {
-    let rows = match db.with_conn(|conn| crate::db::queries::get_task_base_conflicts(conn, task_id)) {
+    let rows = match db.with_conn(|conn| crate::db::queries::get_task_base_conflicts(conn, task_id))
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("base conflicts fetch failed: {e}");
@@ -359,7 +363,13 @@ fn truncate_block(s: &str, max_chars: usize) -> String {
 fn indent_block(s: &str, indent: &str) -> String {
     s.lines()
         .enumerate()
-        .map(|(i, line)| if i == 0 { line.to_string() } else { format!("{indent}{line}") })
+        .map(|(i, line)| {
+            if i == 0 {
+                line.to_string()
+            } else {
+                format!("{indent}{line}")
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }

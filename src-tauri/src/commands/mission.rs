@@ -98,13 +98,8 @@ fn default_dep_kind() -> String {
 
 /// 携带 doc 类 artifact 的边在 UI 上默认弱化为 reference。集合保持与
 /// migration 024 的 backfill 子句一致——任何变更需要同步两边。
-pub(crate) const DOC_ARTIFACT_TYPES: &[&str] = &[
-    "design_doc",
-    "api_spec",
-    "schema",
-    "docs",
-    "report",
-];
+pub(crate) const DOC_ARTIFACT_TYPES: &[&str] =
+    &["design_doc", "api_spec", "schema", "docs", "report"];
 
 /// 根据边上的 artifact_refs + 上游 task 的 produces 声明判定 kind。
 ///
@@ -205,7 +200,9 @@ pub struct AddTaskRequest {
 
 // ---------- helper: build provider ----------
 
-pub(crate) fn build_provider(app: &tauri::AppHandle) -> Result<(Arc<dyn LlmProvider>, String), String> {
+pub(crate) fn build_provider(
+    app: &tauri::AppHandle,
+) -> Result<(Arc<dyn LlmProvider>, String), String> {
     let config_mgr = app.state::<ConfigManager>();
     let config = config_mgr.get_config_snapshot();
 
@@ -217,9 +214,7 @@ pub(crate) fn build_provider(app: &tauri::AppHandle) -> Result<(Arc<dyn LlmProvi
 
     let api_key = config_mgr
         .get_api_key(&provider_key)
-        .ok_or_else(|| {
-            "Please configure your API key in Settings first.".to_string()
-        })?;
+        .ok_or_else(|| "Please configure your API key in Settings first.".to_string())?;
 
     let stream_idle = config.agent_step_idle_seconds;
     let provider: Arc<dyn LlmProvider> = match config.provider.as_str() {
@@ -257,9 +252,8 @@ pub fn create_mission(
             let path = home
                 .join("miragenty-workspaces")
                 .join(format!("{slug}-{short_id}"));
-            crate::git::ensure_git_repo(&path).map_err(|e| {
-                format!("Failed to init repo at '{}': {e}", path.display())
-            })?;
+            crate::git::ensure_git_repo(&path)
+                .map_err(|e| format!("Failed to init repo at '{}': {e}", path.display()))?;
             (
                 Some("from_scratch".to_string()),
                 Some(path.to_string_lossy().into_owned()),
@@ -749,10 +743,7 @@ pub fn update_task(app: tauri::AppHandle, request: UpdateTaskRequest) -> Result<
             return Ok(());
         }
 
-        let sql = format!(
-            "UPDATE tasks SET {} WHERE id = ?",
-            sets.join(", ")
-        );
+        let sql = format!("UPDATE tasks SET {} WHERE id = ?", sets.join(", "));
         params.push(Box::new(request.task_id));
 
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -1169,8 +1160,7 @@ async fn auto_start_mission(
 ) -> Result<(), String> {
     let repo_pb = std::path::PathBuf::from(repo_path);
 
-    crate::git::ensure_git_repo(&repo_pb)
-        .map_err(|e| format!("ensure_git_repo failed: {e}"))?;
+    crate::git::ensure_git_repo(&repo_pb).map_err(|e| format!("ensure_git_repo failed: {e}"))?;
 
     let db = app.state::<crate::db::Database>();
     db.with_conn(|conn| -> anyhow::Result<()> {
@@ -1308,12 +1298,10 @@ pub fn export_mission_template(
         .map_err(|e| e.to_string())?;
 
     let template = crate::mission_template::build_template(&detail);
-    let yaml =
-        crate::mission_template::serialize_yaml(&template).map_err(|e| e.to_string())?;
+    let yaml = crate::mission_template::serialize_yaml(&template).map_err(|e| e.to_string())?;
 
-    std::fs::write(&request.file_path, &yaml).map_err(|e| {
-        format!("Failed to write file '{}': {e}", request.file_path)
-    })?;
+    std::fs::write(&request.file_path, &yaml)
+        .map_err(|e| format!("Failed to write file '{}': {e}", request.file_path))?;
 
     tracing::info!(
         "Exported mission {} to {}",
@@ -1350,7 +1338,13 @@ pub fn import_mission_template(
             conn.execute(
                 "INSERT INTO tasks (id, mission_id, title, description, complexity, status)
                  VALUES (?, ?, ?, ?, ?, 'pending')",
-                rusqlite::params![uuid, mission_id, task.title, task.description, task.complexity],
+                rusqlite::params![
+                    uuid,
+                    mission_id,
+                    task.title,
+                    task.description,
+                    task.complexity
+                ],
             )?;
         }
 
@@ -1493,10 +1487,7 @@ mod classify_edge_kind_tests {
 
     #[test]
     fn mixed_refs_classified_as_producer() {
-        let upstream = vec![
-            decl("doc1", "design_doc"),
-            decl("code1", "code_module"),
-        ];
+        let upstream = vec![decl("doc1", "design_doc"), decl("code1", "code_module")];
         let refs = vec!["up1.doc1".to_string(), "up1.code1".to_string()];
         assert_eq!(classify_edge_kind(&refs, &upstream), "producer");
     }
@@ -1585,7 +1576,11 @@ mod tests {
         .unwrap();
 
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM tasks WHERE mission_id = ?", [mid], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE mission_id = ?",
+                [mid],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 3);
 
@@ -1602,11 +1597,8 @@ mod tests {
     #[test]
     fn ut03_2_delete_task_cascades_deps() {
         let conn = setup_db();
-        conn.execute(
-            "INSERT INTO missions (id, title) VALUES ('m1', 'M')",
-            [],
-        )
-        .unwrap();
+        conn.execute("INSERT INTO missions (id, title) VALUES ('m1', 'M')", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO tasks (id, mission_id, title, complexity) VALUES ('t1', 'm1', 'T1', 'low')",
             [],
@@ -1628,7 +1620,8 @@ mod tests {
         )
         .unwrap();
 
-        conn.execute("DELETE FROM tasks WHERE id = 't2'", []).unwrap();
+        conn.execute("DELETE FROM tasks WHERE id = 't2'", [])
+            .unwrap();
 
         let dep_count: i64 = conn
             .query_row(
@@ -1643,7 +1636,8 @@ mod tests {
     #[test]
     fn ut03_3_update_task_fields() {
         let conn = setup_db();
-        conn.execute("INSERT INTO missions (id, title) VALUES ('m1', 'M')", []).unwrap();
+        conn.execute("INSERT INTO missions (id, title) VALUES ('m1', 'M')", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO tasks (id, mission_id, title, description, complexity) VALUES ('t1', 'm1', 'Old', 'old desc', 'low')",
             [],
@@ -1657,9 +1651,11 @@ mod tests {
         .unwrap();
 
         let (title, desc): (String, String) = conn
-            .query_row("SELECT title, description FROM tasks WHERE id = 't1'", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
+            .query_row(
+                "SELECT title, description FROM tasks WHERE id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
         assert_eq!(title, "New");
         assert_eq!(desc, "new desc");
@@ -1668,7 +1664,11 @@ mod tests {
     #[test]
     fn ut03_4_confirm_mission() {
         let conn = setup_db();
-        conn.execute("INSERT INTO missions (id, title, status) VALUES ('m1', 'M', 'draft')", []).unwrap();
+        conn.execute(
+            "INSERT INTO missions (id, title, status) VALUES ('m1', 'M', 'draft')",
+            [],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO tasks (id, mission_id, title, complexity, status) VALUES ('t1', 'm1', 'T1', 'low', 'pending')",
             [],
@@ -1685,11 +1685,8 @@ mod tests {
         )
         .unwrap();
 
-        conn.execute(
-            "UPDATE missions SET status = 'planned' WHERE id = 'm1'",
-            [],
-        )
-        .unwrap();
+        conn.execute("UPDATE missions SET status = 'planned' WHERE id = 'm1'", [])
+            .unwrap();
         conn.execute(
             "UPDATE tasks SET status = 'ready' WHERE mission_id = 'm1' AND status = 'pending' AND id NOT IN (SELECT task_id FROM task_dependencies)",
             [],
@@ -1697,7 +1694,9 @@ mod tests {
         .unwrap();
 
         let m_status: String = conn
-            .query_row("SELECT status FROM missions WHERE id = 'm1'", [], |r| r.get(0))
+            .query_row("SELECT status FROM missions WHERE id = 'm1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(m_status, "planned");
 
@@ -1715,22 +1714,33 @@ mod tests {
     #[test]
     fn ut03_5_delete_draft_mission() {
         let conn = setup_db();
-        conn.execute("INSERT INTO missions (id, title, status) VALUES ('m1', 'M', 'draft')", []).unwrap();
+        conn.execute(
+            "INSERT INTO missions (id, title, status) VALUES ('m1', 'M', 'draft')",
+            [],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO tasks (id, mission_id, title, complexity) VALUES ('t1', 'm1', 'T1', 'low')",
             [],
         )
         .unwrap();
 
-        conn.execute("DELETE FROM missions WHERE id = 'm1'", []).unwrap();
+        conn.execute("DELETE FROM missions WHERE id = 'm1'", [])
+            .unwrap();
 
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM missions WHERE id = 'm1'", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM missions WHERE id = 'm1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(count, 0);
 
         let task_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM tasks WHERE mission_id = 'm1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE mission_id = 'm1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(task_count, 0);
     }
@@ -1738,10 +1748,16 @@ mod tests {
     #[test]
     fn ut03_6_cannot_delete_running_mission() {
         let conn = setup_db();
-        conn.execute("INSERT INTO missions (id, title, status) VALUES ('m1', 'M', 'running')", []).unwrap();
+        conn.execute(
+            "INSERT INTO missions (id, title, status) VALUES ('m1', 'M', 'running')",
+            [],
+        )
+        .unwrap();
 
         let status: String = conn
-            .query_row("SELECT status FROM missions WHERE id = 'm1'", [], |r| r.get(0))
+            .query_row("SELECT status FROM missions WHERE id = 'm1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_ne!(status, "draft");
     }
@@ -1758,11 +1774,9 @@ mod plan_mission_transaction_tests {
 
     fn read_title(db: &Database, id: &str) -> String {
         db.with_conn(|conn| {
-            conn.query_row(
-                "SELECT title FROM missions WHERE id = ?",
-                [id],
-                |r| r.get::<_, String>(0),
-            )
+            conn.query_row("SELECT title FROM missions WHERE id = ?", [id], |r| {
+                r.get::<_, String>(0)
+            })
             .map_err(Into::into)
         })
         .unwrap()
@@ -1818,11 +1832,7 @@ mod plan_mission_transaction_tests {
             "Original Title",
             "事务回滚后 title 必须保持 plan 前的值，否则用户列表/任务会出现不一致"
         );
-        assert_eq!(
-            count_tasks(&db, &mission_id),
-            0,
-            "失败时不能留下半套 tasks"
-        );
+        assert_eq!(count_tasks(&db, &mission_id), 0, "失败时不能留下半套 tasks");
     }
 
     /// 重 plan 的 idempotent：连跑两次成功事务，最终 tasks 数量等于第二次的内容

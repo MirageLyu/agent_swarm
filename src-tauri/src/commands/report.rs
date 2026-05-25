@@ -266,7 +266,11 @@ mod tests {
         let tmp = std::env::temp_dir();
         let p = tmp.join("report.txt");
         let err = validate_export_path(&p).unwrap_err();
-        assert!(err.contains(".md"), "error should mention required extension: {}", err);
+        assert!(
+            err.contains(".md"),
+            "error should mention required extension: {}",
+            err
+        );
     }
 
     #[test]
@@ -287,6 +291,9 @@ mod tests {
     fn validate_export_path_accepts_uppercase_md() {
         let tmp = std::env::temp_dir();
         let p = tmp.join("report.MD");
-        assert!(validate_export_path(&p).is_ok(), "case-insensitive extension check");
+        assert!(
+            validate_export_path(&p).is_ok(),
+            "case-insensitive extension check"
+        );
     }
 }

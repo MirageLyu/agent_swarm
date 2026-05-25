@@ -161,11 +161,7 @@ impl StreamingToolExecutor {
                     is_error: true,
                 });
                 results.push((tu_id.clone(), output));
-            } else if let Some(idx) = self
-                .unsafe_queue
-                .iter()
-                .position(|(id, _, _)| id == tu_id)
-            {
+            } else if let Some(idx) = self.unsafe_queue.iter().position(|(id, _, _)| id == tu_id) {
                 let (_id, name, input) = self.unsafe_queue.remove(idx);
                 let output = self
                     .dispatcher
@@ -316,8 +312,14 @@ mod tests {
     #[tokio::test]
     async fn safe_tool_spawns_immediately_on_stop() {
         let mock = Arc::new(MockDispatcher::new().with_safe("read_file"));
-        mock.set_response("read_file", ToolOutput { content: "ok".into(), is_error: false })
-            .await;
+        mock.set_response(
+            "read_file",
+            ToolOutput {
+                content: "ok".into(),
+                is_error: false,
+            },
+        )
+        .await;
         let mut ex = StreamingToolExecutor::new(mock.clone());
 
         ex.on_tool_use_start("t1".into(), "read_file".into());
@@ -417,7 +419,9 @@ mod tests {
         let mock = Arc::new(MockDispatcher::new());
         let mut ex = StreamingToolExecutor::new(mock);
 
-        let results = ex.drain_in_order("agent-1", &["never-spawned".to_string()]).await;
+        let results = ex
+            .drain_in_order("agent-1", &["never-spawned".to_string()])
+            .await;
         assert_eq!(results.len(), 1);
         assert!(results[0].1.is_error);
         assert!(results[0].1.content.contains("never-spawned"));

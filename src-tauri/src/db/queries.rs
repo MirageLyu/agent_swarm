@@ -162,7 +162,9 @@ pub fn get_ready_tasks_for_mission(
                 id: row.get(0)?,
                 title: row.get(1)?,
                 description: row.get(2)?,
-                kind: row.get::<_, Option<String>>(3)?.unwrap_or_else(|| "work".into()),
+                kind: row
+                    .get::<_, Option<String>>(3)?
+                    .unwrap_or_else(|| "work".into()),
                 merge_parents_json: row.get(4)?,
             })
         })?
@@ -246,9 +248,7 @@ pub fn fail_task(
 /// After a task completes, promote any downstream tasks whose deps are now fully met.
 /// Returns IDs of tasks promoted from pending → ready.
 pub fn advance_dependencies(conn: &Connection, completed_task_id: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT task_id FROM task_dependencies WHERE depends_on = ?1",
-    )?;
+    let mut stmt = conn.prepare("SELECT task_id FROM task_dependencies WHERE depends_on = ?1")?;
     let downstream: Vec<String> = stmt
         .query_map([completed_task_id], |row| row.get(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -352,10 +352,7 @@ pub fn count_running_agents(conn: &Connection) -> Result<i64> {
 /// FM-15 Phase 2 (FR-13): 按 mission 隔离的 running agent 计数。
 /// Scheduler 用这个口径计算每个 mission 自己的并发槽位，
 /// 避免多个 mission 共享同一份 `max_concurrent_agents` 配额。
-pub fn count_running_agents_for_mission(
-    conn: &Connection,
-    mission_id: &str,
-) -> Result<i64> {
+pub fn count_running_agents_for_mission(conn: &Connection, mission_id: &str) -> Result<i64> {
     let count = conn.query_row(
         "SELECT COUNT(*) FROM agents a
          JOIN tasks t ON t.id = a.task_id
@@ -389,16 +386,12 @@ pub fn list_running_agent_ids_for_mission(
 }
 
 /// FM-15 Phase 2 (FR-12): 读取 mission 已缓存的主分支名（NULL 表示未探测）。
-pub fn get_mission_main_branch(
-    conn: &Connection,
-    mission_id: &str,
-) -> Result<Option<String>> {
-    let value: Option<String> = conn
-        .query_row(
-            "SELECT main_branch FROM missions WHERE id = ?1",
-            params![mission_id],
-            |row| row.get::<_, Option<String>>(0),
-        )?;
+pub fn get_mission_main_branch(conn: &Connection, mission_id: &str) -> Result<Option<String>> {
+    let value: Option<String> = conn.query_row(
+        "SELECT main_branch FROM missions WHERE id = ?1",
+        params![mission_id],
+        |row| row.get::<_, Option<String>>(0),
+    )?;
     Ok(value)
 }
 
@@ -416,16 +409,12 @@ pub fn set_mission_main_branch(
 }
 
 /// FM-15 Phase 2 (FR-07.6): 读取 mission 是否启用增量 worktree（默认 true）。
-pub fn get_mission_use_incremental_worktree(
-    conn: &Connection,
-    mission_id: &str,
-) -> Result<bool> {
-    let v: i64 = conn
-        .query_row(
-            "SELECT COALESCE(use_incremental_worktree, 1) FROM missions WHERE id = ?1",
-            params![mission_id],
-            |row| row.get(0),
-        )?;
+pub fn get_mission_use_incremental_worktree(conn: &Connection, mission_id: &str) -> Result<bool> {
+    let v: i64 = conn.query_row(
+        "SELECT COALESCE(use_incremental_worktree, 1) FROM missions WHERE id = ?1",
+        params![mission_id],
+        |row| row.get(0),
+    )?;
     Ok(v != 0)
 }
 
@@ -449,10 +438,7 @@ pub fn insert_agent_for_task(
 
 /// Returns agent IDs for completed tasks in a mission, ordered by DAG topology
 /// (dependencies first, then by completion time).
-pub fn get_completed_agents_topo_order(
-    conn: &Connection,
-    mission_id: &str,
-) -> Result<Vec<String>> {
+pub fn get_completed_agents_topo_order(conn: &Connection, mission_id: &str) -> Result<Vec<String>> {
     // Kahn's algorithm: tasks with fewer unmet deps come first, ties broken by completed_at.
     // Since all tasks are completed, we sort by depth-in-DAG then completed_at.
     let mut stmt = conn.prepare(
@@ -739,9 +725,7 @@ pub fn list_agent_events(
     agent_id: Option<&str>,
 ) -> Result<Vec<EventRow>> {
     match (mission_id, agent_id) {
-        (_, Some(aid)) => {
-            get_events_for_agent(conn, aid)
-        }
+        (_, Some(aid)) => get_events_for_agent(conn, aid),
         (Some(mid), None) => {
             let mut stmt = conn.prepare(
                 "SELECT ae.id, ae.agent_id, ae.step, ae.kind, ae.content, ae.meta, ae.created_at
@@ -838,8 +822,8 @@ pub fn get_latest_review_status(conn: &Connection, agent_id: &str) -> Result<Opt
 
     match result {
         Some(content) => {
-            let v: serde_json::Value = serde_json::from_str(&content)
-                .unwrap_or(serde_json::Value::Null);
+            let v: serde_json::Value =
+                serde_json::from_str(&content).unwrap_or(serde_json::Value::Null);
             Ok(v.get("action").and_then(|a| a.as_str()).map(String::from))
         }
         None => Ok(None),
@@ -986,7 +970,11 @@ pub fn list_notes_for_agent(conn: &Connection, agent_id: &str) -> Result<Vec<Not
 
 // ---- FM-06: Mission directives (persistent notes for future agents) ----
 
-pub fn append_mission_directive(conn: &Connection, mission_id: &str, directive: &str) -> Result<()> {
+pub fn append_mission_directive(
+    conn: &Connection,
+    mission_id: &str,
+    directive: &str,
+) -> Result<()> {
     conn.execute(
         "UPDATE missions SET directives = CASE
             WHEN directives = '' THEN ?1
@@ -1010,10 +998,7 @@ pub fn get_mission_directives(conn: &Connection, mission_id: &str) -> Result<Str
 
 /// Explicit Merge Node v1：按 task id 查所属 mission id（许多场景需要 mission
 /// 级配置但只有 task id 在手）。
-pub fn get_mission_id_for_task(
-    conn: &Connection,
-    task_id: &str,
-) -> Result<Option<String>> {
+pub fn get_mission_id_for_task(conn: &Connection, task_id: &str) -> Result<Option<String>> {
     let v: Option<String> = conn
         .query_row(
             "SELECT mission_id FROM tasks WHERE id = ?1",
@@ -1028,16 +1013,12 @@ pub fn get_mission_id_for_task(
 /// 返回 `None` 表示用户未配置；scheduler 据此决定是否在 merge guardrails 写入
 /// `CommandPasses { cmd: verify }`。无配 + 无 repo 默认推断时 merge agent 仍能跑，
 /// 只是没有"必须 build 通过"的硬约束（fallback 到 LLM 自评 + Stop hook）。
-pub fn get_mission_verify_command(
-    conn: &Connection,
-    mission_id: &str,
-) -> Result<Option<String>> {
-    let v: Option<String> = conn
-        .query_row(
-            "SELECT verify_command FROM missions WHERE id = ?1",
-            params![mission_id],
-            |row| row.get::<_, Option<String>>(0),
-        )?;
+pub fn get_mission_verify_command(conn: &Connection, mission_id: &str) -> Result<Option<String>> {
+    let v: Option<String> = conn.query_row(
+        "SELECT verify_command FROM missions WHERE id = ?1",
+        params![mission_id],
+        |row| row.get::<_, Option<String>>(0),
+    )?;
     Ok(v.filter(|s| !s.trim().is_empty()))
 }
 
@@ -1059,10 +1040,7 @@ pub fn get_task_title_and_description(
 
 /// Explicit Merge Node v1：按 task id 查 agent id（用 merge prompt 里指 `agent/<id>`
 /// 分支名让 merge agent 能 `git diff` parent 产物）。
-pub fn get_agent_id_for_task(
-    conn: &Connection,
-    task_id: &str,
-) -> Result<Option<String>> {
+pub fn get_agent_id_for_task(conn: &Connection, task_id: &str) -> Result<Option<String>> {
     let v: Option<String> = conn
         .query_row(
             "SELECT id FROM agents WHERE task_id = ?1
@@ -1112,8 +1090,10 @@ pub fn delete_agents_for_tasks(conn: &Connection, task_ids: &[String]) -> Result
     }
     let placeholders = task_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!("DELETE FROM agents WHERE task_id IN ({placeholders})");
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-        task_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = task_ids
+        .iter()
+        .map(|id| id as &dyn rusqlite::types::ToSql)
+        .collect();
     let rows = conn.execute(&sql, param_refs.as_slice())?;
     Ok(rows as u64)
 }
@@ -1165,8 +1145,10 @@ pub fn reset_failed_tasks(conn: &Connection, mission_id: &str) -> Result<u32> {
                           last_error = NULL, last_failed_at = NULL
          WHERE id IN ({placeholders})"
     );
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-        failed_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = failed_ids
+        .iter()
+        .map(|id| id as &dyn rusqlite::types::ToSql)
+        .collect();
     conn.execute(&sql, param_refs.as_slice())?;
 
     // Promote to ready if all upstream deps are completed
@@ -1248,15 +1230,28 @@ pub fn insert_evaluator_annotation(
           suggestion, auto_fixable, original_code, fixed_code)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
-            id, review_id, agent_id, file_path, line_number,
-            ann_type, severity, message, suggestion,
-            auto_fixable as i32, original_code, fixed_code
+            id,
+            review_id,
+            agent_id,
+            file_path,
+            line_number,
+            ann_type,
+            severity,
+            message,
+            suggestion,
+            auto_fixable as i32,
+            original_code,
+            fixed_code
         ],
     )?;
     Ok(())
 }
 
-pub fn update_annotation_status(conn: &Connection, annotation_id: &str, status: &str) -> Result<bool> {
+pub fn update_annotation_status(
+    conn: &Connection,
+    annotation_id: &str,
+    status: &str,
+) -> Result<bool> {
     let rows = conn.execute(
         "UPDATE evaluator_annotations SET status = ?1 WHERE id = ?2",
         params![status, annotation_id],
@@ -1321,27 +1316,29 @@ pub fn get_annotations_for_agent(
     agent_id: &str,
     file_path: Option<&str>,
 ) -> Result<Vec<AnnotationRow>> {
-    let (sql, param_values): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(fp) = file_path {
-        (
-            "SELECT id, review_id, agent_id, file_path, line_number, type, severity, status,
+    let (sql, param_values): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) =
+        if let Some(fp) = file_path {
+            (
+                "SELECT id, review_id, agent_id, file_path, line_number, type, severity, status,
                     message, suggestion, auto_fixable, original_code, fixed_code, created_at
              FROM evaluator_annotations
              WHERE agent_id = ?1 AND file_path = ?2
              ORDER BY file_path, line_number",
-            vec![Box::new(agent_id.to_string()), Box::new(fp.to_string())],
-        )
-    } else {
-        (
-            "SELECT id, review_id, agent_id, file_path, line_number, type, severity, status,
+                vec![Box::new(agent_id.to_string()), Box::new(fp.to_string())],
+            )
+        } else {
+            (
+                "SELECT id, review_id, agent_id, file_path, line_number, type, severity, status,
                     message, suggestion, auto_fixable, original_code, fixed_code, created_at
              FROM evaluator_annotations
              WHERE agent_id = ?1
              ORDER BY file_path, line_number",
-            vec![Box::new(agent_id.to_string())],
-        )
-    };
+                vec![Box::new(agent_id.to_string())],
+            )
+        };
     let mut stmt = conn.prepare(sql)?;
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|b| b.as_ref()).collect();
     let rows = stmt
         .query_map(param_refs.as_slice(), |row| {
             Ok(AnnotationRow {
@@ -1374,10 +1371,7 @@ pub fn has_evaluator_review(conn: &Connection, agent_id: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
-pub fn get_contract_quality_threshold(
-    conn: &Connection,
-    mission_id: &str,
-) -> Result<Option<f64>> {
+pub fn get_contract_quality_threshold(conn: &Connection, mission_id: &str) -> Result<Option<f64>> {
     let result: Option<f64> = conn
         .query_row(
             "SELECT quality_threshold FROM mission_contracts
@@ -1624,10 +1618,7 @@ fn map_artifact_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactRow> {
     })
 }
 
-pub fn list_artifacts_for_mission(
-    conn: &Connection,
-    mission_id: &str,
-) -> Result<Vec<ArtifactRow>> {
+pub fn list_artifacts_for_mission(conn: &Connection, mission_id: &str) -> Result<Vec<ArtifactRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, mission_id, producer_task_id, type, local_name, summary, file_paths, published, created_at
          FROM artifacts WHERE mission_id = ?1 ORDER BY created_at ASC",
@@ -1642,11 +1633,7 @@ pub fn list_artifacts_for_mission(
 
 /// 写入"该 session 下同 host 一直允许"的授权（FetchDecision::AllowSession 触发）。
 /// 主键是 (session_id, host)，重复写入是 no-op。
-pub fn record_planner_fetch_grant(
-    conn: &Connection,
-    session_id: &str,
-    host: &str,
-) -> Result<()> {
+pub fn record_planner_fetch_grant(conn: &Connection, session_id: &str, host: &str) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO planner_session_fetch_grants (session_id, domain) VALUES (?1, ?2)",
         params![session_id, host],
@@ -1654,11 +1641,7 @@ pub fn record_planner_fetch_grant(
     Ok(())
 }
 
-pub fn is_planner_fetch_granted(
-    conn: &Connection,
-    session_id: &str,
-    host: &str,
-) -> Result<bool> {
+pub fn is_planner_fetch_granted(conn: &Connection, session_id: &str, host: &str) -> Result<bool> {
     let cnt: i64 = conn.query_row(
         "SELECT COUNT(*) FROM planner_session_fetch_grants
          WHERE session_id = ?1 AND domain = ?2",
@@ -1744,10 +1727,7 @@ pub fn insert_mission_chat(
     Ok(())
 }
 
-pub fn list_mission_chats(
-    conn: &Connection,
-    mission_id: &str,
-) -> Result<Vec<MissionChatRow>> {
+pub fn list_mission_chats(conn: &Connection, mission_id: &str) -> Result<Vec<MissionChatRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, mission_id, role, content, tool_calls, artifact_refs,
                 proposed_followup_mission_id, created_at
@@ -1789,9 +1769,8 @@ pub fn list_followup_mission_ids(
     conn: &Connection,
     parent_mission_id: &str,
 ) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT id FROM missions WHERE parent_mission_id = ?1 ORDER BY created_at ASC",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT id FROM missions WHERE parent_mission_id = ?1 ORDER BY created_at ASC")?;
     let rows = stmt
         .query_map([parent_mission_id], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1898,12 +1877,8 @@ pub fn insert_approval(conn: &Connection, req: &NewApproval<'_>) -> Result<()> {
 }
 
 pub fn get_approval(conn: &Connection, id: &str) -> Result<Option<ApprovalRow>> {
-    let sql = format!(
-        "SELECT {APPROVAL_COLUMNS} FROM approval_requests WHERE id = ?1"
-    );
-    let row = conn
-        .query_row(&sql, [id], map_approval_row)
-        .optional()?;
+    let sql = format!("SELECT {APPROVAL_COLUMNS} FROM approval_requests WHERE id = ?1");
+    let row = conn.query_row(&sql, [id], map_approval_row).optional()?;
     Ok(row)
 }
 
@@ -2007,10 +1982,7 @@ pub fn expire_overdue_approvals(conn: &Connection) -> Result<Vec<String>> {
 }
 
 /// Cancel all pending approvals tied to a mission (used when mission is stopped/restarted).
-pub fn cancel_pending_approvals_for_mission(
-    conn: &Connection,
-    mission_id: &str,
-) -> Result<u64> {
+pub fn cancel_pending_approvals_for_mission(conn: &Connection, mission_id: &str) -> Result<u64> {
     let n = conn.execute(
         "UPDATE approval_requests
          SET status = 'cancelled', decided_by = 'auto_expire',
@@ -2145,7 +2117,10 @@ pub fn upsert_report_vote(
     vote: &str,
 ) -> Result<()> {
     if vote != "agree" && vote != "disagree" {
-        anyhow::bail!("invalid vote value: {} (expected 'agree' or 'disagree')", vote);
+        anyhow::bail!(
+            "invalid vote value: {} (expected 'agree' or 'disagree')",
+            vote
+        );
     }
     conn.execute(
         "INSERT INTO report_votes (id, report_id, decision_id, vote)
@@ -2211,6 +2186,754 @@ pub fn aggregate_decision_votes(
     Ok(rows)
 }
 
+// ---- Benchmark Evaluation Harness ----
+
+#[derive(Debug, Clone)]
+pub struct BenchmarkSuiteRow {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub source_kind: String,
+    pub source_path: String,
+    pub source_ref: Option<String>,
+    pub manifest_json: String,
+    pub case_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct BenchmarkCaseRow {
+    pub id: String,
+    pub suite_id: String,
+    pub task_id: String,
+    pub task_type: String,
+    pub source_suite: String,
+    pub target_tool_or_capability: String,
+    pub prompt: String,
+    pub assets_json: String,
+    pub expected_outputs_json: String,
+    pub grader_json: Option<String>,
+    pub expected_output: Option<String>,
+    pub raw_json: String,
+    pub case_hash: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct BenchmarkRunRow {
+    pub id: String,
+    pub suite_id: String,
+    pub name: String,
+    pub status: String,
+    pub agent_kind: String,
+    pub provider: String,
+    pub model: String,
+    pub base_url_hash: Option<String>,
+    pub agent_config_json: String,
+    pub git_commit: Option<String>,
+    pub git_dirty: bool,
+    pub benchmark_source_path: String,
+    pub case_ids_json: String,
+    pub timeout_seconds: Option<i64>,
+    pub max_steps: Option<i64>,
+    pub token_budget: Option<i64>,
+    pub cost_budget_usd: Option<f64>,
+    pub workspace_root: Option<String>,
+    pub metadata_json: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct BenchmarkResultRow {
+    pub id: String,
+    pub run_id: String,
+    pub case_id: String,
+    pub agent_id: Option<String>,
+    pub workspace_path: Option<String>,
+    pub status: String,
+    pub success: Option<bool>,
+    pub grading_status: String,
+    pub final_response: Option<String>,
+    pub artifact_refs_json: String,
+    pub error_message: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct BenchmarkMetricSnapshotRow {
+    pub id: String,
+    pub run_id: String,
+    pub result_id: Option<String>,
+    pub scope: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_tokens: i64,
+    pub cost_usd: f64,
+    pub llm_request_count: i64,
+    pub tool_call_count: i64,
+    pub tool_result_count: i64,
+    pub tool_error_count: i64,
+    pub tool_call_count_by_name_json: String,
+    pub runtime_ms: Option<i64>,
+    pub successful_case_count: Option<i64>,
+    pub graded_case_count: Option<i64>,
+    pub total_case_count: Option<i64>,
+    pub all_cases_tsr: Option<f64>,
+    pub graded_cases_tsr: Option<f64>,
+    pub token_per_success: Option<f64>,
+    pub tool_calls_per_success: Option<f64>,
+    pub requests_per_success: Option<f64>,
+    pub tool_error_rate: Option<f64>,
+    pub guardrail_retry_count: i64,
+    pub recovery_attempt_count: i64,
+    pub read_only_loop_hint_count: i64,
+    pub raw_json: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct BenchmarkGraderArtifactRow {
+    pub id: String,
+    pub result_id: String,
+    pub grader_kind: String,
+    pub command_json: String,
+    pub exit_code: Option<i32>,
+    pub stdout_json: Option<String>,
+    pub stderr: String,
+    pub duration_ms: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CostRecordRow {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_usd: f64,
+}
+
+pub fn upsert_benchmark_suite_with_cases(
+    conn: &Connection,
+    draft: &crate::benchmark::ImportedSuiteDraft,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO benchmark_suites
+            (id, name, description, source_kind, source_path, source_ref, manifest_json, case_count, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'))
+         ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            description = excluded.description,
+            source_kind = excluded.source_kind,
+            source_path = excluded.source_path,
+            source_ref = excluded.source_ref,
+            manifest_json = excluded.manifest_json,
+            case_count = excluded.case_count,
+            updated_at = datetime('now')",
+        params![
+            draft.suite_id,
+            draft.name,
+            draft.description,
+            draft.source_kind.as_str(),
+            draft.source_path,
+            draft.source_ref,
+            serde_json::to_string(&draft.manifest_json)?,
+            draft.cases.len() as i64,
+        ],
+    )?;
+    tx.execute(
+        "DELETE FROM benchmark_cases WHERE suite_id = ?1",
+        [&draft.suite_id],
+    )?;
+    for case in &draft.cases {
+        tx.execute(
+            "INSERT INTO benchmark_cases
+                (id, suite_id, task_id, task_type, source_suite, target_tool_or_capability,
+                 prompt, assets_json, expected_outputs_json, grader_json, expected_output,
+                 raw_json, case_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                case.id,
+                draft.suite_id,
+                case.task_id,
+                case.task_type,
+                case.source_suite,
+                case.target_tool_or_capability,
+                case.prompt,
+                serde_json::to_string(&case.assets)?,
+                serde_json::to_string(&case.expected_outputs)?,
+                case.grader
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
+                case.expected_output,
+                serde_json::to_string(&case.raw_json)?,
+                case.case_hash,
+            ],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn map_benchmark_suite_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BenchmarkSuiteRow> {
+    Ok(BenchmarkSuiteRow {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        source_kind: row.get(3)?,
+        source_path: row.get(4)?,
+        source_ref: row.get(5)?,
+        manifest_json: row.get(6)?,
+        case_count: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+fn map_benchmark_case_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BenchmarkCaseRow> {
+    Ok(BenchmarkCaseRow {
+        id: row.get(0)?,
+        suite_id: row.get(1)?,
+        task_id: row.get(2)?,
+        task_type: row.get(3)?,
+        source_suite: row.get(4)?,
+        target_tool_or_capability: row.get(5)?,
+        prompt: row.get(6)?,
+        assets_json: row.get(7)?,
+        expected_outputs_json: row.get(8)?,
+        grader_json: row.get(9)?,
+        expected_output: row.get(10)?,
+        raw_json: row.get(11)?,
+        case_hash: row.get(12)?,
+        created_at: row.get(13)?,
+    })
+}
+
+fn map_benchmark_run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BenchmarkRunRow> {
+    Ok(BenchmarkRunRow {
+        id: row.get(0)?,
+        suite_id: row.get(1)?,
+        name: row.get(2)?,
+        status: row.get(3)?,
+        agent_kind: row.get(4)?,
+        provider: row.get(5)?,
+        model: row.get(6)?,
+        base_url_hash: row.get(7)?,
+        agent_config_json: row.get(8)?,
+        git_commit: row.get(9)?,
+        git_dirty: row.get::<_, i64>(10)? != 0,
+        benchmark_source_path: row.get(11)?,
+        case_ids_json: row.get(12)?,
+        timeout_seconds: row.get(13)?,
+        max_steps: row.get(14)?,
+        token_budget: row.get(15)?,
+        cost_budget_usd: row.get(16)?,
+        workspace_root: row.get(17)?,
+        metadata_json: row.get(18)?,
+        started_at: row.get(19)?,
+        completed_at: row.get(20)?,
+        created_at: row.get(21)?,
+        updated_at: row.get(22)?,
+    })
+}
+
+fn map_benchmark_result_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BenchmarkResultRow> {
+    Ok(BenchmarkResultRow {
+        id: row.get(0)?,
+        run_id: row.get(1)?,
+        case_id: row.get(2)?,
+        agent_id: row.get(3)?,
+        workspace_path: row.get(4)?,
+        status: row.get(5)?,
+        success: row.get::<_, Option<i64>>(6)?.map(|v| v != 0),
+        grading_status: row.get(7)?,
+        final_response: row.get(8)?,
+        artifact_refs_json: row.get(9)?,
+        error_message: row.get(10)?,
+        started_at: row.get(11)?,
+        completed_at: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
+    })
+}
+
+fn map_benchmark_metric_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<BenchmarkMetricSnapshotRow> {
+    Ok(BenchmarkMetricSnapshotRow {
+        id: row.get(0)?,
+        run_id: row.get(1)?,
+        result_id: row.get(2)?,
+        scope: row.get(3)?,
+        input_tokens: row.get(4)?,
+        output_tokens: row.get(5)?,
+        total_tokens: row.get(6)?,
+        cost_usd: row.get(7)?,
+        llm_request_count: row.get(8)?,
+        tool_call_count: row.get(9)?,
+        tool_result_count: row.get(10)?,
+        tool_error_count: row.get(11)?,
+        tool_call_count_by_name_json: row.get(12)?,
+        runtime_ms: row.get(13)?,
+        successful_case_count: row.get(14)?,
+        graded_case_count: row.get(15)?,
+        total_case_count: row.get(16)?,
+        all_cases_tsr: row.get(17)?,
+        graded_cases_tsr: row.get(18)?,
+        token_per_success: row.get(19)?,
+        tool_calls_per_success: row.get(20)?,
+        requests_per_success: row.get(21)?,
+        tool_error_rate: row.get(22)?,
+        guardrail_retry_count: row.get(23)?,
+        recovery_attempt_count: row.get(24)?,
+        read_only_loop_hint_count: row.get(25)?,
+        raw_json: row.get(26)?,
+        created_at: row.get(27)?,
+    })
+}
+
+fn map_benchmark_grader_artifact_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<BenchmarkGraderArtifactRow> {
+    Ok(BenchmarkGraderArtifactRow {
+        id: row.get(0)?,
+        result_id: row.get(1)?,
+        grader_kind: row.get(2)?,
+        command_json: row.get(3)?,
+        exit_code: row.get(4)?,
+        stdout_json: row.get(5)?,
+        stderr: row.get(6)?,
+        duration_ms: row.get(7)?,
+        created_at: row.get(8)?,
+    })
+}
+
+const BENCHMARK_SUITE_COLUMNS: &str = "id, name, description, source_kind, source_path, source_ref, manifest_json, case_count, created_at, updated_at";
+const BENCHMARK_CASE_COLUMNS: &str = "id, suite_id, task_id, task_type, source_suite, target_tool_or_capability, prompt, assets_json, expected_outputs_json, grader_json, expected_output, raw_json, case_hash, created_at";
+const BENCHMARK_RUN_COLUMNS: &str = "id, suite_id, name, status, agent_kind, provider, model, base_url_hash, agent_config_json, git_commit, git_dirty, benchmark_source_path, case_ids_json, timeout_seconds, max_steps, token_budget, cost_budget_usd, workspace_root, metadata_json, started_at, completed_at, created_at, updated_at";
+const BENCHMARK_RESULT_COLUMNS: &str = "id, run_id, case_id, agent_id, workspace_path, status, success, grading_status, final_response, artifact_refs_json, error_message, started_at, completed_at, created_at, updated_at";
+const BENCHMARK_METRIC_COLUMNS: &str = "id, run_id, result_id, scope, input_tokens, output_tokens, total_tokens, cost_usd, llm_request_count, tool_call_count, tool_result_count, tool_error_count, tool_call_count_by_name_json, runtime_ms, successful_case_count, graded_case_count, total_case_count, all_cases_tsr, graded_cases_tsr, token_per_success, tool_calls_per_success, requests_per_success, tool_error_rate, guardrail_retry_count, recovery_attempt_count, read_only_loop_hint_count, raw_json, created_at";
+const BENCHMARK_GRADER_ARTIFACT_COLUMNS: &str = "id, result_id, grader_kind, command_json, exit_code, stdout_json, stderr, duration_ms, created_at";
+
+pub fn list_benchmark_suites(conn: &Connection) -> Result<Vec<BenchmarkSuiteRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {BENCHMARK_SUITE_COLUMNS} FROM benchmark_suites ORDER BY updated_at DESC"
+    ))?;
+    let rows = stmt
+        .query_map([], map_benchmark_suite_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn get_benchmark_suite(conn: &Connection, suite_id: &str) -> Result<Option<BenchmarkSuiteRow>> {
+    conn.query_row(
+        &format!("SELECT {BENCHMARK_SUITE_COLUMNS} FROM benchmark_suites WHERE id = ?1"),
+        [suite_id],
+        map_benchmark_suite_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn list_benchmark_cases(conn: &Connection, suite_id: &str) -> Result<Vec<BenchmarkCaseRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {BENCHMARK_CASE_COLUMNS} FROM benchmark_cases WHERE suite_id = ?1 ORDER BY task_id ASC"
+    ))?;
+    let rows = stmt
+        .query_map([suite_id], map_benchmark_case_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn get_benchmark_case(conn: &Connection, case_id: &str) -> Result<Option<BenchmarkCaseRow>> {
+    conn.query_row(
+        &format!("SELECT {BENCHMARK_CASE_COLUMNS} FROM benchmark_cases WHERE id = ?1"),
+        [case_id],
+        map_benchmark_case_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn insert_benchmark_run(
+    conn: &Connection,
+    id: &str,
+    suite_id: &str,
+    name: &str,
+    agent_kind: &str,
+    provider: &str,
+    model: &str,
+    base_url_hash: Option<&str>,
+    agent_config_json: &str,
+    git_commit: Option<&str>,
+    git_dirty: bool,
+    benchmark_source_path: &str,
+    case_ids_json: &str,
+    timeout_seconds: Option<i64>,
+    max_steps: Option<i64>,
+    token_budget: Option<i64>,
+    cost_budget_usd: Option<f64>,
+    workspace_root: Option<&str>,
+    metadata_json: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO benchmark_runs
+            (id, suite_id, name, agent_kind, provider, model, base_url_hash, agent_config_json,
+             git_commit, git_dirty, benchmark_source_path, case_ids_json, timeout_seconds, max_steps,
+             token_budget, cost_budget_usd, workspace_root, metadata_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        params![
+            id,
+            suite_id,
+            name,
+            agent_kind,
+            provider,
+            model,
+            base_url_hash,
+            agent_config_json,
+            git_commit,
+            if git_dirty { 1 } else { 0 },
+            benchmark_source_path,
+            case_ids_json,
+            timeout_seconds,
+            max_steps,
+            token_budget,
+            cost_budget_usd,
+            workspace_root,
+            metadata_json,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn update_benchmark_run_status(conn: &Connection, run_id: &str, status: &str) -> Result<()> {
+    let timestamp_fields = match status {
+        "running" => ", started_at = COALESCE(started_at, datetime('now'))",
+        "completed" | "completed_with_failures" | "failed" | "cancelled" | "timeout" => {
+            ", completed_at = COALESCE(completed_at, datetime('now'))"
+        }
+        _ => "",
+    };
+    let sql = format!(
+        "UPDATE benchmark_runs SET status = ?1, updated_at = datetime('now') {timestamp_fields} WHERE id = ?2"
+    );
+    conn.execute(&sql, params![status, run_id])?;
+    Ok(())
+}
+
+pub fn get_benchmark_run(conn: &Connection, run_id: &str) -> Result<Option<BenchmarkRunRow>> {
+    conn.query_row(
+        &format!("SELECT {BENCHMARK_RUN_COLUMNS} FROM benchmark_runs WHERE id = ?1"),
+        [run_id],
+        map_benchmark_run_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn list_benchmark_runs(
+    conn: &Connection,
+    suite_id: Option<&str>,
+) -> Result<Vec<BenchmarkRunRow>> {
+    match suite_id {
+        Some(sid) => {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {BENCHMARK_RUN_COLUMNS} FROM benchmark_runs WHERE suite_id = ?1 ORDER BY created_at DESC"
+            ))?;
+            let rows = stmt
+                .query_map([sid], map_benchmark_run_row)?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        }
+        None => {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {BENCHMARK_RUN_COLUMNS} FROM benchmark_runs ORDER BY created_at DESC LIMIT 100"
+            ))?;
+            let rows = stmt
+                .query_map([], map_benchmark_run_row)?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        }
+    }
+}
+
+pub fn insert_benchmark_result(
+    conn: &Connection,
+    id: &str,
+    run_id: &str,
+    case_id: &str,
+    agent_id: Option<&str>,
+    workspace_path: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO benchmark_results (id, run_id, case_id, agent_id, workspace_path)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, run_id, case_id, agent_id, workspace_path],
+    )?;
+    Ok(())
+}
+
+pub fn mark_benchmark_result_running(conn: &Connection, result_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE benchmark_results SET status = 'running', started_at = COALESCE(started_at, datetime('now')), updated_at = datetime('now') WHERE id = ?1",
+        [result_id],
+    )?;
+    Ok(())
+}
+
+pub fn complete_benchmark_result(
+    conn: &Connection,
+    result_id: &str,
+    status: &str,
+    success: Option<bool>,
+    grading_status: &str,
+    final_response: Option<&str>,
+    error_message: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE benchmark_results
+         SET status = ?1,
+             success = ?2,
+             grading_status = ?3,
+             final_response = ?4,
+             error_message = ?5,
+             completed_at = COALESCE(completed_at, datetime('now')),
+             updated_at = datetime('now')
+         WHERE id = ?6",
+        params![
+            status,
+            success.map(|v| if v { 1i64 } else { 0i64 }),
+            grading_status,
+            final_response,
+            error_message,
+            result_id,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_benchmark_results(conn: &Connection, run_id: &str) -> Result<Vec<BenchmarkResultRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {BENCHMARK_RESULT_COLUMNS} FROM benchmark_results WHERE run_id = ?1 ORDER BY created_at ASC"
+    ))?;
+    let rows = stmt
+        .query_map([run_id], map_benchmark_result_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn get_benchmark_result(
+    conn: &Connection,
+    result_id: &str,
+) -> Result<Option<BenchmarkResultRow>> {
+    conn.query_row(
+        &format!("SELECT {BENCHMARK_RESULT_COLUMNS} FROM benchmark_results WHERE id = ?1"),
+        [result_id],
+        map_benchmark_result_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn insert_benchmark_agent(
+    conn: &Connection,
+    agent_id: &str,
+    name: &str,
+    worktree_path: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO agents (id, name, status, worktree_path) VALUES (?1, ?2, 'idle', ?3)",
+        params![agent_id, name, worktree_path],
+    )?;
+    Ok(())
+}
+
+pub fn latest_assistant_text(conn: &Connection, agent_id: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT content FROM agent_events WHERE agent_id = ?1 AND kind = 'assistant_text' ORDER BY created_at DESC LIMIT 1",
+        [agent_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn latest_agent_message(conn: &Connection, agent_id: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT content FROM agent_events WHERE agent_id = ?1 AND kind = 'message' ORDER BY created_at DESC LIMIT 1",
+        [agent_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn list_cost_records_for_agent(
+    conn: &Connection,
+    agent_id: &str,
+) -> Result<Vec<CostRecordRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT input_tokens, output_tokens, cost_usd FROM cost_records WHERE agent_id = ?1 ORDER BY created_at ASC",
+    )?;
+    let rows = stmt
+        .query_map([agent_id], |row| {
+            Ok(CostRecordRow {
+                input_tokens: row.get(0)?,
+                output_tokens: row.get(1)?,
+                cost_usd: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn insert_benchmark_metric_snapshot(
+    conn: &Connection,
+    id: &str,
+    run_id: &str,
+    result_id: Option<&str>,
+    scope: &str,
+    metrics: &crate::benchmark::BenchmarkMetrics,
+    raw_json: &serde_json::Value,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO benchmark_metric_snapshots
+            (id, run_id, result_id, scope, input_tokens, output_tokens, total_tokens, cost_usd,
+             llm_request_count, tool_call_count, tool_result_count, tool_error_count,
+             tool_call_count_by_name_json, runtime_ms, successful_case_count, graded_case_count,
+             total_case_count, all_cases_tsr, graded_cases_tsr, token_per_success,
+             tool_calls_per_success, requests_per_success, tool_error_rate, guardrail_retry_count,
+             recovery_attempt_count, read_only_loop_hint_count, raw_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                 ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
+        params![
+            id,
+            run_id,
+            result_id,
+            scope,
+            metrics.input_tokens,
+            metrics.output_tokens,
+            metrics.total_tokens,
+            metrics.cost_usd,
+            metrics.llm_request_count,
+            metrics.tool_call_count,
+            metrics.tool_result_count,
+            metrics.tool_error_count,
+            serde_json::to_string(&metrics.tool_call_count_by_name)?,
+            metrics.runtime_ms,
+            metrics.successful_case_count,
+            metrics.graded_case_count,
+            metrics.total_case_count,
+            metrics.all_cases_tsr,
+            metrics.graded_cases_tsr,
+            metrics.token_per_success,
+            metrics.tool_calls_per_success,
+            metrics.requests_per_success,
+            metrics.tool_error_rate,
+            metrics.guardrail_retry_count,
+            metrics.recovery_attempt_count,
+            metrics.read_only_loop_hint_count,
+            serde_json::to_string(raw_json)?,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn latest_benchmark_metric_snapshot(
+    conn: &Connection,
+    run_id: &str,
+    scope: &str,
+) -> Result<Option<BenchmarkMetricSnapshotRow>> {
+    conn.query_row(
+        &format!(
+            "SELECT {BENCHMARK_METRIC_COLUMNS} FROM benchmark_metric_snapshots WHERE run_id = ?1 AND scope = ?2 ORDER BY created_at DESC LIMIT 1"
+        ),
+        params![run_id, scope],
+        map_benchmark_metric_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn list_case_metric_snapshots(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Vec<BenchmarkMetricSnapshotRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {BENCHMARK_METRIC_COLUMNS} FROM benchmark_metric_snapshots WHERE run_id = ?1 AND scope = 'case' ORDER BY created_at ASC"
+    ))?;
+    let rows = stmt
+        .query_map([run_id], map_benchmark_metric_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn get_case_metric_snapshot_for_result(
+    conn: &Connection,
+    result_id: &str,
+) -> Result<Option<BenchmarkMetricSnapshotRow>> {
+    conn.query_row(
+        &format!(
+            "SELECT {BENCHMARK_METRIC_COLUMNS} FROM benchmark_metric_snapshots WHERE result_id = ?1 AND scope = 'case' ORDER BY created_at DESC LIMIT 1"
+        ),
+        [result_id],
+        map_benchmark_metric_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn list_benchmark_grader_artifacts(
+    conn: &Connection,
+    result_id: &str,
+) -> Result<Vec<BenchmarkGraderArtifactRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {BENCHMARK_GRADER_ARTIFACT_COLUMNS} FROM benchmark_grader_artifacts WHERE result_id = ?1 ORDER BY created_at ASC"
+    ))?;
+    let rows = stmt
+        .query_map([result_id], map_benchmark_grader_artifact_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn insert_benchmark_grader_artifact(
+    conn: &Connection,
+    id: &str,
+    result_id: &str,
+    grader_kind: &str,
+    command_json: &str,
+    exit_code: Option<i32>,
+    stdout_json: Option<&str>,
+    stderr: &str,
+    duration_ms: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO benchmark_grader_artifacts
+            (id, result_id, grader_kind, command_json, exit_code, stdout_json, stderr, duration_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            id,
+            result_id,
+            grader_kind,
+            command_json,
+            exit_code,
+            stdout_json,
+            stderr,
+            duration_ms
+        ],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2228,7 +2951,15 @@ mod tests {
     fn insert_and_query_llm_call_event() {
         let conn = setup_db();
         insert_agent(&conn, "agent-1", "Test Agent").unwrap();
-        insert_event(&conn, "evt-1", "agent-1", 1, "llm_call", "Step 1: calling LLM").unwrap();
+        insert_event(
+            &conn,
+            "evt-1",
+            "agent-1",
+            1,
+            "llm_call",
+            "Step 1: calling LLM",
+        )
+        .unwrap();
 
         let events = get_events_for_agent(&conn, "agent-1").unwrap();
         assert_eq!(events.len(), 1);
@@ -2240,7 +2971,15 @@ mod tests {
     fn insert_tool_result_event() {
         let conn = setup_db();
         insert_agent(&conn, "agent-1", "Test Agent").unwrap();
-        insert_event(&conn, "evt-1", "agent-1", 2, "tool_result", "file contents here").unwrap();
+        insert_event(
+            &conn,
+            "evt-1",
+            "agent-1",
+            2,
+            "tool_result",
+            "file contents here",
+        )
+        .unwrap();
 
         let events = get_events_for_agent(&conn, "agent-1").unwrap();
         assert_eq!(events.len(), 1);
@@ -2275,12 +3014,23 @@ mod tests {
         insert_event(&conn, "evt-1", "agent-1", 1, "llm_call", "step 1").unwrap();
         insert_event(&conn, "evt-2", "agent-1", 1, "tool_use", "tool call").unwrap();
         insert_event(&conn, "evt-3", "agent-1", 1, "tool_result", "tool out").unwrap();
-        insert_event(&conn, "evt-4", "agent-1", 1, "checkpoint", "tokens: 100in/50out").unwrap();
+        insert_event(
+            &conn,
+            "evt-4",
+            "agent-1",
+            1,
+            "checkpoint",
+            "tokens: 100in/50out",
+        )
+        .unwrap();
 
         let events = get_events_for_agent(&conn, "agent-1").unwrap();
         assert_eq!(events.len(), 4);
         let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
-        assert_eq!(kinds, vec!["llm_call", "tool_use", "tool_result", "checkpoint"]);
+        assert_eq!(
+            kinds,
+            vec!["llm_call", "tool_use", "tool_result", "checkpoint"]
+        );
     }
 
     #[test]
@@ -2771,7 +3521,11 @@ mod tests {
         create_task(&conn, "t2", "m1", "running");
         insert_agent_for_task(&conn, "a1", "Agent 1", "t1", "/tmp/w1").unwrap();
         insert_agent_for_task(&conn, "a2", "Agent 2", "t2", "/tmp/w2").unwrap();
-        conn.execute("UPDATE agents SET status = 'running' WHERE id IN ('a1', 'a2')", []).unwrap();
+        conn.execute(
+            "UPDATE agents SET status = 'running' WHERE id IN ('a1', 'a2')",
+            [],
+        )
+        .unwrap();
 
         let running = get_running_agent_ids_for_mission(&conn, "m1").unwrap();
         assert_eq!(running.len(), 2);
@@ -2799,8 +3553,10 @@ mod tests {
         create_task(&conn, "t2", "m1", "completed");
         insert_agent_for_task(&conn, "a1", "Agent 1", "t1", "/tmp/w1").unwrap();
         insert_agent_for_task(&conn, "a2", "Agent 2", "t2", "/tmp/w2").unwrap();
-        conn.execute("UPDATE agents SET status = 'running' WHERE id = 'a1'", []).unwrap();
-        conn.execute("UPDATE agents SET status = 'completed' WHERE id = 'a2'", []).unwrap();
+        conn.execute("UPDATE agents SET status = 'running' WHERE id = 'a1'", [])
+            .unwrap();
+        conn.execute("UPDATE agents SET status = 'completed' WHERE id = 'a2'", [])
+            .unwrap();
 
         let running = get_running_agent_ids_for_mission(&conn, "m1").unwrap();
         assert_eq!(running.len(), 1);
@@ -2832,19 +3588,55 @@ mod tests {
         create_planner_session(&conn, "ps1", None, "planner", "/tmp/r", "test").unwrap();
 
         insert_planner_step(
-            &conn, "s1", "ps1", 1, "tool_call", Some("read_file"), Some("{}"), None, None, 0,
+            &conn,
+            "s1",
+            "ps1",
+            1,
+            "tool_call",
+            Some("read_file"),
+            Some("{}"),
+            None,
+            None,
+            0,
         )
         .unwrap();
         insert_planner_step(
-            &conn, "s2", "ps1", 2, "tool_call", Some("fetch_url"), Some("{}"), None, None, 0,
+            &conn,
+            "s2",
+            "ps1",
+            2,
+            "tool_call",
+            Some("fetch_url"),
+            Some("{}"),
+            None,
+            None,
+            0,
         )
         .unwrap();
         insert_planner_step(
-            &conn, "s3", "ps1", 3, "tool_result", Some("fetch_url"), None, Some("{}"), None, 0,
+            &conn,
+            "s3",
+            "ps1",
+            3,
+            "tool_result",
+            Some("fetch_url"),
+            None,
+            Some("{}"),
+            None,
+            0,
         )
         .unwrap();
         insert_planner_step(
-            &conn, "s4", "ps1", 4, "tool_call", Some("fetch_url"), Some("{}"), None, None, 0,
+            &conn,
+            "s4",
+            "ps1",
+            4,
+            "tool_call",
+            Some("fetch_url"),
+            Some("{}"),
+            None,
+            None,
+            0,
         )
         .unwrap();
 
@@ -2975,7 +3767,10 @@ mod tests {
         let parent_ids: Vec<&str> = parents.iter().map(|(t, _)| t.as_str()).collect();
         assert!(parent_ids.contains(&"B"));
         assert!(parent_ids.contains(&"C"));
-        assert!(!parent_ids.contains(&"A"), "A is indirect — must not appear");
+        assert!(
+            !parent_ids.contains(&"A"),
+            "A is indirect — must not appear"
+        );
         assert_eq!(parents.len(), 2);
     }
 
@@ -3029,17 +3824,7 @@ mod tests {
         create_mission(&conn, "m1");
 
         record_merge_attempt(
-            &conn,
-            "rec-1",
-            "m1",
-            "agent/A",
-            "main",
-            "theirs",
-            "auto",
-            "[]",
-            None,
-            None,
-            None,
+            &conn, "rec-1", "m1", "agent/A", "main", "theirs", "auto", "[]", None, None, None,
         )
         .unwrap();
         record_merge_attempt(
@@ -3125,7 +3910,10 @@ mod tests {
         assert_eq!(row.id, "ar-1");
         assert_eq!(row.kind, "tool");
         assert_eq!(row.status, "pending");
-        assert!(row.expires_at > row.created_at, "expires_at should be in the future");
+        assert!(
+            row.expires_at > row.created_at,
+            "expires_at should be in the future"
+        );
         assert!(row.resolved_at.is_none());
     }
 
@@ -3190,7 +3978,11 @@ mod tests {
         create_mission(&conn, "m1");
         // ar-old: 已过期 (timeout=-10s)；ar-fresh: 还有 600s
         insert_approval(&conn, &make_approval_with_kind("ar-old", "m1", "tool", -10)).unwrap();
-        insert_approval(&conn, &make_approval_with_kind("ar-fresh", "m1", "tool", 600)).unwrap();
+        insert_approval(
+            &conn,
+            &make_approval_with_kind("ar-fresh", "m1", "tool", 600),
+        )
+        .unwrap();
 
         let expired = expire_overdue_approvals(&conn).unwrap();
         assert_eq!(expired, vec!["ar-old".to_string()]);
@@ -3234,19 +4026,25 @@ mod tests {
 
         // 默认 idle
         let status: String = conn
-            .query_row("SELECT status FROM agents WHERE id = 'ag-1'", [], |r| r.get(0))
+            .query_row("SELECT status FROM agents WHERE id = 'ag-1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(status, "idle");
 
         set_agent_waiting_approval(&conn, "ag-1").unwrap();
         let status: String = conn
-            .query_row("SELECT status FROM agents WHERE id = 'ag-1'", [], |r| r.get(0))
+            .query_row("SELECT status FROM agents WHERE id = 'ag-1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(status, "waiting_approval");
 
         set_agent_running(&conn, "ag-1").unwrap();
         let status: String = conn
-            .query_row("SELECT status FROM agents WHERE id = 'ag-1'", [], |r| r.get(0))
+            .query_row("SELECT status FROM agents WHERE id = 'ag-1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(status, "running");
     }
@@ -3278,7 +4076,10 @@ mod tests {
 
         let row = get_mission_report_by_mission(&conn, "m1").unwrap().unwrap();
         assert_eq!(row.id, "rep-1");
-        assert!(row.report_data.contains("\"version\":\"b\""), "data should be overwritten");
+        assert!(
+            row.report_data.contains("\"version\":\"b\""),
+            "data should be overwritten"
+        );
         assert_eq!(row.schema_version, 1);
     }
 
@@ -3310,7 +4111,11 @@ mod tests {
         // 重复投同一 decision → UPSERT 路径，不应新增
         upsert_report_vote(&conn, "v-2", "rep-1", "D-1", "disagree").unwrap();
         let votes = list_report_votes(&conn, "rep-1").unwrap();
-        assert_eq!(votes.len(), 1, "UNIQUE(report_id, decision_id) should prevent duplicates");
+        assert_eq!(
+            votes.len(),
+            1,
+            "UNIQUE(report_id, decision_id) should prevent duplicates"
+        );
         assert_eq!(votes[0].vote, "disagree", "vote should switch to disagree");
         // updated_at 应当被更新（与 created_at 不同；这里只断言字段存在）
         assert!(!votes[0].updated_at.is_empty());
@@ -3328,7 +4133,10 @@ mod tests {
         upsert_mission_report(&conn, "rep-1", "m1", "{}").unwrap();
 
         let res = upsert_report_vote(&conn, "v-1", "rep-1", "D-1", "maybe");
-        assert!(res.is_err(), "invalid vote value should fail before SQL hits CHECK");
+        assert!(
+            res.is_err(),
+            "invalid vote value should fail before SQL hits CHECK"
+        );
     }
 
     #[test]
@@ -3346,7 +4154,10 @@ mod tests {
         assert_eq!(agg.len(), 2);
         let d1 = agg.iter().find(|a| a.decision_id == "D-1").unwrap();
         assert_eq!(d1.agree_count, 0);
-        assert_eq!(d1.disagree_count, 1, "switched vote should be counted as disagree");
+        assert_eq!(
+            d1.disagree_count, 1,
+            "switched vote should be counted as disagree"
+        );
         let d2 = agg.iter().find(|a| a.decision_id == "D-2").unwrap();
         assert_eq!(d2.disagree_count, 1);
     }
@@ -3358,13 +4169,21 @@ mod tests {
         upsert_mission_report(&conn, "rep-1", "m1", "{}").unwrap();
         upsert_report_vote(&conn, "v-1", "rep-1", "D-1", "agree").unwrap();
 
-        conn.execute("DELETE FROM missions WHERE id = 'm1'", []).unwrap();
+        conn.execute("DELETE FROM missions WHERE id = 'm1'", [])
+            .unwrap();
 
         let report = get_mission_report_by_mission(&conn, "m1").unwrap();
-        assert!(report.is_none(), "report should cascade-delete with mission");
+        assert!(
+            report.is_none(),
+            "report should cascade-delete with mission"
+        );
 
         let votes_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM report_votes WHERE report_id = 'rep-1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM report_votes WHERE report_id = 'rep-1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(votes_count, 0, "votes should cascade-delete with report");
     }

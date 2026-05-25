@@ -70,7 +70,10 @@ fn builtin_tools_legacy() -> Vec<ToolDefinition> {
                           silent for too long or runs past the wall-clock cap. Default thresholds \
                           are 60s idle / 5min wall — set `expect_long_running: true` for known \
                           long commands like `npm install`, `pnpm install`, `cargo build`, \
-                          `cargo test` (raises to 120s idle / 30min wall).".to_string(),
+                          `cargo test` (raises to 120s idle / 30min wall), or pass \
+                          `timeout_seconds` / `idle_timeout_seconds` for an explicit command-level cap. \
+                          The subprocess inherits the agent environment, including proxy variables like ALL_PROXY."
+                .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -78,6 +81,14 @@ fn builtin_tools_legacy() -> Vec<ToolDefinition> {
                     "expect_long_running": {
                         "type": "boolean",
                         "description": "Set to true for installs / heavy builds / long test suites. Defaults to false."
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": "Optional wall-clock timeout for this command in seconds. Must be between 1 and 1800."
+                    },
+                    "idle_timeout_seconds": {
+                        "type": "integer",
+                        "description": "Optional idle timeout in seconds with no stdout/stderr. Must be between 1 and 120."
                     }
                 },
                 "required": ["command"]
@@ -386,13 +397,12 @@ pub const PROPOSE_FOLLOWUP_TOOL: &str = "propose_followup_mission";
 pub fn propose_followup_mission_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: PROPOSE_FOLLOWUP_TOOL.to_string(),
-        description:
-            "Propose escalating the user's request to a brand-new follow-up mission \
+        description: "Propose escalating the user's request to a brand-new follow-up mission \
              (which will go through Planner → DAG → Scheduler). Call this ONLY when the \
              user request clearly exceeds the small-edit threshold: more than 3 files, \
              more than ~30 lines of code change, or introduces new modules/dependencies. \
              After calling this you will pause and wait for the user's decision."
-                .to_string(),
+            .to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {

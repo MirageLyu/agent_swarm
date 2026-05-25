@@ -105,8 +105,7 @@ impl ToolSummarizer {
         if model.trim().is_empty() || api_key.trim().is_empty() {
             return None;
         }
-        let provider: Arc<dyn LlmProvider> =
-            Arc::new(OpenAICompatProvider::new(api_key, base_url));
+        let provider: Arc<dyn LlmProvider> = Arc::new(OpenAICompatProvider::new(api_key, base_url));
         Some(Self {
             provider,
             model,
@@ -220,9 +219,8 @@ impl ToolSummarizer {
             );
         }
 
-        let user_text = format!(
-            "Tool: `{tool_name}`\n\nOriginal output (compress this):\n```\n{content}\n```"
-        );
+        let user_text =
+            format!("Tool: `{tool_name}`\n\nOriginal output (compress this):\n```\n{content}\n```");
         let mut req = LlmRequest {
             model: self.model.clone(),
             system: Some(SUMMARIZE_SYSTEM.to_string()),
@@ -252,9 +250,7 @@ impl ToolSummarizer {
                 // 临时型（网络抖动 / reseller 5xx）→ 透传，下次还能再试。
                 let s = format!("{e:#}");
                 // swap 返回前一次值；只在第一次置位时打 warn，避免日志刷屏
-                if is_unrecoverable_auth_error(&s)
-                    && !self.disabled.swap(true, Ordering::Relaxed)
-                {
+                if is_unrecoverable_auth_error(&s) && !self.disabled.swap(true, Ordering::Relaxed) {
                     tracing::warn!(
                         model = %self.model,
                         error = %s,
@@ -288,7 +284,9 @@ mod tests {
         assert!(is_unrecoverable_auth_error(
             "OpenAI compat API error 401 Unauthorized: ..."
         ));
-        assert!(is_unrecoverable_auth_error("403 Forbidden — please check key"));
+        assert!(is_unrecoverable_auth_error(
+            "403 Forbidden — please check key"
+        ));
     }
 
     #[test]

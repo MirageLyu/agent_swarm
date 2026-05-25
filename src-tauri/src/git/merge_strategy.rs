@@ -123,9 +123,9 @@ pub fn merge_branch_ref_only(
         });
     }
 
-    let base_oid = repo
-        .merge_base(target_oid, source_oid)
-        .with_context(|| format!("no merge base between '{target_branch_name}' and '{source_branch_name}'"))?;
+    let base_oid = repo.merge_base(target_oid, source_oid).with_context(|| {
+        format!("no merge base between '{target_branch_name}' and '{source_branch_name}'")
+    })?;
 
     if base_oid == source_oid {
         // source 已包含于 target，无需合并
@@ -166,10 +166,8 @@ pub fn merge_branch_ref_only(
     let mut overall_layer = MergeLayer::L1Auto;
 
     if merged_index.has_conflicts() {
-        let conflict_entries: Vec<git2::IndexConflict> = merged_index
-            .conflicts()?
-            .filter_map(|c| c.ok())
-            .collect();
+        let conflict_entries: Vec<git2::IndexConflict> =
+            merged_index.conflicts()?.filter_map(|c| c.ok()).collect();
 
         for conflict in conflict_entries {
             // git2 的 IndexEntry 不实现 Clone，统一 take 出来后用引用读、按需 move 写。
@@ -194,7 +192,8 @@ pub fn merge_branch_ref_only(
                 .and_then(|e| repo.find_blob(e.id).ok())
                 .and_then(|b| std::str::from_utf8(b.content()).ok().map(String::from));
 
-            let layer = classify_conflict_layer(strategy, ours_text.as_deref(), theirs_text.as_deref());
+            let layer =
+                classify_conflict_layer(strategy, ours_text.as_deref(), theirs_text.as_deref());
 
             // 清掉 ancestor / ours / theirs 三个 stage
             let p = Path::new(&path);
@@ -213,10 +212,7 @@ pub fn merge_branch_ref_only(
             }
             // 若 entry 是 None（一侧删除文件），删除三个 stage 已经达到了"按一方意图删除"的效果
 
-            conflicts.push(ConflictResolution {
-                path,
-                layer,
-            });
+            conflicts.push(ConflictResolution { path, layer });
 
             // 更新 overall layer：FallbackTheirs > L2HeuristicTheirs > L1Auto
             overall_layer = match (overall_layer, layer) {
@@ -231,7 +227,9 @@ pub fn merge_branch_ref_only(
         }
     }
 
-    let tree_oid = merged_index.write_tree_to(repo).context("write merged tree failed")?;
+    let tree_oid = merged_index
+        .write_tree_to(repo)
+        .context("write merged tree failed")?;
     let tree = repo.find_tree(tree_oid)?;
 
     let sig = repo
@@ -311,25 +309,43 @@ mod tests {
             index.write_tree().unwrap()
         };
         let tree = repo.find_tree(tree_id).unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
         repo.set_head("refs/heads/main").unwrap();
         drop(tree);
         repo
     }
 
-    fn commit_on_branch(repo: &Repository, branch: &str, file: &str, content: &str, msg: &str) -> git2::Oid {
+    fn commit_on_branch(
+        repo: &Repository,
+        branch: &str,
+        file: &str,
+        content: &str,
+        msg: &str,
+    ) -> git2::Oid {
         // checkout / fast-forward 到目标分支
-        let main_tip = repo.find_branch("main", BranchType::Local).unwrap().get().peel_to_commit().unwrap();
+        let main_tip = repo
+            .find_branch("main", BranchType::Local)
+            .unwrap()
+            .get()
+            .peel_to_commit()
+            .unwrap();
 
         // 确保 branch 存在
         if repo.find_branch(branch, BranchType::Local).is_err() {
             repo.branch(branch, &main_tip, false).unwrap();
         }
-        let parent_commit = repo.find_branch(branch, BranchType::Local).unwrap().get().peel_to_commit().unwrap();
+        let parent_commit = repo
+            .find_branch(branch, BranchType::Local)
+            .unwrap()
+            .get()
+            .peel_to_commit()
+            .unwrap();
 
         // 切到该分支并写文件
         repo.set_head(&format!("refs/heads/{branch}")).unwrap();
-        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+            .unwrap();
 
         let work = repo.workdir().unwrap();
         fs::write(work.join(file), content).unwrap();
@@ -340,7 +356,9 @@ mod tests {
         let tree_id = index.write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
         let sig = git2::Signature::now("Test", "test@test.local").unwrap();
-        let oid = repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &[&parent_commit]).unwrap();
+        let oid = repo
+            .commit(Some("HEAD"), &sig, &sig, msg, &tree, &[&parent_commit])
+            .unwrap();
         oid
     }
 
@@ -353,7 +371,12 @@ mod tests {
         commit_on_branch(&repo, "main", "a.txt", "hello", "main first");
 
         // 创建 task-base/T1 指向 main tip
-        let main_tip = repo.find_branch("main", BranchType::Local).unwrap().get().peel_to_commit().unwrap();
+        let main_tip = repo
+            .find_branch("main", BranchType::Local)
+            .unwrap()
+            .get()
+            .peel_to_commit()
+            .unwrap();
         repo.branch("task-base/T1", &main_tip, false).unwrap();
 
         // 在 agent/A 上加文件
@@ -394,9 +417,20 @@ mod tests {
         commit_on_branch(&repo, "main", "shared.txt", "base", "main base");
 
         // task-base 在 main 之上加文件 b.txt
-        let main_tip = repo.find_branch("main", BranchType::Local).unwrap().get().peel_to_commit().unwrap();
+        let main_tip = repo
+            .find_branch("main", BranchType::Local)
+            .unwrap()
+            .get()
+            .peel_to_commit()
+            .unwrap();
         repo.branch("task-base/T1", &main_tip, false).unwrap();
-        commit_on_branch(&repo, "task-base/T1", "b.txt", "from base merge", "T1 add b");
+        commit_on_branch(
+            &repo,
+            "task-base/T1",
+            "b.txt",
+            "from base merge",
+            "T1 add b",
+        );
 
         // agent/A 也 fork 自 main 并加文件 c.txt
         commit_on_branch(&repo, "agent/A", "c.txt", "from A", "A add c");
@@ -438,13 +472,30 @@ mod tests {
         let repo = init_repo(&path);
         commit_on_branch(&repo, "main", "shared.txt", "line1\nline2\n", "main");
 
-        let main_tip = repo.find_branch("main", BranchType::Local).unwrap().get().peel_to_commit().unwrap();
+        let main_tip = repo
+            .find_branch("main", BranchType::Local)
+            .unwrap()
+            .get()
+            .peel_to_commit()
+            .unwrap();
         repo.branch("task-base/T1", &main_tip, false).unwrap();
         // base 改 shared.txt 加缩进
-        commit_on_branch(&repo, "task-base/T1", "shared.txt", "    line1\n    line2\n", "base indents");
+        commit_on_branch(
+            &repo,
+            "task-base/T1",
+            "shared.txt",
+            "    line1\n    line2\n",
+            "base indents",
+        );
 
         // agent 改 shared.txt 末尾加换行 + 中间无空白差异（语义等价）
-        commit_on_branch(&repo, "agent/A", "shared.txt", "line1\nline2\n\n", "agent extra newline");
+        commit_on_branch(
+            &repo,
+            "agent/A",
+            "shared.txt",
+            "line1\nline2\n\n",
+            "agent extra newline",
+        );
 
         repo.set_head("refs/heads/main").unwrap();
 
@@ -478,11 +529,28 @@ mod tests {
         let repo = init_repo(&path);
         commit_on_branch(&repo, "main", "shared.txt", "base content\n", "main");
 
-        let main_tip = repo.find_branch("main", BranchType::Local).unwrap().get().peel_to_commit().unwrap();
+        let main_tip = repo
+            .find_branch("main", BranchType::Local)
+            .unwrap()
+            .get()
+            .peel_to_commit()
+            .unwrap();
         repo.branch("task-base/T1", &main_tip, false).unwrap();
-        commit_on_branch(&repo, "task-base/T1", "shared.txt", "BASE EDIT VERSION\n", "base edit");
+        commit_on_branch(
+            &repo,
+            "task-base/T1",
+            "shared.txt",
+            "BASE EDIT VERSION\n",
+            "base edit",
+        );
 
-        commit_on_branch(&repo, "agent/A", "shared.txt", "AGENT EDIT VERSION\n", "agent edit");
+        commit_on_branch(
+            &repo,
+            "agent/A",
+            "shared.txt",
+            "AGENT EDIT VERSION\n",
+            "agent edit",
+        );
 
         repo.set_head("refs/heads/main").unwrap();
 
@@ -507,8 +575,13 @@ mod tests {
             .unwrap()
             .tree()
             .unwrap();
-        let blob = repo.find_blob(tree.get_path(Path::new("shared.txt")).unwrap().id()).unwrap();
-        assert_eq!(std::str::from_utf8(blob.content()).unwrap(), "AGENT EDIT VERSION\n");
+        let blob = repo
+            .find_blob(tree.get_path(Path::new("shared.txt")).unwrap().id())
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(blob.content()).unwrap(),
+            "AGENT EDIT VERSION\n"
+        );
     }
 
     #[test]
@@ -518,10 +591,27 @@ mod tests {
         let repo = init_repo(&path);
         commit_on_branch(&repo, "main", "shared.txt", "x\ny\n", "main");
 
-        let main_tip = repo.find_branch("main", BranchType::Local).unwrap().get().peel_to_commit().unwrap();
+        let main_tip = repo
+            .find_branch("main", BranchType::Local)
+            .unwrap()
+            .get()
+            .peel_to_commit()
+            .unwrap();
         repo.branch("task-base/T1", &main_tip, false).unwrap();
-        commit_on_branch(&repo, "task-base/T1", "shared.txt", "  x\n  y\n", "base indents");
-        commit_on_branch(&repo, "agent/A", "shared.txt", "x\ny\n\n", "agent extra newline");
+        commit_on_branch(
+            &repo,
+            "task-base/T1",
+            "shared.txt",
+            "  x\n  y\n",
+            "base indents",
+        );
+        commit_on_branch(
+            &repo,
+            "agent/A",
+            "shared.txt",
+            "x\ny\n\n",
+            "agent extra newline",
+        );
         repo.set_head("refs/heads/main").unwrap();
 
         let outcome = merge_branch_ref_only(
@@ -544,7 +634,12 @@ mod tests {
         let path = tmp.path().to_path_buf();
         let repo = init_repo(&path);
         commit_on_branch(&repo, "main", "a.txt", "x", "main");
-        let main_tip = repo.find_branch("main", BranchType::Local).unwrap().get().peel_to_commit().unwrap();
+        let main_tip = repo
+            .find_branch("main", BranchType::Local)
+            .unwrap()
+            .get()
+            .peel_to_commit()
+            .unwrap();
         repo.branch("task-base/T1", &main_tip, false).unwrap();
         // agent/A == main_tip 同点
         repo.branch("agent/A", &main_tip, false).unwrap();

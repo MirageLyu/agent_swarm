@@ -5,7 +5,7 @@ use tauri::Manager;
 use uuid::Uuid;
 
 use crate::agent::belief_state::{self, PreflightBeliefState, SlotStatus};
-use crate::agent::planner::{self, PreflightAction, PreflightChoice, DecisionEntry, Alternative};
+use crate::agent::planner::{self, Alternative, DecisionEntry, PreflightAction, PreflightChoice};
 use crate::commands::mission::{build_provider, PlanMissionResponse, TaskInfo};
 use crate::llm::{ContentBlock, Message, MessageRole, TokenUsage};
 
@@ -96,7 +96,10 @@ pub struct PreflightMessageInfo {
 
 fn friendlify_error(raw: &str) -> String {
     let lower = raw.to_lowercase();
-    if lower.contains("decoding response body") || lower.contains("stream error") || lower.contains("connection") {
+    if lower.contains("decoding response body")
+        || lower.contains("stream error")
+        || lower.contains("connection")
+    {
         "网络连接中断，请检查网络后重试".to_string()
     } else if lower.contains("timed out") || lower.contains("timeout") {
         "请求超时，LLM 响应时间过长，请稍后重试".to_string()
@@ -111,10 +114,7 @@ fn friendlify_error(raw: &str) -> String {
     }
 }
 
-fn get_or_create_contract(
-    conn: &rusqlite::Connection,
-    mission_id: &str,
-) -> anyhow::Result<String> {
+fn get_or_create_contract(conn: &rusqlite::Connection, mission_id: &str) -> anyhow::Result<String> {
     let existing: Option<String> = conn
         .query_row(
             "SELECT id FROM mission_contracts WHERE mission_id = ?",
@@ -137,10 +137,7 @@ fn get_or_create_contract(
 
 // ---------- tool_call processing ----------
 
-fn load_belief_state(
-    conn: &rusqlite::Connection,
-    session_id: &str,
-) -> PreflightBeliefState {
+fn load_belief_state(conn: &rusqlite::Connection, session_id: &str) -> PreflightBeliefState {
     let raw: String = conn
         .query_row(
             "SELECT belief_state FROM preflight_sessions WHERE id = ?",
@@ -178,7 +175,9 @@ fn load_contract_items(
         )
         .ok();
 
-    let Some(contract_id) = contract_id else { return vec![] };
+    let Some(contract_id) = contract_id else {
+        return vec![];
+    };
 
     let mut stmt = conn.prepare(
         "SELECT section, text, source FROM contract_items WHERE contract_id = ? ORDER BY created_at ASC"
@@ -188,9 +187,13 @@ fn load_contract_items(
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
-            row.get::<_, String>(2).unwrap_or_else(|_| "confirmed".into()),
+            row.get::<_, String>(2)
+                .unwrap_or_else(|_| "confirmed".into()),
         ))
-    }).unwrap().filter_map(|r| r.ok()).collect()
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
 }
 
 /// Load rejected alternatives from decision_log for prompt injection (FM-10.6.5).
@@ -208,7 +211,10 @@ fn load_rejected_alternatives(
             row.get::<_, u32>(1)?,
             row.get::<_, String>(2).unwrap_or_default(),
         ))
-    }).unwrap().filter_map(|r| r.ok()).collect()
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
 }
 
 /// Insert a decision entry into the database (FM-10.6).
@@ -231,11 +237,7 @@ fn insert_decision_entry(
 }
 
 /// Save token usage metrics after each round (FM-10.5.4.1).
-fn save_token_usage(
-    conn: &rusqlite::Connection,
-    session_id: &str,
-    usage: &TokenUsage,
-) {
+fn save_token_usage(conn: &rusqlite::Connection, session_id: &str, usage: &TokenUsage) {
     let _ = conn.execute(
         "UPDATE preflight_sessions SET last_input_tokens = ?, last_output_tokens = ?, cumulative_input_tokens = cumulative_input_tokens + ?, cumulative_output_tokens = cumulative_output_tokens + ?, updated_at = datetime('now') WHERE id = ?",
         rusqlite::params![usage.input_tokens as i64, usage.output_tokens as i64, usage.input_tokens as i64, usage.output_tokens as i64, session_id],
@@ -267,7 +269,8 @@ fn process_tool_actions(
             }
             PreflightAction::AddContractItem { id, args } => {
                 let contract_id = get_or_create_contract(conn, mission_id).unwrap_or_default();
-                let result = add_contract_item_internal(conn, &contract_id, &args.section, &args.item);
+                let result =
+                    add_contract_item_internal(conn, &contract_id, &args.section, &args.item);
 
                 match result {
                     Ok(item_id) => {
@@ -275,8 +278,15 @@ fn process_tool_actions(
                             "confirmed" => SlotStatus::Confirmed,
                             _ => SlotStatus::Tentative,
                         };
-                        if let Some(slot_id) = belief_state::map_contract_item_to_slot(&args.section, &args.item) {
-                            belief_state.update_slot(slot_id, slot_status, Some(args.item.clone()), belief_state.round);
+                        if let Some(slot_id) =
+                            belief_state::map_contract_item_to_slot(&args.section, &args.item)
+                        {
+                            belief_state.update_slot(
+                                slot_id,
+                                slot_status,
+                                Some(args.item.clone()),
+                                belief_state.round,
+                            );
                         }
 
                         // FM-10.6: Auto-record decision
@@ -286,10 +296,14 @@ fn process_tool_actions(
                             _ => "confirmed",
                         };
                         insert_decision_entry(
-                            conn, session_id, belief_state.round, decision_type,
+                            conn,
+                            session_id,
+                            belief_state.round,
+                            decision_type,
                             &args.item,
                             args.rationale.as_deref().unwrap_or(""),
-                            &[], Some(&item_id),
+                            &[],
+                            Some(&item_id),
                         );
 
                         let item_info = json!({
@@ -299,7 +313,9 @@ fn process_tool_actions(
                             "source": "agent",
                         });
                         planner::emit_preflight_event_pub(
-                            app, session_id, "contract_item_added",
+                            app,
+                            session_id,
+                            "contract_item_added",
                             &item_info.to_string(),
                         );
 
@@ -322,7 +338,11 @@ fn process_tool_actions(
             PreflightAction::UpdateContractItem { id, args } => {
                 // FM-10.6: Record the old content before update
                 let old_content: Option<String> = conn
-                    .query_row("SELECT text FROM contract_items WHERE id = ?", [&args.item_id], |row| row.get(0))
+                    .query_row(
+                        "SELECT text FROM contract_items WHERE id = ?",
+                        [&args.item_id],
+                        |row| row.get(0),
+                    )
                     .ok();
 
                 let result = update_contract_item_internal(conn, &args.item_id, &args.new_content);
@@ -335,10 +355,14 @@ fn process_tool_actions(
                             args.new_content.clone()
                         };
                         insert_decision_entry(
-                            conn, session_id, belief_state.round, "revised",
+                            conn,
+                            session_id,
+                            belief_state.round,
+                            "revised",
                             &desc,
                             args.reason.as_deref().unwrap_or(""),
-                            &[], Some(&args.item_id),
+                            &[],
+                            Some(&args.item_id),
                         );
 
                         tool_results.push(json!({
@@ -376,7 +400,9 @@ fn process_tool_actions(
                     rusqlite::params![db_mode, session_id],
                 );
                 planner::emit_preflight_event_pub(
-                    app, session_id, "mode_switched",
+                    app,
+                    session_id,
+                    "mode_switched",
                     &json!({"mode": db_mode}).to_string(),
                 );
                 tool_results.push(json!({
@@ -477,10 +503,7 @@ fn reconstruct_history(stored_msgs: &[serde_json::Value]) -> Vec<Message> {
                 history.push(Message {
                     role: MessageRole::User,
                     content: vec![ContentBlock::ToolResult {
-                        tool_use_id: m["tool_call_id"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string(),
+                        tool_use_id: m["tool_call_id"].as_str().unwrap_or("").to_string(),
                         content: m["content"].as_str().unwrap_or("").to_string(),
                         is_error: false,
                     }],
@@ -645,12 +668,14 @@ async fn preflight_with_continuation(
 
     for iteration in 0..MAX_TOOL_CONTINUATION_ROUNDS {
         // Load current state for dynamic prompt
-        let (contract_items, belief_state_snapshot, rejected_alts) = db.with_conn(|conn| {
-            let items = load_contract_items(conn, mission_id);
-            let bs = load_belief_state(conn, session_id);
-            let alts = load_rejected_alternatives(conn, session_id);
-            Ok::<_, anyhow::Error>((items, bs, alts))
-        }).unwrap_or_default();
+        let (contract_items, belief_state_snapshot, rejected_alts) = db
+            .with_conn(|conn| {
+                let items = load_contract_items(conn, mission_id);
+                let bs = load_belief_state(conn, session_id);
+                let alts = load_rejected_alternatives(conn, session_id);
+                Ok::<_, anyhow::Error>((items, bs, alts))
+            })
+            .unwrap_or_default();
 
         // FM-10.5: Full Compaction check (only on first iteration of each round)
         if iteration == 0 {
@@ -661,18 +686,34 @@ async fn preflight_with_continuation(
             //
             // 现在直接读取 compacted_at 的 round 值（INTEGER，migration 012 定义），
             // None 表示本 session 还没 compact 过；should_compact 据此实现冷却。
-            let compact_state = db.with_conn(|conn| {
-                let last_input: Option<u64> = conn
-                    .query_row("SELECT last_input_tokens FROM preflight_sessions WHERE id = ?", [session_id], |row| row.get(0))
-                    .ok().flatten();
-                let failures: u32 = conn
-                    .query_row("SELECT compaction_failures FROM preflight_sessions WHERE id = ?", [session_id], |row| row.get(0))
-                    .unwrap_or(0);
-                let last_compacted_round: Option<u32> = conn
-                    .query_row("SELECT compacted_at FROM preflight_sessions WHERE id = ?", [session_id], |row| row.get(0))
-                    .ok().flatten();
-                Ok::<_, anyhow::Error>((last_input, failures, last_compacted_round))
-            }).unwrap_or((None, 0, None));
+            let compact_state = db
+                .with_conn(|conn| {
+                    let last_input: Option<u64> = conn
+                        .query_row(
+                            "SELECT last_input_tokens FROM preflight_sessions WHERE id = ?",
+                            [session_id],
+                            |row| row.get(0),
+                        )
+                        .ok()
+                        .flatten();
+                    let failures: u32 = conn
+                        .query_row(
+                            "SELECT compaction_failures FROM preflight_sessions WHERE id = ?",
+                            [session_id],
+                            |row| row.get(0),
+                        )
+                        .unwrap_or(0);
+                    let last_compacted_round: Option<u32> = conn
+                        .query_row(
+                            "SELECT compacted_at FROM preflight_sessions WHERE id = ?",
+                            [session_id],
+                            |row| row.get(0),
+                        )
+                        .ok()
+                        .flatten();
+                    Ok::<_, anyhow::Error>((last_input, failures, last_compacted_round))
+                })
+                .unwrap_or((None, 0, None));
 
             let (needs_compact, needs_warn) = planner::should_compact(
                 compact_state.0,
@@ -683,26 +724,51 @@ async fn preflight_with_continuation(
             );
 
             if needs_warn {
-                planner::emit_preflight_event_pub(app, session_id, "status", "上下文较长，建议尽快完成澄清");
+                planner::emit_preflight_event_pub(
+                    app,
+                    session_id,
+                    "status",
+                    "上下文较长，建议尽快完成澄清",
+                );
             }
 
             if needs_compact {
-                tracing::info!(round = belief_state_snapshot.round, "triggering full compaction");
+                tracing::info!(
+                    round = belief_state_snapshot.round,
+                    "triggering full compaction"
+                );
                 planner::emit_preflight_event_pub(app, session_id, "status", "正在优化对话上下文…");
 
-                let scope_count = contract_items.iter().filter(|(s, _, _)| s == "scope").count();
-                let constraints_count = contract_items.iter().filter(|(s, _, _)| s == "constraints").count();
-                let exclusions_count = contract_items.iter().filter(|(s, _, _)| s == "exclusions").count();
-                let assumptions_count = contract_items.iter().filter(|(s, _, _)| s == "assumptions").count();
+                let scope_count = contract_items
+                    .iter()
+                    .filter(|(s, _, _)| s == "scope")
+                    .count();
+                let constraints_count = contract_items
+                    .iter()
+                    .filter(|(s, _, _)| s == "constraints")
+                    .count();
+                let exclusions_count = contract_items
+                    .iter()
+                    .filter(|(s, _, _)| s == "exclusions")
+                    .count();
+                let assumptions_count = contract_items
+                    .iter()
+                    .filter(|(s, _, _)| s == "assumptions")
+                    .count();
 
                 let compaction_prompt = planner::build_compaction_prompt(
-                    scope_count, constraints_count, exclusions_count, assumptions_count,
+                    scope_count,
+                    constraints_count,
+                    exclusions_count,
+                    assumptions_count,
                 );
 
                 let mut compact_msgs = history.clone();
                 compact_msgs.push(Message {
                     role: MessageRole::User,
-                    content: vec![ContentBlock::Text { text: compaction_prompt }],
+                    content: vec![ContentBlock::Text {
+                        text: compaction_prompt,
+                    }],
                     cache_control: None,
                 });
 
@@ -721,24 +787,27 @@ async fn preflight_with_continuation(
                 // 120s 覆盖 99% 的 normal compaction，即便偶尔超时也只是 truncation 兜底，没数据丢失。
                 const COMPACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
                 let compact_started = std::time::Instant::now();
-                let compact_result = tokio::time::timeout(
-                    COMPACTION_TIMEOUT,
-                    provider.chat(&compact_request),
-                ).await;
+                let compact_result =
+                    tokio::time::timeout(COMPACTION_TIMEOUT, provider.chat(&compact_request)).await;
                 let compact_elapsed = compact_started.elapsed();
 
                 match compact_result {
                     Ok(Ok(resp)) => {
-                        let summary: String = resp.content.iter().filter_map(|b| match b {
-                            ContentBlock::Text { text } => Some(text.as_str()),
-                            _ => None,
-                        }).collect();
+                        let summary: String = resp
+                            .content
+                            .iter()
+                            .filter_map(|b| match b {
+                                ContentBlock::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect();
 
                         if summary.len() > 50 {
                             let original_req = history.first();
                             let recent_count = std::cmp::min(6, history.len());
                             let recent = &history[history.len() - recent_count..];
-                            history = planner::build_compacted_messages(&summary, original_req, recent);
+                            history =
+                                planner::build_compacted_messages(&summary, original_req, recent);
 
                             let _ = db.with_conn(|conn| {
                                 conn.execute(
@@ -755,7 +824,9 @@ async fn preflight_with_continuation(
                                 "full compaction succeeded"
                             );
                         } else {
-                            tracing::warn!("compaction summary too short, using truncation fallback");
+                            tracing::warn!(
+                                "compaction summary too short, using truncation fallback"
+                            );
                             history = planner::truncate_messages(&history);
                             let _ = db.with_conn(|conn| {
                                 conn.execute(
@@ -767,7 +838,9 @@ async fn preflight_with_continuation(
                         }
                     }
                     Ok(Err(e)) => {
-                        tracing::error!("compaction LLM call failed: {e}, using truncation fallback");
+                        tracing::error!(
+                            "compaction LLM call failed: {e}, using truncation fallback"
+                        );
                         history = planner::truncate_messages(&history);
                         let _ = db.with_conn(|conn| {
                             conn.execute(
@@ -796,10 +869,20 @@ async fn preflight_with_continuation(
         }
 
         let (response, usage) = match planner::preflight_chat(
-            provider.clone(), model, mode, history.clone(), session_id, app,
-            &contract_items, &belief_state_snapshot, &rejected_alts, &caps,
+            provider.clone(),
+            model,
+            mode,
+            history.clone(),
+            session_id,
+            app,
+            &contract_items,
+            &belief_state_snapshot,
+            &rejected_alts,
+            &caps,
             &extra_tools,
-        ).await {
+        )
+        .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!("Preflight chat failed (iteration {iteration}): {e}");
@@ -847,7 +930,9 @@ async fn preflight_with_continuation(
 
         let (actions, _) = planner::parse_tool_calls_from_response(&response);
         let has_choices = !response.choices.is_empty();
-        let has_suggest_sign = actions.iter().any(|a| matches!(a, PreflightAction::SuggestSign { .. }));
+        let has_suggest_sign = actions
+            .iter()
+            .any(|a| matches!(a, PreflightAction::SuggestSign { .. }));
         let has_tool_calls = !response.tool_calls.is_empty();
 
         // FM-15 v2.2 (S2 / FR-PF-01): 先消化 ReadOnlyExplorer 的 list_directory / read_file
@@ -856,7 +941,9 @@ async fn preflight_with_continuation(
         if let Some(ref ex) = explorer {
             for tc in &response.tool_calls {
                 if matches!(tc.name.as_str(), "list_directory" | "read_file") {
-                    let output = ex.execute(&tc.name, &tc.arguments).await
+                    let output = ex
+                        .execute(&tc.name, &tc.arguments)
+                        .await
                         .expect("ReadOnlyExplorer must handle list_directory / read_file");
                     explorer_tool_results.push(json!({
                         "role": "tool",
@@ -880,7 +967,12 @@ async fn preflight_with_continuation(
             }
 
             let mut tool_results = process_tool_actions(
-                conn, mission_id, &actions, &mut belief_state, app, session_id,
+                conn,
+                mission_id,
+                &actions,
+                &mut belief_state,
+                app,
+                session_id,
             );
             tool_results.extend(explorer_tool_results);
 
@@ -953,7 +1045,12 @@ async fn preflight_with_continuation(
 
             tracing::info!(
                 iteration = iteration + 1,
-                tool_names = response.tool_calls.iter().map(|tc| tc.name.as_str()).collect::<Vec<_>>().join(","),
+                tool_names = response
+                    .tool_calls
+                    .iter()
+                    .map(|tc| tc.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
                 "preflight continuing with tool_results"
             );
 
@@ -979,7 +1076,11 @@ async fn preflight_with_continuation(
         };
         emit_done_with_belief_state(app, session_id, &final_response, &belief_state, mode);
 
-        let tool_names: Vec<&str> = response.tool_calls.iter().map(|tc| tc.name.as_str()).collect();
+        let tool_names: Vec<&str> = response
+            .tool_calls
+            .iter()
+            .map(|tc| tc.name.as_str())
+            .collect();
         tracing::info!(
             round = belief_state.round,
             iterations = iteration + 1,
@@ -996,13 +1097,14 @@ async fn preflight_with_continuation(
     // Max iterations exhausted — save what we have and stop
     tracing::warn!("preflight reached max continuation rounds ({MAX_TOOL_CONTINUATION_ROUNDS})");
     let db = app.state::<crate::db::Database>();
-    let _ = db.with_conn(|conn| {
-        conn.execute(
+    let _ =
+        db.with_conn(|conn| {
+            conn.execute(
             "UPDATE preflight_sessions SET messages = ?, updated_at = datetime('now') WHERE id = ?",
             rusqlite::params![serde_json::to_string(stored_msgs).unwrap_or_default(), session_id],
         )?;
-        Ok::<(), anyhow::Error>(())
-    });
+            Ok::<(), anyhow::Error>(())
+        });
 
     let belief_state = db
         .with_conn(|conn| Ok::<_, anyhow::Error>(load_belief_state(conn, session_id)))
@@ -1086,10 +1188,14 @@ pub async fn start_preflight(
     let mid = mission_id.clone();
     tokio::spawn(async move {
         // Build the initial user message for storage
-        let user_text: String = initial_message.content.iter().filter_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        }).collect();
+        let user_text: String = initial_message
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
         // role=system_seed：这是后端注入的"包装提示"（"The user wants to build...
         // Start the requirements clarification process."），不是用户真实输入。
         // 用专属 role 区分：reconstruct_history 仍以 user 投喂 LLM；
@@ -1103,11 +1209,16 @@ pub async fn start_preflight(
         planner::emit_preflight_event_pub(&app_clone, &sid, "start", "");
 
         preflight_with_continuation(
-            provider, &model, "scenario_walk",
+            provider,
+            &model,
+            "scenario_walk",
             vec![initial_message],
             &mut stored_msgs,
-            &sid, &mid, &app_clone,
-        ).await;
+            &sid,
+            &mid,
+            &app_clone,
+        )
+        .await;
     });
 
     Ok(StartPreflightResponse {
@@ -1192,9 +1303,16 @@ pub async fn retry_preflight_message(
     tokio::spawn(async move {
         planner::emit_preflight_event_pub(&app_clone, &sid, "start", "");
         preflight_with_continuation(
-            provider, &model, &mode, history,
-            &mut stored_msgs, &sid, &mid, &app_clone,
-        ).await;
+            provider,
+            &model,
+            &mode,
+            history,
+            &mut stored_msgs,
+            &sid,
+            &mid,
+            &app_clone,
+        )
+        .await;
     });
 
     Ok(())
@@ -1273,11 +1391,16 @@ pub async fn send_preflight_message(
         planner::emit_preflight_event_pub(&app_clone, &sid, "start", "");
 
         preflight_with_continuation(
-            provider, &model, &mode,
+            provider,
+            &model,
+            &mode,
             history,
             &mut stored_msgs,
-            &sid, &mid, &app_clone,
-        ).await;
+            &sid,
+            &mid,
+            &app_clone,
+        )
+        .await;
     });
 
     Ok(())
@@ -1376,7 +1499,10 @@ pub fn update_contract_config(
 
         sets.push("updated_at = datetime('now')");
 
-        let sql = format!("UPDATE mission_contracts SET {} WHERE id = ?", sets.join(", "));
+        let sql = format!(
+            "UPDATE mission_contracts SET {} WHERE id = ?",
+            sets.join(", ")
+        );
         params.push(Box::new(contract_id));
 
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -1389,10 +1515,7 @@ pub fn update_contract_config(
 }
 
 #[tauri::command]
-pub fn get_contract(
-    app: tauri::AppHandle,
-    mission_id: String,
-) -> Result<ContractInfo, String> {
+pub fn get_contract(app: tauri::AppHandle, mission_id: String) -> Result<ContractInfo, String> {
     let db = app.state::<crate::db::Database>();
 
     db.with_conn(|conn| {
@@ -1616,16 +1739,20 @@ pub async fn sign_contract(
                 [&mission_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            let repo_path = repo_path.ok_or_else(|| anyhow::anyhow!(
-                "Mission has no repo_path; create it via FR-18 create_mission first"
-            ))?;
+            let repo_path = repo_path.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Mission has no repo_path; create it via FR-18 create_mission first"
+                )
+            })?;
             Ok((cid, description, repo_path))
         })
         .map_err(|e| e.to_string())?;
 
     let repo_path_buf = std::path::PathBuf::from(&repo_path);
     if !repo_path_buf.is_dir() {
-        return Err(format!("Mission repo_path '{repo_path}' is not a directory"));
+        return Err(format!(
+            "Mission repo_path '{repo_path}' is not a directory"
+        ));
     }
 
     // FM-15 v2.2 (S2 / FR-PF-02): 第 2 步 —— 用 PlannerEngine（kind=preflight）跑 Agent Loop。
@@ -1910,8 +2037,7 @@ mod reasoning_round_trip_tests {
         let stored = build_first_turn_stored_msgs();
         let assistant = &stored[1];
         assert_eq!(
-            assistant["reasoning_content"],
-            "User wants a CLI tool. Let me ask about platform.",
+            assistant["reasoning_content"], "User wants a CLI tool. Let me ask about platform.",
             "assistant 的 reasoning_content 必须落盘，否则下一轮 reconstruct 拿不到"
         );
     }
@@ -2009,7 +2135,10 @@ mod reasoning_round_trip_tests {
             provider_extras: None,
         };
         let oai_messages = provider.convert_messages(&req);
-        let assistant = oai_messages.iter().find(|m| m["role"] == "assistant").unwrap();
+        let assistant = oai_messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .unwrap();
         assert!(assistant.get("reasoning_content").is_none());
     }
 }
@@ -2083,7 +2212,10 @@ mod preflight_session_projection_tests {
         assert_eq!(visible[0].role, "assistant");
 
         let history = reconstruct_history(&stored);
-        let user_count = history.iter().filter(|m| m.role == MessageRole::User).count();
+        let user_count = history
+            .iter()
+            .filter(|m| m.role == MessageRole::User)
+            .count();
         assert_eq!(
             user_count, 1,
             "system_seed 必须以 user 身份进入 LLM history（否则 LLM 拿不到任务描述）"
@@ -2124,15 +2256,13 @@ mod preflight_session_projection_tests {
     /// 必须保留——choices 本身就是用户可见的交互。
     #[test]
     fn assistant_with_only_choices_is_kept() {
-        let stored = vec![
-            json!({
-                "role": "assistant",
-                "content": "",
-                "choices": [
-                    { "id": "c1", "label": "Option A", "contract_impact": null }
-                ]
-            }),
-        ];
+        let stored = vec![json!({
+            "role": "assistant",
+            "content": "",
+            "choices": [
+                { "id": "c1", "label": "Option A", "contract_impact": null }
+            ]
+        })];
         let visible = project_to_visible(&stored);
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].choices.len(), 1);
@@ -2177,7 +2307,10 @@ mod preflight_session_projection_tests {
         let visible = project_to_visible(&stored);
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].failed, Some(true));
-        assert_eq!(visible[0].error.as_deref(), Some("网络连接中断，请检查网络后重试"));
+        assert_eq!(
+            visible[0].error.as_deref(),
+            Some("网络连接中断，请检查网络后重试")
+        );
 
         // 模拟 retry：清掉 failed/error
         if let Some(last) = stored
@@ -2197,9 +2330,8 @@ mod preflight_session_projection_tests {
     /// Fix A 边界：只有 system_seed（初次进入 preflight 即失败）也要可重试。
     #[test]
     fn initial_seed_failure_is_retryable() {
-        let mut stored = vec![
-            json!({ "role": "system_seed", "content": "Bootstrap prompt", "choices": [] }),
-        ];
+        let mut stored =
+            vec![json!({ "role": "system_seed", "content": "Bootstrap prompt", "choices": [] })];
 
         let target = stored
             .iter_mut()
@@ -2285,7 +2417,11 @@ mod sign_contract_transaction_tests {
 
         assert!(result.is_err(), "失败步骤必须把 anyhow::Result 抛上去");
         assert_eq!(
-            read_status(&db, "SELECT status FROM mission_contracts WHERE id = ?", &contract_id),
+            read_status(
+                &db,
+                "SELECT status FROM mission_contracts WHERE id = ?",
+                &contract_id
+            ),
             "drafting",
             "事务回滚后 contract 必须回到 drafting，否则签约按钮会永久消失"
         );
@@ -2314,7 +2450,11 @@ mod sign_contract_transaction_tests {
         assert!(res.is_err());
 
         assert_eq!(
-            read_status(&db, "SELECT status FROM mission_contracts WHERE id = ?", &contract_id),
+            read_status(
+                &db,
+                "SELECT status FROM mission_contracts WHERE id = ?",
+                &contract_id
+            ),
             "signed",
             "without explicit transaction, 之前的 UPDATE 不会回滚 —— \
              这正是 retryable-flow rule 2 要求所有多步 SQL 必须包 unchecked_transaction 的原因。\

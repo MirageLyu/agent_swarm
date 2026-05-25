@@ -6,12 +6,14 @@ use std::sync::Arc;
 use tauri::Emitter;
 use tokio::sync::mpsc;
 
+use crate::agent::belief_state::{
+    default_slot_definitions, ConversationPhase, PreflightBeliefState, SlotStatus,
+};
 use crate::llm::{
     stream_chat_with_idle_guard, CacheControl, ContentBlock, LlmProvider, LlmRequest, Message,
     MessageRole, ModelCapabilities, StreamChunk, StreamChunkKind, TokenUsage, ToolDefinition,
     DEFAULT_STREAM_IDLE_TIMEOUT,
 };
-use crate::agent::belief_state::{PreflightBeliefState, ConversationPhase, SlotStatus, default_slot_definitions};
 
 // ---------------------------------------------------------------------------
 // FM-10.3: Dynamic System Prompt — Static Prefix + Dynamic Suffix
@@ -73,7 +75,8 @@ pub fn build_preflight_system_prompt(
     caps: &ModelCapabilities,
 ) -> String {
     let static_part = build_static_prefix(caps);
-    let dynamic_part = build_dynamic_suffix(mode, contract_items, belief_state, rejected_alternatives);
+    let dynamic_part =
+        build_dynamic_suffix(mode, contract_items, belief_state, rejected_alternatives);
     format!("{static_part}\n\n═══ __DYNAMIC_BOUNDARY__ ═══\n\n{dynamic_part}")
 }
 
@@ -188,7 +191,11 @@ pub fn compact_contract_json(items: &[(String, String, String)]) -> String {
         "# Contract 当前状态（仅作参考，不要复述）"
     };
 
-    format!("{}\n{}", header, serde_json::to_string(&json).unwrap_or_default())
+    format!(
+        "{}\n{}",
+        header,
+        serde_json::to_string(&json).unwrap_or_default()
+    )
 }
 
 /// Render belief state section for dynamic suffix (FR-10.3.4).
@@ -372,7 +379,11 @@ pub fn apply_cache_markers(
     }
 
     // Marker 3: last user message
-    if let Some(last_user) = messages.iter_mut().rev().find(|m| m.role == MessageRole::User) {
+    if let Some(last_user) = messages
+        .iter_mut()
+        .rev()
+        .find(|m| m.role == MessageRole::User)
+    {
         last_user.cache_control = Some(CacheControl::ephemeral());
     }
 }
@@ -395,7 +406,10 @@ pub fn micro_compact_messages(
     let mut msg_rounds: Vec<u32> = Vec::with_capacity(messages.len());
     for msg in messages {
         if msg.role == MessageRole::User {
-            let is_tool_result = msg.content.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }));
+            let is_tool_result = msg
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
             if !is_tool_result {
                 round_counter += 1;
             }
@@ -414,53 +428,72 @@ pub fn micro_compact_messages(
         "好的，那我们",
     ];
 
-    messages.iter().enumerate().map(|(i, msg)| {
-        let msg_round = msg_rounds[i];
+    messages
+        .iter()
+        .enumerate()
+        .map(|(i, msg)| {
+            let msg_round = msg_rounds[i];
 
-        // Compress old present_choices tool_results
-        if msg.role == MessageRole::User && msg_round < threshold_round {
-            let new_content: Vec<ContentBlock> = msg.content.iter().map(|block| {
-                if let ContentBlock::ToolResult { tool_use_id, content, is_error } = block {
-                    if content.contains("\"presented\":true") || content.contains("choices_count") {
-                        return ContentBlock::ToolResult {
-                            tool_use_id: tool_use_id.clone(),
-                            content: "[选项已呈现，用户已选择]".to_string(),
-                            is_error: *is_error,
-                        };
-                    }
-                }
-                block.clone()
-            }).collect();
+            // Compress old present_choices tool_results
+            if msg.role == MessageRole::User && msg_round < threshold_round {
+                let new_content: Vec<ContentBlock> = msg
+                    .content
+                    .iter()
+                    .map(|block| {
+                        if let ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        } = block
+                        {
+                            if content.contains("\"presented\":true")
+                                || content.contains("choices_count")
+                            {
+                                return ContentBlock::ToolResult {
+                                    tool_use_id: tool_use_id.clone(),
+                                    content: "[选项已呈现，用户已选择]".to_string(),
+                                    is_error: *is_error,
+                                };
+                            }
+                        }
+                        block.clone()
+                    })
+                    .collect();
 
-            return Message {
-                role: msg.role.clone(),
-                content: new_content,
-                cache_control: msg.cache_control.clone(),
-            };
-        }
+                return Message {
+                    role: msg.role.clone(),
+                    content: new_content,
+                    cache_control: msg.cache_control.clone(),
+                };
+            }
 
-        // Clean meta-dialogue from old assistant messages (FR-10.5.3)
-        let meta_threshold = current_round.saturating_sub(5);
-        if msg.role == MessageRole::Assistant && msg_round < meta_threshold {
-            let new_content: Vec<ContentBlock> = msg.content.iter().map(|block| {
-                if let ContentBlock::Text { text } = block {
-                    let cleaned = clean_meta_dialogue(text, &meta_patterns);
-                    if cleaned != *text {
-                        return ContentBlock::Text { text: cleaned };
-                    }
-                }
-                block.clone()
-            }).collect();
+            // Clean meta-dialogue from old assistant messages (FR-10.5.3)
+            let meta_threshold = current_round.saturating_sub(5);
+            if msg.role == MessageRole::Assistant && msg_round < meta_threshold {
+                let new_content: Vec<ContentBlock> = msg
+                    .content
+                    .iter()
+                    .map(|block| {
+                        if let ContentBlock::Text { text } = block {
+                            let cleaned = clean_meta_dialogue(text, &meta_patterns);
+                            if cleaned != *text {
+                                return ContentBlock::Text { text: cleaned };
+                            }
+                        }
+                        block.clone()
+                    })
+                    .collect();
 
-            return Message {
-                role: msg.role.clone(),
-                content: new_content,
-                cache_control: msg.cache_control.clone(),
-            };
-        }
+                return Message {
+                    role: msg.role.clone(),
+                    content: new_content,
+                    cache_control: msg.cache_control.clone(),
+                };
+            }
 
-        msg.clone()
-    }).collect()
+            msg.clone()
+        })
+        .collect()
 }
 
 fn clean_meta_dialogue(text: &str, patterns: &[&str]) -> String {
@@ -477,7 +510,10 @@ fn clean_meta_dialogue(text: &str, patterns: &[&str]) -> String {
 
 /// Estimate token count from text (rough heuristic for when API doesn't return usage).
 pub fn estimate_tokens(text: &str) -> u64 {
-    let chinese_chars = text.chars().filter(|c| *c >= '\u{4e00}' && *c <= '\u{9fff}').count();
+    let chinese_chars = text
+        .chars()
+        .filter(|c| *c >= '\u{4e00}' && *c <= '\u{9fff}')
+        .count();
     let other_chars = text.len() - chinese_chars;
     (chinese_chars as f64 * 1.5 + other_chars as f64 / 4.0).ceil() as u64
 }
@@ -699,7 +735,6 @@ pub struct PlannerTask {
     pub role: Option<String>,
 
     // ---- FM-15 v2.2 (S3-5): 富语义字段 ----
-
     /// FM-15 FR-02: 在角色默认 skill 之外额外加载的 skill id 列表（可空）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_skills: Vec<String>,
@@ -798,8 +833,8 @@ pub enum PlannerError {
 pub fn parse_and_validate(json_str: &str) -> Result<PlannerOutput, PlannerError> {
     let json_str = extract_json(json_str);
 
-    let output: PlannerOutput = serde_json::from_str(json_str)
-        .map_err(|e| PlannerError::JsonParseError(e.to_string()))?;
+    let output: PlannerOutput =
+        serde_json::from_str(json_str).map_err(|e| PlannerError::JsonParseError(e.to_string()))?;
 
     if output.mission_title.trim().is_empty() {
         return Err(PlannerError::MissingField("mission_title".into()));
@@ -907,7 +942,10 @@ fn detect_cycles(tasks: &[PlannerTask]) -> Result<(), PlannerError> {
         Black,
     }
 
-    let mut colors: HashMap<&str, Color> = tasks.iter().map(|t| (t.id.as_str(), Color::White)).collect();
+    let mut colors: HashMap<&str, Color> = tasks
+        .iter()
+        .map(|t| (t.id.as_str(), Color::White))
+        .collect();
 
     fn dfs<'a>(
         node: &'a str,
@@ -998,7 +1036,12 @@ fn emit_preflight_event(app: &tauri::AppHandle, session_id: &str, kind: &str, co
     );
 }
 
-pub fn emit_preflight_event_pub(app: &tauri::AppHandle, session_id: &str, kind: &str, content: &str) {
+pub fn emit_preflight_event_pub(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    kind: &str,
+    content: &str,
+) {
     emit_preflight_event(app, session_id, kind, content);
 }
 
@@ -1098,11 +1141,26 @@ pub struct SwitchClarificationModeArgs {
 
 #[derive(Debug, Clone)]
 pub enum PreflightAction {
-    PresentChoices { id: String, args: PresentChoicesArgs },
-    AddContractItem { id: String, args: AddContractItemArgs },
-    UpdateContractItem { id: String, args: UpdateContractItemArgs },
-    SuggestSign { id: String, args: SuggestSignArgs },
-    SwitchClarificationMode { id: String, args: SwitchClarificationModeArgs },
+    PresentChoices {
+        id: String,
+        args: PresentChoicesArgs,
+    },
+    AddContractItem {
+        id: String,
+        args: AddContractItemArgs,
+    },
+    UpdateContractItem {
+        id: String,
+        args: UpdateContractItemArgs,
+    },
+    SuggestSign {
+        id: String,
+        args: SuggestSignArgs,
+    },
+    SwitchClarificationMode {
+        id: String,
+        args: SwitchClarificationModeArgs,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1215,7 +1273,9 @@ pub fn preflight_tools() -> Vec<ToolDefinition> {
 }
 
 /// Parse tool_calls from LLM response ContentBlocks into typed actions.
-pub fn parse_tool_calls(content: &[ContentBlock]) -> (Vec<PreflightAction>, Vec<PreflightToolCall>) {
+pub fn parse_tool_calls(
+    content: &[ContentBlock],
+) -> (Vec<PreflightAction>, Vec<PreflightToolCall>) {
     let mut actions = Vec::new();
     let mut raw_calls = Vec::new();
 
@@ -1255,22 +1315,22 @@ pub fn parse_tool_calls(content: &[ContentBlock]) -> (Vec<PreflightAction>, Vec<
                         Err(e) => tracing::warn!("Failed to parse update_contract_item args: {e}"),
                     }
                 }
-                "suggest_sign" => {
-                    match serde_json::from_value::<SuggestSignArgs>(input.clone()) {
-                        Ok(args) => actions.push(PreflightAction::SuggestSign {
-                            id: id.clone(),
-                            args,
-                        }),
-                        Err(e) => tracing::warn!("Failed to parse suggest_sign args: {e}"),
-                    }
-                }
+                "suggest_sign" => match serde_json::from_value::<SuggestSignArgs>(input.clone()) {
+                    Ok(args) => actions.push(PreflightAction::SuggestSign {
+                        id: id.clone(),
+                        args,
+                    }),
+                    Err(e) => tracing::warn!("Failed to parse suggest_sign args: {e}"),
+                },
                 "switch_clarification_mode" => {
                     match serde_json::from_value::<SwitchClarificationModeArgs>(input.clone()) {
                         Ok(args) => actions.push(PreflightAction::SwitchClarificationMode {
                             id: id.clone(),
                             args,
                         }),
-                        Err(e) => tracing::warn!("Failed to parse switch_clarification_mode args: {e}"),
+                        Err(e) => {
+                            tracing::warn!("Failed to parse switch_clarification_mode args: {e}")
+                        }
                     }
                 }
                 other => {
@@ -1337,25 +1397,59 @@ fn parse_preflight_response(raw: &str) -> PreflightResponse {
         let json_part = raw[idx + separator.len()..].trim();
         if let Ok(choices) = serde_json::from_str::<Vec<PreflightChoice>>(json_part) {
             if !choices.is_empty() {
-                return PreflightResponse { text, choices, tool_calls: vec![], fallback_used: "text".into(), reasoning: String::new() };
+                return PreflightResponse {
+                    text,
+                    choices,
+                    tool_calls: vec![],
+                    fallback_used: "text".into(),
+                    reasoning: String::new(),
+                };
             }
         }
         let json_part = extract_json(json_part);
         if let Ok(choices) = serde_json::from_str::<Vec<PreflightChoice>>(json_part) {
             if !choices.is_empty() {
-                return PreflightResponse { text, choices, tool_calls: vec![], fallback_used: "text".into(), reasoning: String::new() };
+                return PreflightResponse {
+                    text,
+                    choices,
+                    tool_calls: vec![],
+                    fallback_used: "text".into(),
+                    reasoning: String::new(),
+                };
             }
         }
         let fallback = extract_choices_from_markdown(&text);
         if !fallback.is_empty() {
-            return PreflightResponse { text, choices: fallback, tool_calls: vec![], fallback_used: "markdown".into(), reasoning: String::new() };
+            return PreflightResponse {
+                text,
+                choices: fallback,
+                tool_calls: vec![],
+                fallback_used: "markdown".into(),
+                reasoning: String::new(),
+            };
         }
-        PreflightResponse { text, choices: vec![], tool_calls: vec![], fallback_used: "none".into(), reasoning: String::new() }
+        PreflightResponse {
+            text,
+            choices: vec![],
+            tool_calls: vec![],
+            fallback_used: "none".into(),
+            reasoning: String::new(),
+        }
     } else {
         let text = raw.trim().to_string();
         let fallback = extract_choices_from_markdown(&text);
-        let fb = if fallback.is_empty() { "none" } else { "markdown" };
-        PreflightResponse { text, choices: fallback, tool_calls: vec![], fallback_used: fb.into(), reasoning: String::new() }
+        let fb = if fallback.is_empty() {
+            "none"
+        } else {
+            "markdown"
+        };
+        PreflightResponse {
+            text,
+            choices: fallback,
+            tool_calls: vec![],
+            fallback_used: fb.into(),
+            reasoning: String::new(),
+        }
     }
 }
 
@@ -1370,7 +1464,11 @@ fn extract_choices_from_markdown(text: &str) -> Vec<PreflightChoice> {
     let mut choices: BTreeMap<String, String> = BTreeMap::new();
 
     for line in text.lines() {
-        let trimmed = line.trim().trim_start_matches('-').trim_start_matches('*').trim();
+        let trimmed = line
+            .trim()
+            .trim_start_matches('-')
+            .trim_start_matches('*')
+            .trim();
 
         // Pattern 1: **A. label** or **A) label** or **A、label**
         if let Some(rest) = trimmed.strip_prefix("**") {
@@ -1412,18 +1510,23 @@ fn extract_choices_from_markdown(text: &str) -> Vec<PreflightChoice> {
 /// Try to split "A. rest" or "A) rest" or "A、rest" into (id, rest).
 fn split_choice_id(s: &str) -> Option<(String, &str)> {
     let bytes = s.as_bytes();
-    if bytes.is_empty() { return None; }
+    if bytes.is_empty() {
+        return None;
+    }
 
     // Find the id part: 1-2 uppercase ASCII chars
     let mut id_end = 0;
     while id_end < bytes.len() && id_end < 3 && bytes[id_end].is_ascii_alphanumeric() {
         id_end += 1;
     }
-    if id_end == 0 { return None; }
+    if id_end == 0 {
+        return None;
+    }
 
     let after_id = &s[id_end..];
     // Must be followed by a delimiter: . ) 、 :
-    let rest = if let Some(r) = after_id.strip_prefix('.')
+    let rest = if let Some(r) = after_id
+        .strip_prefix('.')
         .or_else(|| after_id.strip_prefix(')'))
         .or_else(|| after_id.strip_prefix(':'))
     {
@@ -1436,7 +1539,9 @@ fn split_choice_id(s: &str) -> Option<(String, &str)> {
 
     let id = s[..id_end].to_uppercase();
     // Only accept single-letter or two-char IDs
-    if id.len() > 2 { return None; }
+    if id.len() > 2 {
+        return None;
+    }
     Some((id, rest))
 }
 
@@ -1455,14 +1560,21 @@ pub async fn preflight_chat(
     extra_tools: &[ToolDefinition],
 ) -> Result<(PreflightResponse, TokenUsage), PlannerError> {
     let system_prompt = build_preflight_system_prompt(
-        mode, contract_items, belief_state, rejected_alternatives, caps,
+        mode,
+        contract_items,
+        belief_state,
+        rejected_alternatives,
+        caps,
     );
 
     // Apply micro-compact to reduce token usage (FM-10.5)
     let current_round = belief_state.round;
     if current_round > 3 {
         history = micro_compact_messages(&history, current_round, 3);
-        tracing::debug!(round = current_round, "micro-compact applied to message history");
+        tracing::debug!(
+            round = current_round,
+            "micro-compact applied to message history"
+        );
     }
 
     let mut tools = preflight_tools();
@@ -1542,7 +1654,10 @@ pub async fn preflight_chat(
     }
 
     // Check for tool_calls in the response
-    let has_tool_calls = response.content.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. }));
+    let has_tool_calls = response
+        .content
+        .iter()
+        .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
 
     let (choices, tool_calls, fallback_used) = if has_tool_calls {
         let (actions, raw_calls) = parse_tool_calls(&response.content);
@@ -1571,7 +1686,10 @@ pub async fn preflight_chat(
                             "assumptions" => "假设",
                             _ => &args.section,
                         };
-                        summaries.push(format!("已将「{}」记录到合同的 **{}** 区块。", args.item, section_label));
+                        summaries.push(format!(
+                            "已将「{}」记录到合同的 **{}** 区块。",
+                            args.item, section_label
+                        ));
                     }
                     PreflightAction::UpdateContractItem { args, .. } => {
                         summaries.push(format!("已更新合同条目为：「{}」。", args.new_content));
@@ -1639,7 +1757,8 @@ pub async fn preflight_chat(
     };
 
     // Log cache metrics (FM-10.4)
-    if response.usage.cache_read_input_tokens > 0 || response.usage.cache_creation_input_tokens > 0 {
+    if response.usage.cache_read_input_tokens > 0 || response.usage.cache_creation_input_tokens > 0
+    {
         tracing::info!(
             cache_creation_tokens = response.usage.cache_creation_input_tokens,
             cache_read_tokens = response.usage.cache_read_input_tokens,
@@ -1821,7 +1940,9 @@ mod tests {
         }"#;
         let out = parse_and_validate(json).expect("parse should succeed");
         assert_eq!(out.tasks[0].effective_role(), "architect");
-        assert!(out.tasks[0].effective_expected_output().starts_with("Module"));
+        assert!(out.tasks[0]
+            .effective_expected_output()
+            .starts_with("Module"));
     }
 
     #[test]
@@ -1919,7 +2040,10 @@ mod tests {
 
         let static1 = p1.split("__DYNAMIC_BOUNDARY__").next().unwrap();
         let static2 = p2.split("__DYNAMIC_BOUNDARY__").next().unwrap();
-        assert_eq!(static1, static2, "Static prefix must not change with mode/state");
+        assert_eq!(
+            static1, static2,
+            "Static prefix must not change with mode/state"
+        );
     }
 
     #[test]
@@ -1927,11 +2051,17 @@ mod tests {
         let mut caps = ModelCapabilities::default();
         caps.supports_thinking = true;
         let prefix = build_static_prefix(&caps);
-        assert!(!prefix.contains("<analysis>"), "Thinking model must not have CoT in prompt");
+        assert!(
+            !prefix.contains("<analysis>"),
+            "Thinking model must not have CoT in prompt"
+        );
 
         caps.supports_thinking = false;
         let prefix = build_static_prefix(&caps);
-        assert!(prefix.contains("<analysis>"), "Non-thinking model must have CoT guidance");
+        assert!(
+            prefix.contains("<analysis>"),
+            "Non-thinking model must have CoT guidance"
+        );
     }
 
     #[test]
@@ -1978,8 +2108,16 @@ mod tests {
     #[test]
     fn ut_10_5_1a_recent_not_compressed() {
         let msgs = vec![
-            Message { role: MessageRole::User, content: vec![ContentBlock::Text { text: "r1".into() }], cache_control: None },
-            Message { role: MessageRole::User, content: vec![ContentBlock::Text { text: "r8".into() }], cache_control: None },
+            Message {
+                role: MessageRole::User,
+                content: vec![ContentBlock::Text { text: "r1".into() }],
+                cache_control: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: vec![ContentBlock::Text { text: "r8".into() }],
+                cache_control: None,
+            },
         ];
         let result = micro_compact_messages(&msgs, 10, 3);
         assert_eq!(result.len(), 2);
@@ -2020,7 +2158,10 @@ mod tests {
         let mut bs = PreflightBeliefState::new();
         bs.round = 10;
         bs.convergence_score = 0.4;
-        assert!(render_round_pressure_directive(&bs).is_none(), "10 轮内不加压");
+        assert!(
+            render_round_pressure_directive(&bs).is_none(),
+            "10 轮内不加压"
+        );
     }
 
     #[test]
@@ -2087,7 +2228,10 @@ mod tests {
         assert!(!compact_now, "刚 compact 完 1 轮，token 仍高也要忍住");
 
         let (compact_later, _) = should_compact(Some(75000), 100000, 15, 0, Some(12));
-        assert!(compact_later, "距上次 compact 已 3 轮且 token 仍高：可以再压一次");
+        assert!(
+            compact_later,
+            "距上次 compact 已 3 轮且 token 仍高：可以再压一次"
+        );
     }
 
     // --- FM-10.6 Decision Log tests ---
@@ -2101,10 +2245,14 @@ mod tests {
 
     #[test]
     fn ut_10_6_3b_some_rejected() {
-        let alts = vec![
-            ("自建认证".into(), 3, "用户偏好OAuth".into()),
-        ];
-        let prompt = build_preflight_system_prompt("scenario_walk", &[], &PreflightBeliefState::new(), &alts, &ModelCapabilities::default());
+        let alts = vec![("自建认证".into(), 3, "用户偏好OAuth".into())];
+        let prompt = build_preflight_system_prompt(
+            "scenario_walk",
+            &[],
+            &PreflightBeliefState::new(),
+            &alts,
+            &ModelCapabilities::default(),
+        );
         assert!(prompt.contains("自建认证"));
         assert!(prompt.contains("第3轮否决"));
     }

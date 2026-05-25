@@ -116,7 +116,11 @@ impl RecoveryStrategy {
     /// 给 event content 用的人话标签（前端开发者模式下展示给用户看）。
     pub fn human_label(&self) -> String {
         match self {
-            Self::ReactiveCompact { dropped_msgs, tokens_before, tokens_after } => {
+            Self::ReactiveCompact {
+                dropped_msgs,
+                tokens_before,
+                tokens_after,
+            } => {
                 format!(
                     "reactive compact (drop {dropped_msgs} msg, ~{}K → ~{}K tokens)",
                     tokens_before / 1000,
@@ -129,10 +133,17 @@ impl RecoveryStrategy {
             Self::OutputTokensEscalate { old_cap, new_cap } => {
                 format!("escalate max_output_tokens {old_cap} → {new_cap}")
             }
-            Self::OutputTokensContinue { recovery_count, recovery_limit } => {
+            Self::OutputTokensContinue {
+                recovery_count,
+                recovery_limit,
+            } => {
                 format!("multi-turn resume ({recovery_count}/{recovery_limit})")
             }
-            Self::ModelFallback { from, to, switch_total } => {
+            Self::ModelFallback {
+                from,
+                to,
+                switch_total,
+            } => {
                 format!("model fallback {from} → {to} (#{switch_total})")
             }
         }
@@ -141,7 +152,11 @@ impl RecoveryStrategy {
     /// 给 meta.details 序列化的细节字段。前端 / 后续分析需要更细数据时从这里读。
     pub fn details_json(&self) -> serde_json::Value {
         match self {
-            Self::ReactiveCompact { dropped_msgs, tokens_before, tokens_after } => {
+            Self::ReactiveCompact {
+                dropped_msgs,
+                tokens_before,
+                tokens_after,
+            } => {
                 serde_json::json!({
                     "dropped_msgs": dropped_msgs,
                     "tokens_before": tokens_before,
@@ -154,13 +169,20 @@ impl RecoveryStrategy {
             Self::OutputTokensEscalate { old_cap, new_cap } => {
                 serde_json::json!({ "old_cap": old_cap, "new_cap": new_cap })
             }
-            Self::OutputTokensContinue { recovery_count, recovery_limit } => {
+            Self::OutputTokensContinue {
+                recovery_count,
+                recovery_limit,
+            } => {
                 serde_json::json!({
                     "recovery_count": recovery_count,
                     "recovery_limit": recovery_limit,
                 })
             }
-            Self::ModelFallback { from, to, switch_total } => {
+            Self::ModelFallback {
+                from,
+                to,
+                switch_total,
+            } => {
                 serde_json::json!({
                     "from": from,
                     "to": to,
@@ -211,11 +233,19 @@ pub fn build_recovery_succeeded_meta(
 
 /// 给 event content 字段（content 是用户可读字符串）的格式化。
 pub fn format_attempt_content(trigger: RecoveryTrigger, strategy: &RecoveryStrategy) -> String {
-    format!("Auto-recovery for {}: {}", trigger.as_str(), strategy.human_label())
+    format!(
+        "Auto-recovery for {}: {}",
+        trigger.as_str(),
+        strategy.human_label()
+    )
 }
 
 pub fn format_succeeded_content(trigger: RecoveryTrigger, strategy: &RecoveryStrategy) -> String {
-    format!("Recovered from {}: {}", trigger.as_str(), strategy.human_label())
+    format!(
+        "Recovered from {}: {}",
+        trigger.as_str(),
+        strategy.human_label()
+    )
 }
 
 // Serialize impls 不是必须，但让 strategy 本身能 JSON 序列化方便测试。
@@ -244,8 +274,11 @@ mod tests {
             "context_length_exceeded",
             1,
         );
-        assert_eq!(meta["silent"], serde_json::Value::Bool(true),
-            "recovery_attempt 必须 silent，否则前端会渲染成可见事件");
+        assert_eq!(
+            meta["silent"],
+            serde_json::Value::Bool(true),
+            "recovery_attempt 必须 silent，否则前端会渲染成可见事件"
+        );
     }
 
     #[test]
@@ -261,7 +294,10 @@ mod tests {
     fn trigger_labels_are_stable() {
         // 这些字串会进 meta.trigger 落库；改了等于破坏前端解析约定 + 旧事件无法识别
         assert_eq!(RecoveryTrigger::PromptTooLong.as_str(), "prompt_too_long");
-        assert_eq!(RecoveryTrigger::MaxOutputTokens.as_str(), "max_output_tokens");
+        assert_eq!(
+            RecoveryTrigger::MaxOutputTokens.as_str(),
+            "max_output_tokens"
+        );
         assert_eq!(RecoveryTrigger::IdleTimeout.as_str(), "idle_timeout");
         assert_eq!(RecoveryTrigger::Overloaded.as_str(), "overloaded");
         assert_eq!(RecoveryTrigger::RateLimited.as_str(), "rate_limited");
@@ -308,7 +344,12 @@ mod tests {
     fn strategy_labels_are_stable() {
         // 同上，meta.strategy 是前端按 strategy 分类的依据
         assert_eq!(
-            RecoveryStrategy::ReactiveCompact { dropped_msgs: 1, tokens_before: 0, tokens_after: 0 }.kind_label(),
+            RecoveryStrategy::ReactiveCompact {
+                dropped_msgs: 1,
+                tokens_before: 0,
+                tokens_after: 0
+            }
+            .kind_label(),
             "reactive_compact"
         );
         assert_eq!(
@@ -316,17 +357,28 @@ mod tests {
             "idle_retry_continue"
         );
         assert_eq!(
-            RecoveryStrategy::OutputTokensEscalate { old_cap: 0, new_cap: 0 }.kind_label(),
+            RecoveryStrategy::OutputTokensEscalate {
+                old_cap: 0,
+                new_cap: 0
+            }
+            .kind_label(),
             "output_tokens_escalate"
         );
         assert_eq!(
-            RecoveryStrategy::OutputTokensContinue { recovery_count: 0, recovery_limit: 0 }.kind_label(),
+            RecoveryStrategy::OutputTokensContinue {
+                recovery_count: 0,
+                recovery_limit: 0
+            }
+            .kind_label(),
             "output_tokens_continue"
         );
         assert_eq!(
             RecoveryStrategy::ModelFallback {
-                from: "a".into(), to: "b".into(), switch_total: 1
-            }.kind_label(),
+                from: "a".into(),
+                to: "b".into(),
+                switch_total: 1
+            }
+            .kind_label(),
             "model_fallback"
         );
     }
@@ -337,12 +389,17 @@ mod tests {
             dropped_msgs: 7,
             tokens_before: 50_000,
             tokens_after: 25_000,
-        }.details_json();
+        }
+        .details_json();
         assert_eq!(d["dropped_msgs"], 7);
         assert_eq!(d["tokens_before"], 50_000);
         assert_eq!(d["tokens_after"], 25_000);
 
-        let d = RecoveryStrategy::OutputTokensEscalate { old_cap: 16_384, new_cap: 65_536 }.details_json();
+        let d = RecoveryStrategy::OutputTokensEscalate {
+            old_cap: 16_384,
+            new_cap: 65_536,
+        }
+        .details_json();
         assert_eq!(d["old_cap"], 16_384);
         assert_eq!(d["new_cap"], 65_536);
     }
@@ -352,12 +409,20 @@ mod tests {
         let long_err = "X".repeat(1000);
         let meta = build_recovery_attempt_meta(
             RecoveryTrigger::PromptTooLong,
-            &RecoveryStrategy::ReactiveCompact { dropped_msgs: 1, tokens_before: 0, tokens_after: 0 },
+            &RecoveryStrategy::ReactiveCompact {
+                dropped_msgs: 1,
+                tokens_before: 0,
+                tokens_after: 0,
+            },
             &long_err,
             1,
         );
         let excerpt = meta["error_excerpt"].as_str().unwrap();
-        assert_eq!(excerpt.chars().count(), 200, "error_excerpt 必须 cap 在 200 字符防 meta 爆炸");
+        assert_eq!(
+            excerpt.chars().count(),
+            200,
+            "error_excerpt 必须 cap 在 200 字符防 meta 爆炸"
+        );
     }
 
     #[test]
@@ -366,7 +431,8 @@ mod tests {
             dropped_msgs: 12,
             tokens_before: 80_000,
             tokens_after: 40_000,
-        }.human_label();
+        }
+        .human_label();
         assert!(h.contains("12"));
         assert!(h.contains("80"));
         assert!(h.contains("40"));

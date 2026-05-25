@@ -20,10 +20,9 @@ use uuid::Uuid;
 
 use crate::db::{queries, Database};
 use crate::llm::{
-    stream_chat_with_idle_guard_full, ContentBlock, LlmProvider, LlmRequest, Message,
-    MessageRole, StreamChunk, StreamChunkKind, StreamGuardError, StreamRetryPolicy,
-    DEFAULT_STREAM_IDLE_HEARTBEAT_SECS,
-    DEFAULT_STREAM_IDLE_TIMEOUT,
+    stream_chat_with_idle_guard_full, ContentBlock, LlmProvider, LlmRequest, Message, MessageRole,
+    StreamChunk, StreamChunkKind, StreamGuardError, StreamRetryPolicy,
+    DEFAULT_STREAM_IDLE_HEARTBEAT_SECS, DEFAULT_STREAM_IDLE_TIMEOUT,
 };
 use crate::tools::{coding_agent_tools_with_artifact_support, ToolExecutor, TASK_COMPLETE_TOOL};
 
@@ -105,11 +104,7 @@ pub const DEFAULT_AGENT_MAX_OUTPUT_TOKENS: u32 = 16_384;
 ///
 /// 任何对这个函数的"简化"（例如忘了 reset 或永远 reset）都会被下面 mod tests 抓住。
 #[inline]
-fn next_idle_retry_budget(
-    resume_after_idle_retry: bool,
-    current: u32,
-    default: u32,
-) -> u32 {
+fn next_idle_retry_budget(resume_after_idle_retry: bool, current: u32, default: u32) -> u32 {
     if resume_after_idle_retry {
         current
     } else {
@@ -123,6 +118,29 @@ fn next_idle_retry_budget(
 /// 兼容）。如果将来加新只读工具，直接列举即可。
 fn is_read_only_tool(name: &str) -> bool {
     matches!(name, "read_file" | "grep" | "search_files" | "list_files")
+}
+
+fn assistant_text_from_blocks(blocks: &[ContentBlock]) -> Option<String> {
+    let text = blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn char_safe_excerpt(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let excerpt = chars.by_ref().take(max_chars).collect::<String>();
+    let remaining_chars = chars.count();
+    if remaining_chars > 0 {
+        format!("{excerpt}…[+{remaining_chars} chars]")
+    } else {
+        excerpt
+    }
 }
 
 /// **DeepSeek / OpenAI tool-call 协议适配器：tool_calls 之后唯一合规的 follow-up 回合。**
@@ -644,7 +662,8 @@ impl AgentEngine {
             stream_initial_retry_delay_ms: stream_delay,
             ..AgentRunOptions::default()
         };
-        self.run_with_options(agent_id, task_description, &opts).await
+        self.run_with_options(agent_id, task_description, &opts)
+            .await
     }
 
     /// FM-15 Phase 3 主入口：携带 guardrail / timeout / max_steps 配置完整运行 Coding Agent。
@@ -780,9 +799,8 @@ impl AgentEngine {
         // **不**在 reactive compact retry 时重复 record（response 还没出来），
         // 也**不**在 IdleTimeout retry 时重复——这两个路径都 `continue` 跳过下方
         // `record_step` 调用。
-        let mut budget_tracker: Option<BudgetTracker> = opts
-            .output_token_budget
-            .map(|_| BudgetTracker::new());
+        let mut budget_tracker: Option<BudgetTracker> =
+            opts.output_token_budget.map(|_| BudgetTracker::new());
         // Single-Agent Uplift P1-3: max_output_tokens 三档恢复 state。
         //
         // - `current_max_output_tokens`：本 agent 当前用的 max_tokens；升档后**单调
@@ -947,7 +965,9 @@ impl AgentEngine {
                     // PreCompact 的 prevent 语义：terminal 仍然 fail；StepAborted 仅
                     // 跳过本次 compact（即不压缩，messages 保持原样进 LLM）——这对
                     // hook 想"今天先不压缩，让 model 看完再说"的场景是有意义的。
-                    match self.dispatch_hook_phase(agent_id, step, hook_ctx, &mut messages).await
+                    match self
+                        .dispatch_hook_phase(agent_id, step, hook_ctx, &mut messages)
+                        .await
                     {
                         Ok(()) => {
                             if let Some(report) = microcompact(&mut messages) {
@@ -957,7 +977,10 @@ impl AgentEngine {
                                 let mut meta = report.to_meta();
                                 if let Some(obj) = meta.as_object_mut() {
                                     obj.insert("kind".into(), serde_json::json!("proactive"));
-                                    obj.insert("trigger".into(), serde_json::json!("token_threshold"));
+                                    obj.insert(
+                                        "trigger".into(),
+                                        serde_json::json!("token_threshold"),
+                                    );
                                 }
                                 self.emit_event_with_meta(
                                     agent_id,
@@ -980,7 +1003,12 @@ impl AgentEngine {
                                     None,
                                 );
                                 match self
-                                    .dispatch_hook_phase(agent_id, step, hook_ctx_post, &mut messages)
+                                    .dispatch_hook_phase(
+                                        agent_id,
+                                        step,
+                                        hook_ctx_post,
+                                        &mut messages,
+                                    )
                                     .await
                                 {
                                     Ok(()) => {}
@@ -989,9 +1017,7 @@ impl AgentEngine {
                                         let msg =
                                             format!("PostCompact hook terminated agent: {reason}");
                                         self.mark_task_failed_with_reason(agent_id, "failed", &msg);
-                                        self.emit_event(
-                                            agent_id, step, "status_change", "failed",
-                                        );
+                                        self.emit_event(agent_id, step, "status_change", "failed");
                                         self.update_agent_status(agent_id, "failed");
                                         return Ok(AgentStatus::Failed);
                                     }
@@ -1031,7 +1057,10 @@ impl AgentEngine {
                     None,
                     None,
                 );
-                match self.dispatch_hook_phase(agent_id, step, hook_ctx, &mut messages).await {
+                match self
+                    .dispatch_hook_phase(agent_id, step, hook_ctx, &mut messages)
+                    .await
+                {
                     Ok(()) => {}
                     Err(HookFatal::Terminal(reason)) => {
                         let msg = format!("PreLlmCall hook terminated agent: {reason}");
@@ -1107,8 +1136,7 @@ impl AgentEngine {
                 let mut first_chunk_logged = false;
                 while let Some(chunk) = rx.recv().await {
                     let elapsed_ms = step_started_at.elapsed().as_millis() as u64;
-                    last_chunk_at_fwd
-                        .store(elapsed_ms, std::sync::atomic::Ordering::Relaxed);
+                    last_chunk_at_fwd.store(elapsed_ms, std::sync::atomic::Ordering::Relaxed);
                     chunks_seen_fwd.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if !first_chunk_logged {
                         first_chunk_logged = true;
@@ -1168,9 +1196,8 @@ impl AgentEngine {
                             "tool_use_arg_done"
                         }
                         // InputDelta 不发——前端不需要看 JSON 半成品；MessageStop 同理
-                        StreamChunkKind::ToolUseInputDelta { .. } | StreamChunkKind::MessageStop => {
-                            continue
-                        }
+                        StreamChunkKind::ToolUseInputDelta { .. }
+                        | StreamChunkKind::MessageStop => continue,
                     };
                     let _ = app_handle.emit(
                         "agent-stream",
@@ -1296,7 +1323,9 @@ impl AgentEngine {
             // 体感最坏要等 180s（一次 idle_timeout）才停。
             let retry_policy = StreamRetryPolicy {
                 max_retries: opts.stream_network_retries,
-                initial_backoff: std::time::Duration::from_millis(opts.stream_initial_retry_delay_ms),
+                initial_backoff: std::time::Duration::from_millis(
+                    opts.stream_initial_retry_delay_ms,
+                ),
                 max_backoff: std::time::Duration::from_secs(16),
             };
             let stream_outcome = stream_chat_with_idle_guard_full(
@@ -1335,14 +1364,19 @@ impl AgentEngine {
                         let content = format_succeeded_content(trigger, &strategy);
                         let meta = build_recovery_succeeded_meta(trigger, &strategy);
                         self.emit_event_with_meta(
-                            agent_id, step, "recovery_succeeded", &content, Some(meta),
+                            agent_id,
+                            step,
+                            "recovery_succeeded",
+                            &content,
+                            Some(meta),
                         );
                     }
                     r
                 }
-                Err(StreamGuardError::IdleTimeout { idle_secs, threshold_secs })
-                    if idle_retries_left > 0 =>
-                {
+                Err(StreamGuardError::IdleTimeout {
+                    idle_secs,
+                    threshold_secs,
+                }) if idle_retries_left > 0 => {
                     idle_retries_left -= 1;
                     // 关键：标记下一次 loop 是"延续本 step 的 retry"，否则 loop 顶部
                     // 会把 budget 重置回满，等于无限 retry。
@@ -1367,18 +1401,23 @@ impl AgentEngine {
                         retries_left: idle_retries_left,
                     };
                     let attempt_meta = build_recovery_attempt_meta(
-                        RecoveryTrigger::IdleTimeout, &strategy,
+                        RecoveryTrigger::IdleTimeout,
+                        &strategy,
                         &format!("idle {idle_secs}s > {threshold_secs}s threshold"),
                         1,
                     );
                     self.emit_event_with_meta(
-                        agent_id, step, "recovery_attempt",
+                        agent_id,
+                        step,
+                        "recovery_attempt",
                         &format_attempt_content(RecoveryTrigger::IdleTimeout, &strategy),
                         Some(attempt_meta),
                     );
                     pending_recovery_to_resolve = Some((
                         RecoveryTrigger::IdleTimeout,
-                        RecoveryStrategy::IdleRetryContinue { retries_left: idle_retries_left },
+                        RecoveryStrategy::IdleRetryContinue {
+                            retries_left: idle_retries_left,
+                        },
                     ));
                     // 没有 assistant turn 可 push（流被中止）。直接追加一条 user
                     // 提示给 LLM 让它在下一次 stream 里基于已有上下文继续。
@@ -1421,19 +1460,29 @@ impl AgentEngine {
                             tokens_after: r.tokens_after,
                         };
                         let attempt_meta = build_recovery_attempt_meta(
-                            RecoveryTrigger::PromptTooLong, &strategy, &msg, 1,
+                            RecoveryTrigger::PromptTooLong,
+                            &strategy,
+                            &msg,
+                            1,
                         );
-                        let content = format_attempt_content(RecoveryTrigger::PromptTooLong, &strategy);
+                        let content =
+                            format_attempt_content(RecoveryTrigger::PromptTooLong, &strategy);
                         self.emit_event_with_meta(
-                            agent_id, step, "recovery_attempt", &content, Some(attempt_meta),
+                            agent_id,
+                            step,
+                            "recovery_attempt",
+                            &content,
+                            Some(attempt_meta),
                         );
                         // 同时保留 compact 事件（兼容现有前端 timeline 渲染）
                         let mut compact_meta = r.to_meta();
                         if let Some(obj) = compact_meta.as_object_mut() {
                             obj.insert("kind".into(), serde_json::json!("reactive"));
                             obj.insert("trigger".into(), serde_json::json!("prompt_too_long"));
-                            obj.insert("error_excerpt".into(),
-                                serde_json::json!(msg.chars().take(200).collect::<String>()));
+                            obj.insert(
+                                "error_excerpt".into(),
+                                serde_json::json!(msg.chars().take(200).collect::<String>()),
+                            );
                         }
                         self.emit_event_with_meta(
                             agent_id, step, "compact",
@@ -1450,7 +1499,10 @@ impl AgentEngine {
                             messages.len()
                         );
                         self.emit_event_with_meta(
-                            agent_id, step, "error", &human,
+                            agent_id,
+                            step,
+                            "error",
+                            &human,
                             Some(serde_json::json!({
                                 "kind": "reactive_compact_no_room",
                                 "messages_remaining": messages.len(),
@@ -1574,6 +1626,9 @@ impl AgentEngine {
                 content: response.content.clone(),
                 cache_control: None,
             });
+            if let Some(text) = assistant_text_from_blocks(&response.content) {
+                self.emit_event(agent_id, step, "assistant_text", &text);
+            }
 
             // P2-1 Phase B: PostSampling hook 调用点。assistant message 已 push 进
             // messages，tool_use 解析尚未开始。典型用途：记录响应文本 / reasoning 长度分析。
@@ -1587,7 +1642,10 @@ impl AgentEngine {
                     None,
                     None,
                 );
-                match self.dispatch_hook_phase(agent_id, step, hook_ctx, &mut messages).await {
+                match self
+                    .dispatch_hook_phase(agent_id, step, hook_ctx, &mut messages)
+                    .await
+                {
                     Ok(()) => {}
                     Err(HookFatal::Terminal(reason)) => {
                         let msg = format!("PostSampling hook terminated agent: {reason}");
@@ -1721,8 +1779,8 @@ impl AgentEngine {
                     &opts.model,
                     current_max_output_tokens,
                 );
-                let can_escalate = !escalated_once_this_step
-                    && escalated_cap > current_max_output_tokens;
+                let can_escalate =
+                    !escalated_once_this_step && escalated_cap > current_max_output_tokens;
                 if can_escalate {
                     let old_cap = current_max_output_tokens;
                     let new_cap = escalated_cap;
@@ -1746,11 +1804,15 @@ impl AgentEngine {
                     // P0-3: 双发 silent recovery_attempt（同 reactive / idle 模式）
                     let strategy = RecoveryStrategy::OutputTokensEscalate { old_cap, new_cap };
                     let attempt_meta = build_recovery_attempt_meta(
-                        RecoveryTrigger::MaxOutputTokens, &strategy,
-                        &format!("stop_reason={}", response.stop_reason), 1,
+                        RecoveryTrigger::MaxOutputTokens,
+                        &strategy,
+                        &format!("stop_reason={}", response.stop_reason),
+                        1,
                     );
                     self.emit_event_with_meta(
-                        agent_id, step, "recovery_attempt",
+                        agent_id,
+                        step,
+                        "recovery_attempt",
                         &format_attempt_content(RecoveryTrigger::MaxOutputTokens, &strategy),
                         Some(attempt_meta),
                     );
@@ -1817,12 +1879,18 @@ impl AgentEngine {
                         recovery_limit: MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
                     };
                     let attempt_meta = build_recovery_attempt_meta(
-                        RecoveryTrigger::MaxOutputTokens, &strategy,
-                        &format!("stop_reason={}, cap={}", response.stop_reason, current_max_output_tokens),
+                        RecoveryTrigger::MaxOutputTokens,
+                        &strategy,
+                        &format!(
+                            "stop_reason={}, cap={}",
+                            response.stop_reason, current_max_output_tokens
+                        ),
                         multi_turn_recovery_count,
                     );
                     self.emit_event_with_meta(
-                        agent_id, step, "recovery_attempt",
+                        agent_id,
+                        step,
+                        "recovery_attempt",
                         &format_attempt_content(RecoveryTrigger::MaxOutputTokens, &strategy),
                         Some(attempt_meta),
                     );
@@ -1897,7 +1965,13 @@ impl AgentEngine {
                 (budget_tracker.as_mut(), opts.output_token_budget)
             {
                 let decision = tracker.decide(budget);
-                if let BudgetDecision::Stop { reason, accumulated, budget: b, pct } = decision {
+                if let BudgetDecision::Stop {
+                    reason,
+                    accumulated,
+                    budget: b,
+                    pct,
+                } = decision
+                {
                     if !tracker.nudge_already_emitted() {
                         tracker.mark_nudge_emitted();
                         let reason_str = reason.as_str();
@@ -1991,7 +2065,9 @@ impl AgentEngine {
                         None,
                         Some(summary.clone()),
                     );
-                    match self.dispatch_hook_phase(agent_id, step, hook_ctx, &mut messages).await
+                    match self
+                        .dispatch_hook_phase(agent_id, step, hook_ctx, &mut messages)
+                        .await
                     {
                         Ok(()) => {}
                         Err(HookFatal::Terminal(reason)) => {
@@ -2157,22 +2233,21 @@ impl AgentEngine {
             // (insufficient tool messages following tool_calls message)。
             //
             // 详见 [`ToolFollowupBuilder`] 文档。
-            let pending_read_only_hint = if !hinted_read_only_loop
-                && consecutive_read_only >= READ_ONLY_LOOP_THRESHOLD
-            {
-                hinted_read_only_loop = true;
-                let hint = format!(
+            let pending_read_only_hint =
+                if !hinted_read_only_loop && consecutive_read_only >= READ_ONLY_LOOP_THRESHOLD {
+                    hinted_read_only_loop = true;
+                    let hint = format!(
                     "[System] You have spent {} consecutive steps only reading / searching files \
                      without making any change. Either start writing (`write_file`), running a \
                      command (`shell_exec`), or — if exploration is finished — call \
                      `task_complete`. Endless exploration is treated as a failure.",
                     consecutive_read_only
                 );
-                self.emit_event(agent_id, step, "system_hint", &hint);
-                Some(hint)
-            } else {
-                None
-            };
+                    self.emit_event(agent_id, step, "system_hint", &hint);
+                    Some(hint)
+                } else {
+                    None
+                };
 
             // Single-Agent Uplift Phase 2.1: 并发安全的工具批量并行执行。
             //
@@ -2236,8 +2311,7 @@ impl AgentEngine {
                         let (id, name, input) = blk;
                         Some(async move {
                             let started_at = std::time::Instant::now();
-                            let output =
-                                self.dispatch_tool(agent_id, name, input).await;
+                            let output = self.dispatch_tool(agent_id, name, input).await;
                             let duration_ms = started_at.elapsed().as_millis() as u64;
                             (i, id.clone(), name.clone(), output, duration_ms)
                         })
@@ -2249,7 +2323,11 @@ impl AgentEngine {
             if !safe_futures.is_empty() {
                 let results = futures::future::join_all(safe_futures).await;
                 for (i, id, name, output, duration_ms) in results {
-                    let event_kind = if output.is_error { "error" } else { "tool_result" };
+                    let event_kind = if output.is_error {
+                        "error"
+                    } else {
+                        "tool_result"
+                    };
                     let result_meta = serde_json::json!({
                         "tool": name,
                         "tool_use_id": id,
@@ -2278,7 +2356,11 @@ impl AgentEngine {
                 let started_at = std::time::Instant::now();
                 let output = self.dispatch_tool(agent_id, name, input).await;
                 let duration_ms = started_at.elapsed().as_millis() as u64;
-                let event_kind = if output.is_error { "error" } else { "tool_result" };
+                let event_kind = if output.is_error {
+                    "error"
+                } else {
+                    "tool_result"
+                };
                 let result_meta = serde_json::json!({
                     "tool": name,
                     "tool_use_id": id,
@@ -2359,16 +2441,20 @@ impl AgentEngine {
             // 简化实现：取 tool_use_blocks 的最后一个 + 它的输出（来自刚 push 的 followup
             // message 的最后一个 ToolResult block）。
             if !tool_use_blocks.is_empty() {
-                let (last_id, last_name, last_input) =
-                    tool_use_blocks.last().expect("non-empty guarded above").clone();
+                let (last_id, last_name, last_input) = tool_use_blocks
+                    .last()
+                    .expect("non-empty guarded above")
+                    .clone();
                 // 从刚 push 的 followup message 倒序找匹配的 ToolResult
                 let (last_output_excerpt, last_is_error) = messages
                     .last()
                     .and_then(|m| {
                         m.content.iter().rev().find_map(|b| match b {
-                            ContentBlock::ToolResult { tool_use_id, content, is_error }
-                                if tool_use_id == &last_id =>
-                            {
+                            ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                is_error,
+                            } if tool_use_id == &last_id => {
                                 let excerpt: String = content.chars().take(2048).collect();
                                 Some((excerpt, *is_error))
                             }
@@ -2390,7 +2476,10 @@ impl AgentEngine {
                     }),
                     None,
                 );
-                match self.dispatch_hook_phase(agent_id, step, hook_ctx, &mut messages).await {
+                match self
+                    .dispatch_hook_phase(agent_id, step, hook_ctx, &mut messages)
+                    .await
+                {
                     Ok(()) => {}
                     Err(HookFatal::Terminal(reason)) => {
                         let msg = format!("PostToolUse hook terminated agent: {reason}");
@@ -2476,12 +2565,13 @@ impl AgentEngine {
                         Ok(summary) => {
                             // 兜底截尾，防摘要本身过长（小模型偶尔不听话）
                             const SUMMARY_HARD_CAP: usize = 1500;
-                            let summary_trimmed: String = if summary.chars().count() > SUMMARY_HARD_CAP {
-                                summary.chars().take(SUMMARY_HARD_CAP).collect::<String>()
-                                    + "…[summary truncated]"
-                            } else {
-                                summary
-                            };
+                            let summary_trimmed: String =
+                                if summary.chars().count() > SUMMARY_HARD_CAP {
+                                    summary.chars().take(SUMMARY_HARD_CAP).collect::<String>()
+                                        + "…[summary truncated]"
+                                } else {
+                                    summary
+                                };
                             let summary_chars = summary_trimmed.chars().count();
                             let replacement = format!(
                                 "[tool_summary] (orig {}KB → ~{} chars; full output preserved in agent_events)\n{}",
@@ -2548,11 +2638,7 @@ impl AgentEngine {
         // 真正完整 input 还是在 agent-event payload 里有，用户回看可以拿到。
         let input_excerpt = {
             let s = serde_json::to_string(input).unwrap_or_default();
-            if s.len() > 200 {
-                format!("{}…[+{} bytes]", &s[..200], s.len() - 200)
-            } else {
-                s
-            }
+            char_safe_excerpt(&s, 200)
         };
         tracing::info!(
             agent_id = %agent_id,
@@ -2590,16 +2676,15 @@ impl AgentEngine {
         // OpenAI-compat provider 在 args 字符串为空 / parse 失败时会塞 sentinel 进 input，
         // 这里识别后给 LLM 一个**明确**的错误，让它理解是自己漏给参数（而不是 schema 错）。
         if let Some(obj) = input.as_object() {
-            if let Some(err) = obj.get(crate::llm::ARG_PARSE_ERROR_KEY).and_then(|v| v.as_str()) {
+            if let Some(err) = obj
+                .get(crate::llm::ARG_PARSE_ERROR_KEY)
+                .and_then(|v| v.as_str())
+            {
                 let raw = obj
                     .get(crate::llm::ARG_RAW_KEY)
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let raw_excerpt = if raw.len() > 400 {
-                    format!("{}…[truncated]", &raw[..400])
-                } else {
-                    raw.to_string()
-                };
+                let raw_excerpt = char_safe_excerpt(raw, 400);
                 let msg = format!(
                     "tool_use for `{name}` arrived without valid arguments ({err}). \
                      Raw arguments string from the model: {:?}. \
@@ -2779,11 +2864,13 @@ impl AgentEngine {
         let todos_meta: Vec<serde_json::Value> = parsed
             .todos
             .iter()
-            .map(|t| serde_json::json!({
-                "id": t.id,
-                "content": t.content,
-                "status": t.status,
-            }))
+            .map(|t| {
+                serde_json::json!({
+                    "id": t.id,
+                    "content": t.content,
+                    "status": t.status,
+                })
+            })
             .collect();
         self.emit_event_with_meta(
             agent_id,
@@ -2796,7 +2883,11 @@ impl AgentEngine {
         let mut summary = format!(
             "todos updated: {} item(s); {} pending, {} in_progress, {} completed",
             parsed.todos.len(),
-            parsed.todos.iter().filter(|t| t.status == "pending").count(),
+            parsed
+                .todos
+                .iter()
+                .filter(|t| t.status == "pending")
+                .count(),
             in_progress_count,
             parsed
                 .todos
@@ -3096,9 +3187,11 @@ impl AgentEngine {
         let db = self.app_handle.state::<Database>();
         let agent = agent_id.to_string();
         let workspace = self.workspace_root.clone();
+        let parsed_for_db = parsed.clone();
         let result = db.with_conn(move |conn| {
-            let task_id = queries::get_task_id_for_agent(conn, &agent)?
-                .ok_or_else(|| anyhow::anyhow!("agent {agent} has no task binding"))?;
+            let Some(task_id) = queries::get_task_id_for_agent(conn, &agent)? else {
+                return Ok(None);
+            };
             let mission_id = queries::get_mission_id_for_agent(conn, &agent)?
                 .ok_or_else(|| anyhow::anyhow!("agent {agent} has no mission binding"))?;
             let decls_json: String = conn
@@ -3115,13 +3208,14 @@ impl AgentEngine {
                 &workspace,
                 &mission_id,
                 &task_id,
-                &parsed,
+                &parsed_for_db,
                 Some(&decls),
             )
+            .map(Some)
             .map_err(|e| anyhow::anyhow!(e.to_string()))
         });
         match result {
-            Ok(artifact) => {
+            Ok(Some(artifact)) => {
                 let _ = self.app_handle.emit(
                     "artifact-published",
                     serde_json::json!({
@@ -3144,6 +3238,14 @@ impl AgentEngine {
                     is_error: false,
                 }
             }
+            Ok(None) => ToolOutput {
+                content: format!(
+                    "Artifact `{}` accepted for this dev-only agent with {} file(s).",
+                    parsed.local_name,
+                    parsed.file_paths.len()
+                ),
+                is_error: false,
+            },
             Err(e) => ToolOutput {
                 content: serde_json::json!({
                     "error": "artifact_error",
@@ -3178,8 +3280,16 @@ impl AgentEngine {
             }
         };
 
+        let has_task = task_id_opt.is_some();
+        let has_explicit_guardrails = !opts.guardrails.is_empty() || !opts.produces.is_empty();
         let task_id = match task_id_opt {
             Some(t) => t,
+            None if has_explicit_guardrails => {
+                tracing::warn!(
+                    "Agent {agent_id} has no task; running explicit completion guardrails with synthetic task id"
+                );
+                agent_id.to_string()
+            }
             None => {
                 tracing::warn!("Agent {agent_id} has no task; treating task_complete as success");
                 return CompletionOutcome::Completed;
@@ -3197,8 +3307,8 @@ impl AgentEngine {
         };
 
         // 取 task description（LlmJudge 上下文）
-        let task_desc_for_judge: Option<String> = db
-            .with_conn(|conn| {
+        let task_desc_for_judge: Option<String> = if has_task {
+            db.with_conn(|conn| {
                 conn.query_row(
                     "SELECT description FROM tasks WHERE id = ?1",
                     rusqlite::params![&task_id],
@@ -3207,7 +3317,10 @@ impl AgentEngine {
                 .map(Some)
                 .or_else(|_| Ok(None))
             })
-            .unwrap_or(None);
+            .unwrap_or(None)
+        } else {
+            None
+        };
 
         let ctx = GuardrailContext {
             task_id: &task_id,
@@ -3678,7 +3791,10 @@ impl AgentEngine {
         if messages.is_empty() {
             return format!("Step {step}: Analyzing task and planning approach");
         }
-        let last_assistant = messages.iter().rev().find(|m| m.role == MessageRole::Assistant);
+        let last_assistant = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::Assistant);
         if let Some(assistant_msg) = last_assistant {
             let tool_names: Vec<&str> = assistant_msg
                 .content
@@ -3692,7 +3808,9 @@ impl AgentEngine {
                 let last_user = messages.last();
                 let has_errors = last_user
                     .map(|m| {
-                        m.content.iter().any(|b| matches!(b, ContentBlock::ToolResult { is_error: true, .. }))
+                        m.content
+                            .iter()
+                            .any(|b| matches!(b, ContentBlock::ToolResult { is_error: true, .. }))
                     })
                     .unwrap_or(false);
                 let tools_str = tool_names.join(", ");
@@ -3786,6 +3904,24 @@ fn render_produces_brief(produces: &[(String, String)]) -> String {
 }
 
 #[cfg(test)]
+mod char_safe_excerpt_tests {
+    use super::char_safe_excerpt;
+
+    #[test]
+    fn truncates_multibyte_text_without_panicking() {
+        let text = r##"{"content":"# DAPO 论文分享 PPT — 结构说明与信息来源\n\n这是中文内容"}"##;
+        let excerpt = char_safe_excerpt(text, 40);
+        assert!(excerpt.contains("DAPO"));
+        assert!(excerpt.contains("chars"));
+    }
+
+    #[test]
+    fn leaves_short_text_unchanged() {
+        assert_eq!(char_safe_excerpt("hello 中文", 20), "hello 中文");
+    }
+}
+
+#[cfg(test)]
 mod idle_retry_budget_tests {
     //! 回归测试：`next_idle_retry_budget` 是 idle-retry 设计的契约函数。
     //!
@@ -3856,7 +3992,9 @@ mod context_compaction_tests {
     fn user_msg(text: &str) -> Message {
         Message {
             role: MessageRole::User,
-            content: vec![ContentBlock::Text { text: text.to_string() }],
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+            }],
             cache_control: None,
         }
     }
@@ -3982,13 +4120,13 @@ mod context_compaction_tests {
     /// 这是 caller 区分"还能救一次" vs "真的没办法"的关键信号。
     #[test]
     fn reactive_compact_returns_none_when_too_few_messages() {
-        let mut messages: Vec<Message> = vec![
-            user_msg("first"),
-            user_msg("second"),
-            user_msg("third"),
-        ];
+        let mut messages: Vec<Message> =
+            vec![user_msg("first"), user_msg("second"), user_msg("third")];
         let report = reactive_compact_aggressive(&mut messages);
-        assert!(report.is_none(), "<4 messages 必须返回 None 让 caller 真 bail");
+        assert!(
+            report.is_none(),
+            "<4 messages 必须返回 None 让 caller 真 bail"
+        );
         assert_eq!(messages.len(), 3, "返回 None 时 messages 不应被破坏");
     }
 
@@ -4008,20 +4146,25 @@ mod context_compaction_tests {
         }
         let before_count = messages.len();
 
-        let report = reactive_compact_aggressive(&mut messages)
-            .expect("8 条消息应能压");
+        let report = reactive_compact_aggressive(&mut messages).expect("8 条消息应能压");
         // 8 / 2 = 4 条被 drop
         assert_eq!(report.dropped_messages, 4);
-        assert!(report.tools_seen.contains(&"read_file".to_string()),
-            "drop 的前半含 read_file 应被汇总");
+        assert!(
+            report.tools_seen.contains(&"read_file".to_string()),
+            "drop 的前半含 read_file 应被汇总"
+        );
 
         // 摘要插到最前 + 包含 "reactive" 显式标签
         assert!(matches!(messages[0].role, MessageRole::User));
         if let ContentBlock::Text { text } = &messages[0].content[0] {
-            assert!(text.contains("[context-compact:reactive]"),
-                "摘要必须显式标注 reactive 来源，前端按此渲染红色徽章");
-            assert!(text.contains("API rejected"),
-                "摘要必须告诉 LLM 触发原因，让其下一轮更谨慎");
+            assert!(
+                text.contains("[context-compact:reactive]"),
+                "摘要必须显式标注 reactive 来源，前端按此渲染红色徽章"
+            );
+            assert!(
+                text.contains("API rejected"),
+                "摘要必须告诉 LLM 触发原因，让其下一轮更谨慎"
+            );
         } else {
             panic!("reactive 摘要必须是 Text block");
         }
@@ -4071,7 +4214,9 @@ mod context_compaction_tests {
     fn reactive_compact_actually_reduces_tokens_for_normal_payload() {
         let mut messages: Vec<Message> = Vec::new();
         for i in 0..8 {
-            messages.push(user_msg(&format!("user message {i} with some content ").repeat(30)));
+            messages.push(user_msg(
+                &format!("user message {i} with some content ").repeat(30),
+            ));
         }
         let before_tokens = approximate_tokens(&messages);
         let report = reactive_compact_aggressive(&mut messages).unwrap();
@@ -4079,7 +4224,8 @@ mod context_compaction_tests {
         assert!(
             after_tokens < before_tokens,
             "正常 payload 下 reactive 必须真的减少 token；got {} → {}",
-            report.tokens_before, report.tokens_after
+            report.tokens_before,
+            report.tokens_after
         );
         assert_eq!(report.tokens_before, before_tokens);
         assert_eq!(report.tokens_after, after_tokens);
@@ -4121,14 +4267,17 @@ mod max_output_tokens_escalation_tests {
         // 32K ctx 模型，caller current 已是 32K → upper(16384).max(32K) = 32K
         // 等于 current → caller 检查 escalated_cap > current 为 false → 跳过升档
         let cap = compute_escalated_cap("dashscope", "some-other-model", 32_000);
-        assert_eq!(cap, 32_000,
-            "升档值不能低于当前值；upper(ctx/2)=16K < current=32K → 取 current");
+        assert_eq!(
+            cap, 32_000,
+            "升档值不能低于当前值；upper(ctx/2)=16K < current=32K → 取 current"
+        );
     }
 
     #[test]
     fn already_at_64k_stays_at_64k() {
         // current 已是 64K：upper(100K).max(64K) = 64K，等于 current → caller 跳过升档
-        let cap = compute_escalated_cap("anthropic", "claude-4-sonnet", ESCALATED_MAX_OUTPUT_TOKENS);
+        let cap =
+            compute_escalated_cap("anthropic", "claude-4-sonnet", ESCALATED_MAX_OUTPUT_TOKENS);
         assert_eq!(cap, ESCALATED_MAX_OUTPUT_TOKENS);
     }
 

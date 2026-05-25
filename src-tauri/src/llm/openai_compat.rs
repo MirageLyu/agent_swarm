@@ -196,13 +196,15 @@ impl OpenAICompatProvider {
                     // DeepSeek-R1/V4、QwQ 等推理模型协议：上一轮的 reasoning_content
                     // 必须原样回传，否则下一轮 400。空 reasoning 不发送字段，
                     // 避免对不支持该字段的 provider 造成噪音。
-                    if !reasoning.is_empty() {
+                    if !reasoning.is_empty() && (!text.is_empty() || !tool_calls.is_empty()) {
                         msg_obj["reasoning_content"] = json!(reasoning);
                     }
                     if !tool_calls.is_empty() {
                         msg_obj["tool_calls"] = json!(tool_calls);
                     }
-                    oai_messages.push(msg_obj);
+                    if msg_obj.get("content").is_some() || msg_obj.get("tool_calls").is_some() {
+                        oai_messages.push(msg_obj);
+                    }
                 }
             }
         }
@@ -314,8 +316,12 @@ impl OpenAICompatProvider {
         let usage = TokenUsage {
             input_tokens: data["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
             output_tokens: data["usage"]["completion_tokens"].as_u64().unwrap_or(0),
-            cache_read_input_tokens: data["usage"]["cache_read_input_tokens"].as_u64().unwrap_or(0),
-            cache_creation_input_tokens: data["usage"]["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+            cache_read_input_tokens: data["usage"]["cache_read_input_tokens"]
+                .as_u64()
+                .unwrap_or(0),
+            cache_creation_input_tokens: data["usage"]["cache_creation_input_tokens"]
+                .as_u64()
+                .unwrap_or(0),
         };
 
         Ok(LlmResponse {
@@ -339,7 +345,11 @@ impl LlmProvider for OpenAICompatProvider {
     async fn chat(&self, request: &LlmRequest) -> Result<LlmResponse> {
         let body = self.build_body(request, false);
 
-        tracing::debug!("OpenAI compat request to {}: {}", self.endpoint(), serde_json::to_string_pretty(&body).unwrap_or_default());
+        tracing::debug!(
+            "OpenAI compat request to {}: {}",
+            self.endpoint(),
+            serde_json::to_string_pretty(&body).unwrap_or_default()
+        );
 
         let resp = self
             .client
@@ -364,8 +374,13 @@ impl LlmProvider for OpenAICompatProvider {
         }
 
         let data: serde_json::Value = resp.json().await?;
-        tracing::debug!("OpenAI compat response parsed OK, model output length: {}", 
-            data["choices"][0]["message"]["content"].as_str().map(|s| s.len()).unwrap_or(0));
+        tracing::debug!(
+            "OpenAI compat response parsed OK, model output length: {}",
+            data["choices"][0]["message"]["content"]
+                .as_str()
+                .map(|s| s.len())
+                .unwrap_or(0)
+        );
         self.parse_response(&data)
     }
 
@@ -500,8 +515,9 @@ impl LlmProvider for OpenAICompatProvider {
                     //   - tool_calls:  function calling 累积的 args（即使只有一半也算见过 chunk）
                     //
                     // 只有完全没有任何 chunk 抵达就断的情况，才算真正的连接失败 → bail。
-                    let has_partial =
-                        !full_text.is_empty() || !full_reasoning.is_empty() || !tool_calls.is_empty();
+                    let has_partial = !full_text.is_empty()
+                        || !full_reasoning.is_empty()
+                        || !tool_calls.is_empty();
                     if has_partial {
                         tracing::info!(
                             provider = "openai_compat",
@@ -801,14 +817,20 @@ mod tests {
                 Message {
                     role: MessageRole::Assistant,
                     content: vec![
-                        ContentBlock::Reasoning { text: "let me think...".into() },
-                        ContentBlock::Text { text: "hello".into() },
+                        ContentBlock::Reasoning {
+                            text: "let me think...".into(),
+                        },
+                        ContentBlock::Text {
+                            text: "hello".into(),
+                        },
                     ],
                     cache_control: None,
                 },
                 Message {
                     role: MessageRole::User,
-                    content: vec![ContentBlock::Text { text: "more".into() }],
+                    content: vec![ContentBlock::Text {
+                        text: "more".into(),
+                    }],
                     cache_control: None,
                 },
             ],
@@ -856,9 +878,15 @@ mod tests {
             messages: vec![Message {
                 role: MessageRole::Assistant,
                 content: vec![
-                    ContentBlock::Reasoning { text: "part1 ".into() },
-                    ContentBlock::Reasoning { text: "part2".into() },
-                    ContentBlock::Text { text: "answer".into() },
+                    ContentBlock::Reasoning {
+                        text: "part1 ".into(),
+                    },
+                    ContentBlock::Reasoning {
+                        text: "part2".into(),
+                    },
+                    ContentBlock::Text {
+                        text: "answer".into(),
+                    },
                 ],
                 cache_control: None,
             }],
@@ -869,6 +897,37 @@ mod tests {
 
         let oai = provider().convert_messages(&req);
         assert_eq!(oai[0]["reasoning_content"], "part1 part2");
+    }
+
+    #[test]
+    fn convert_messages_skips_reasoning_only_assistant_message() {
+        let req = LlmRequest {
+            model: "deepseek-v4-pro".into(),
+            system: None,
+            messages: vec![
+                Message {
+                    role: MessageRole::Assistant,
+                    content: vec![ContentBlock::Reasoning {
+                        text: "thinking only".into(),
+                    }],
+                    cache_control: None,
+                },
+                Message {
+                    role: MessageRole::User,
+                    content: vec![ContentBlock::Text {
+                        text: "continue".into(),
+                    }],
+                    cache_control: None,
+                },
+            ],
+            tools: vec![],
+            max_tokens: 100,
+            provider_extras: None,
+        };
+
+        let oai = provider().convert_messages(&req);
+        assert_eq!(oai.len(), 1);
+        assert_eq!(oai[0]["role"], "user");
     }
 
     /// **provider_extras 透传**：DeepSeek-V4 的 thinking-off 适配靠它，
@@ -935,7 +994,10 @@ mod tests {
             .content
             .iter()
             .any(|b| matches!(b, ContentBlock::Text { text } if text == "final answer"));
-        assert!(has_reasoning, "Reasoning block missing from parsed response");
+        assert!(
+            has_reasoning,
+            "Reasoning block missing from parsed response"
+        );
         assert!(has_text, "Text block missing from parsed response");
     }
 
@@ -1060,6 +1122,9 @@ mod tests {
             "LlmResponse 必须含 partial reasoning（下一轮要按 deepseek 协议原样回传）"
         );
         // server 没发 finish_reason，按"自然结束"应当默认 stop
-        assert_eq!(resp.stop_reason, "stop", "stop_reason 应默认为 stop 让 engine 走下一步");
+        assert_eq!(
+            resp.stop_reason, "stop",
+            "stop_reason 应默认为 stop 让 engine 走下一步"
+        );
     }
 }
