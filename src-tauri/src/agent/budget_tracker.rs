@@ -49,6 +49,10 @@ pub(crate) const DIMINISHING_ROUND_THRESHOLD: u32 = 3;
 /// 设 1.0 会把"prep 收尾"的 token 也算进 budget 触发，导致 agent 没法收尾。
 pub(crate) const COMPLETION_PCT: f64 = 0.9;
 
+/// Diminishing-returns nudges only make sense after the agent has consumed enough
+/// of its output budget to have plausibly made progress.
+pub(crate) const DIMINISHING_MIN_PCT: f64 = 0.25;
+
 /// Token budget 状态追踪。
 ///
 /// **不是 thread-safe**——单 agent 单线程使用。caller 把它放在 `run_inner` 局部变量
@@ -107,7 +111,8 @@ impl BudgetTracker {
         // 判定顺序：先判 diminishing 再判 exhausted，因为 diminishing 在 budget 远未
         // 耗尽时也能触发，是"省钱止损"信号；exhausted 是"硬到边"信号。两者都是
         // Stop 但 reason 不同，前端可以区分文案。
-        let is_diminishing = self.continuation_count >= DIMINISHING_ROUND_THRESHOLD
+        let is_diminishing = pct >= DIMINISHING_MIN_PCT
+            && self.continuation_count >= DIMINISHING_ROUND_THRESHOLD
             && delta < DIMINISHING_TOKEN_THRESHOLD
             && self.last_delta < DIMINISHING_TOKEN_THRESHOLD;
 
@@ -244,27 +249,12 @@ mod tests {
     }
 
     #[test]
-    fn stops_on_diminishing_returns_after_three_rounds() {
+    fn does_not_stop_on_diminishing_returns_before_minimum_budget_progress() {
         let mut t = BudgetTracker::new();
-        // 4 轮都 < 500 token delta，但 budget 100K 富裕
-        // 前 3 轮：continuation_count 1, 2, 3 → Continue
-        // 第 4 轮：continuation_count >= 3 + last_delta < 500 + current delta < 500 → Stop
-        for _ in 0..3 {
+        for _ in 0..4 {
             t.record_step(200);
             let d = t.decide(100_000);
             assert!(matches!(d, BudgetDecision::Continue { .. }));
-        }
-        t.record_step(200);
-        let d = t.decide(100_000);
-        match d {
-            BudgetDecision::Stop {
-                reason: BudgetStopReason::DiminishingReturns,
-                accumulated,
-                ..
-            } => {
-                assert_eq!(accumulated, 800, "4 轮 × 200 = 800");
-            }
-            other => panic!("expected DiminishingReturns Stop, got {other:?}"),
         }
     }
 
@@ -286,6 +276,31 @@ mod tests {
             matches!(d, BudgetDecision::Continue { .. }),
             "上一轮大产出应重置 diminishing 判定"
         );
+    }
+
+    #[test]
+    fn diminishing_requires_minimum_budget_progress() {
+        let mut t = BudgetTracker::new();
+        for _ in 0..6 {
+            t.record_step(200);
+            let d = t.decide(100_000);
+            assert!(matches!(d, BudgetDecision::Continue { .. }));
+        }
+    }
+
+    #[test]
+    fn diminishing_can_stop_after_minimum_budget_progress() {
+        let mut t = BudgetTracker::new();
+        t.record_step(25_000);
+        let _ = t.decide(100_000);
+        for _ in 0..3 {
+            t.record_step(200);
+            let d = t.decide(100_000);
+            if matches!(d, BudgetDecision::Stop { .. }) {
+                return;
+            }
+        }
+        panic!("expected diminishing stop after enough budget progress");
     }
 
     #[test]
@@ -336,16 +351,10 @@ mod tests {
             matches!(d3, BudgetDecision::Continue { .. }),
             "step 3 不应 stop"
         );
-        // 第 4 步才可能 stop（continuation_count >= 3 + 两轮 last delta < 500）
+        // 第 4 步即便连续低产出也不应 stop，因为总预算进度还太低。
         t.record_step(100);
         let d4 = t.decide(100_000);
-        assert!(matches!(
-            d4,
-            BudgetDecision::Stop {
-                reason: BudgetStopReason::DiminishingReturns,
-                ..
-            }
-        ));
+        assert!(matches!(d4, BudgetDecision::Continue { .. }));
     }
 
     #[test]

@@ -322,6 +322,7 @@ impl PlannerToolResult {
             output: ToolOutput {
                 content,
                 is_error: false,
+                meta: None,
             },
             finalized: None,
         }
@@ -332,6 +333,7 @@ impl PlannerToolResult {
             output: ToolOutput {
                 content: json!({ "error": kind, "message": message }).to_string(),
                 is_error: true,
+                meta: None,
             },
             finalized: None,
         }
@@ -342,6 +344,7 @@ impl PlannerToolResult {
             output: ToolOutput {
                 content,
                 is_error: false,
+                meta: None,
             },
             finalized: Some(output),
         }
@@ -518,6 +521,7 @@ fn tool_ok(content: String) -> ToolOutput {
     ToolOutput {
         content,
         is_error: false,
+        meta: None,
     }
 }
 
@@ -525,6 +529,7 @@ fn tool_err(kind: &str, message: &str) -> ToolOutput {
     ToolOutput {
         content: json!({ "error": kind, "message": message }).to_string(),
         is_error: true,
+        meta: None,
     }
 }
 

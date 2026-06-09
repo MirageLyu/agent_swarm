@@ -133,6 +133,7 @@ pub async fn maybe_intercept_tool(
             })
             .to_string(),
             is_error: true,
+            meta: None,
         }),
         ApprovalDecision::Cancelled => ToolGateOutcome::Rejected(ToolOutput {
             content: json!({
@@ -141,6 +142,7 @@ pub async fn maybe_intercept_tool(
             })
             .to_string(),
             is_error: true,
+            meta: None,
         }),
     }
 }
@@ -209,6 +211,7 @@ fn reject_tool_output(tool_name: &str, note: Option<&str>) -> ToolOutput {
         })
         .to_string(),
         is_error: true,
+        meta: None,
     }
 }
 

@@ -1,12 +1,13 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use tauri::Emitter;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
 /// `agent-tool-stream` 事件载荷：让前端 Workspace 视图实时拼接 shell 输出。
@@ -48,11 +49,28 @@ const SHELL_DEFAULT_WALL_SECS: u64 = 300;
 /// 长任务（agent 显式声明 `expect_long_running: true`）：120s 无输出 / 30min 总时长。
 const SHELL_LONG_IDLE_SECS: u64 = 120;
 const SHELL_LONG_WALL_SECS: u64 = 1800;
+const READ_FILE_MAX_OUTPUT_CHARS: usize = 120 * 1024;
+const READ_FILE_MAX_LINE_CHARS: usize = 4 * 1024;
+const GREP_MAX_OUTPUT_CHARS: usize = 80 * 1024;
+const GREP_MAX_LINE_CHARS: usize = 2 * 1024;
+const LIST_FILES_DEFAULT_LIMIT: usize = 200;
+const LIST_FILES_HARD_LIMIT: usize = 1000;
+const NOTEBOOK_READ_CELLS_DEFAULT_LIMIT: usize = 50;
+const NOTEBOOK_READ_CELLS_HARD_LIMIT: usize = 200;
+const NOTEBOOK_CELL_SOURCE_MAX_CHARS: usize = 4 * 1024;
+const NOTEBOOK_READ_CELLS_TOTAL_SOURCE_CHARS: usize = 80 * 1024;
+const SHELL_EVIDENCE_CAPTURE_MAX_BYTES: usize = 8 * 1024 * 1024;
+const SHELL_COMPACT_THRESHOLD_CHARS: usize = 24 * 1024;
+const SHELL_COMPACT_MAX_CHARS: usize = 8 * 1024;
+const EVIDENCE_READ_REF_THRESHOLD_CHARS: usize = 8 * 1024;
+const EVIDENCE_READ_EXCERPT_CHARS: usize = 1600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
 }
 
 impl ToolOutput {
@@ -60,6 +78,7 @@ impl ToolOutput {
         Self {
             content,
             is_error: false,
+            meta: None,
         }
     }
 
@@ -67,12 +86,35 @@ impl ToolOutput {
         Self {
             content: serde_json::json!({ "error": kind, "message": message }).to_string(),
             is_error: true,
+            meta: None,
         }
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ToolExecutionContext {
+    pub agent_id: String,
+    pub step: u32,
+    pub tool_use_id: String,
+    pub tool_name: String,
+}
+
+fn default_evidence_root(workspace_root: &std::path::Path) -> PathBuf {
+    let workspace_name = workspace_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(sanitize_path_segment)
+        .unwrap_or_else(|| "workspace".to_string());
+    workspace_root
+        .parent()
+        .unwrap_or(workspace_root)
+        .join(".miragenty-evidence")
+        .join(workspace_name)
+}
+
 pub struct ToolExecutor {
     workspace_root: PathBuf,
+    evidence_root: PathBuf,
     /// Single-Agent Uplift Phase 1.1 + A2: 跟踪本 ToolExecutor 实例上"agent 已知最新内容"的路径
     /// 及其 mtime，用于：
     ///   1. `edit_file` 的"必须先读"前置条件（防止 LLM 凭空臆造改动）
@@ -102,10 +144,18 @@ impl ToolExecutor {
     pub fn new(workspace_root: PathBuf) -> Self {
         let workspace_root = workspace_root.canonicalize().unwrap_or(workspace_root);
         Self {
+            evidence_root: default_evidence_root(&workspace_root),
             workspace_root,
             read_paths: Arc::new(Mutex::new(HashMap::new())),
             cancel_token: None,
         }
+    }
+
+    /// Builder: override where shell evidence files are stored. The directory may be outside
+    /// the workspace so internal traces do not contaminate user-visible file scans.
+    pub fn with_evidence_root(mut self, evidence_root: PathBuf) -> Self {
+        self.evidence_root = evidence_root;
+        self
     }
 
     /// Builder：注入 cancel_token，让 shell_exec 等长跑工具能响应用户取消。
@@ -124,6 +174,59 @@ impl ToolExecutor {
         self.read_paths.lock().unwrap().insert(canonical, mtime);
     }
 
+    fn attach_persisted_tool_result(
+        &self,
+        mut output: ToolOutput,
+        exec_ctx: Option<&ToolExecutionContext>,
+    ) -> ToolOutput {
+        const PERSIST_TOOL_RESULT_THRESHOLD_CHARS: usize = 2 * 1024;
+        if output.is_error || output.content.chars().count() <= PERSIST_TOOL_RESULT_THRESHOLD_CHARS
+        {
+            return output;
+        }
+        let Some(ctx) = exec_ctx else {
+            return output;
+        };
+        let dir = self
+            .evidence_root
+            .join(sanitize_path_segment(&ctx.agent_id))
+            .join(format!("step-{:04}", ctx.step))
+            .join(sanitize_path_segment(&ctx.tool_use_id));
+        if let Err(err) = std::fs::create_dir_all(&dir) {
+            tracing::warn!(
+                agent_id = %ctx.agent_id,
+                step = ctx.step,
+                tool_use_id = %ctx.tool_use_id,
+                error = %err,
+                "failed to create persisted tool result directory"
+            );
+            return output;
+        }
+        let path = dir.join("tool-result.txt");
+        if let Err(err) = std::fs::write(&path, output.content.as_bytes()) {
+            tracing::warn!(
+                agent_id = %ctx.agent_id,
+                step = ctx.step,
+                tool_use_id = %ctx.tool_use_id,
+                error = %err,
+                "failed to persist tool result output"
+            );
+            return output;
+        }
+        let display_path = path_display_for_agent(&self.workspace_root, &self.evidence_root, &path);
+        let meta = serde_json::json!({
+            "kind": "persisted_tool_result",
+            "persisted_path": display_path,
+            "tool_result_path": display_path,
+            "tool_result_bytes": output.content.len(),
+            "tool_result_chars": output.content.chars().count(),
+            "tool_result_lines": output.content.lines().count(),
+            "content_source": content_source_from_tool_context(&ctx.tool_name, &output),
+            "content_shape": classify_text_shape(&output.content),
+        });
+        output.meta = Some(merge_tool_meta(output.meta.take(), meta));
+        output
+    }
     /// 查询 canonical 路径上次记录的 mtime（read/write/edit 任一）。
     fn last_known_mtime(&self, canonical: &PathBuf) -> Option<SystemTime> {
         self.read_paths.lock().unwrap().get(canonical).copied()
@@ -146,7 +249,8 @@ impl ToolExecutor {
             // 兼容旧 session replay 与历史 hook config。canonical 主路径见 `tools::registry`。
             "grep" | "search_files" => self.grep(input).await,
             "glob" => self.glob_files(input).await,
-            "shell_exec" => self.shell_exec(input, None).await,
+            "notebook_edit" => self.notebook_edit(input).await,
+            "shell_exec" => self.shell_exec(input, None, None).await,
             "list_files" => self.list_files(input).await,
             _ => ToolOutput::error("unknown_tool", &format!("Unknown tool: {tool_name}")),
         }
@@ -162,6 +266,18 @@ impl ToolExecutor {
         app: &tauri::AppHandle,
         agent_id: &str,
     ) -> ToolOutput {
+        self.execute_with_stream_context(tool_name, input, app, agent_id, None)
+            .await
+    }
+
+    pub async fn execute_with_stream_context(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        app: &tauri::AppHandle,
+        agent_id: &str,
+        exec_ctx: Option<ToolExecutionContext>,
+    ) -> ToolOutput {
         if tool_name == "shell_exec" {
             self.shell_exec(
                 input,
@@ -169,10 +285,12 @@ impl ToolExecutor {
                     app: app.clone(),
                     agent_id: agent_id.to_string(),
                 }),
+                exec_ctx,
             )
             .await
         } else {
-            self.execute(tool_name, input).await
+            let output = self.execute(tool_name, input).await;
+            self.attach_persisted_tool_result(output, exec_ctx.as_ref())
         }
     }
 
@@ -201,7 +319,10 @@ impl ToolExecutor {
             None => {
                 return ToolOutput::error(
                     "parameter_error",
-                    &format!("Missing 'path' parameter. Received: {input}"),
+                    &format!(
+                        "Missing 'path' parameter. Received fields: {}",
+                        summarize_json_value_for_error(input)
+                    ),
                 )
             }
         };
@@ -243,6 +364,44 @@ impl ToolExecutor {
             );
         }
         let current_mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+
+        let canonical_for_scope = full_path
+            .canonicalize()
+            .unwrap_or_else(|_| Self::normalize_lexical(&full_path));
+        if !is_paged_request && matches!(self.path_scope(&canonical_for_scope), PathScope::Evidence)
+        {
+            let bytes = match tokio::fs::read(&full_path).await {
+                Ok(b) => b,
+                Err(e) => return ToolOutput::error("io_error", &e.to_string()),
+            };
+            if bytes.contains(&0u8) {
+                return ToolOutput::error(
+                    "binary_file",
+                    &format!("{rel_path} appears to be a binary evidence file."),
+                );
+            }
+            let content = String::from_utf8_lossy(&bytes).into_owned();
+            if content.chars().count() > EVIDENCE_READ_REF_THRESHOLD_CHARS {
+                let rendered = render_evidence_read_ref(
+                    rel_path,
+                    &content,
+                    metadata.len(),
+                    content.lines().count(),
+                );
+                return ToolOutput {
+                    content: rendered,
+                    is_error: false,
+                    meta: Some(serde_json::json!({
+                        "kind": "evidence_read_ref",
+                        "path": rel_path,
+                        "content_source": rel_path,
+                        "content_shape": classify_text_shape(&content),
+                        "size_bytes": metadata.len(),
+                        "lines": content.lines().count(),
+                    })),
+                };
+            }
+        }
 
         // A2 stub：仅对"无 offset/limit"的整文件重读启用。
         if !is_paged_request {
@@ -289,7 +448,7 @@ impl ToolExecutor {
         const HARD_MAX_LIMIT: usize = 5000;
         let lines: Vec<&str> = content.lines().collect();
         let total_lines = lines.len();
-        let start_idx: usize = match offset {
+        let raw_start_idx: usize = match offset {
             Some(o) if o >= 1 => (o as usize).saturating_sub(1),
             _ => 0,
         };
@@ -303,12 +462,19 @@ impl ToolExecutor {
                 }
             }
         };
+        let start_idx = raw_start_idx.min(total_lines);
         let end_idx = (start_idx + requested_limit).min(total_lines);
-        let truncated_head = start_idx > 0;
+        let truncated_head = raw_start_idx > 0;
         let truncated_tail = end_idx < total_lines;
 
         let mut rendered = String::with_capacity(content.len() + total_lines * 8);
-        if truncated_head {
+        if raw_start_idx >= total_lines && total_lines > 0 {
+            rendered.push_str(&format!(
+                "[requested offset {} is beyond end of file; file has {} lines]\n",
+                raw_start_idx + 1,
+                total_lines
+            ));
+        } else if truncated_head {
             rendered.push_str(&format!(
                 "[skipped lines 1..{}; pass offset=1 to start from top]\n",
                 start_idx
@@ -316,8 +482,8 @@ impl ToolExecutor {
         }
         for (i, line) in lines[start_idx..end_idx].iter().enumerate() {
             let line_num = start_idx + i + 1;
-            // 6 位右对齐 + `|` 分隔；和 inline_line_numbers 系统提示对齐。
-            rendered.push_str(&format!("{:>6}|{}\n", line_num, line));
+            let rendered_line = truncate_middle_chars(line, READ_FILE_MAX_LINE_CHARS);
+            rendered.push_str(&format!("{:>6}|{}\n", line_num, rendered_line));
         }
         if truncated_tail {
             rendered.push_str(&format!(
@@ -343,7 +509,24 @@ impl ToolExecutor {
                 .entry(canonical)
                 .or_insert(SystemTime::UNIX_EPOCH);
         }
-        ToolOutput::ok(rendered)
+        let rendered = cap_text_with_notice(
+            rendered,
+            READ_FILE_MAX_OUTPUT_CHARS,
+            "use a smaller limit/offset window or grep for a narrower pattern",
+        );
+        ToolOutput {
+            content: rendered,
+            is_error: false,
+            meta: Some(serde_json::json!({
+                "kind": "read_file_output",
+                "path": rel_path,
+                "content_source": rel_path,
+                "content_shape": classify_text_shape(&content),
+                "size_bytes": metadata.len(),
+                "lines": total_lines,
+                "truncated": truncated_head || truncated_tail,
+            })),
+        }
     }
 
     /// Single-Agent Uplift Phase 1.1 + B3 + B4 + A1: 精确字符串替换。
@@ -372,8 +555,8 @@ impl ToolExecutor {
                 return ToolOutput::error(
                     "parameter_error",
                     &format!(
-                        "Missing 'path' parameter. Received keys: {:?}",
-                        input.as_object().map(|o| o.keys().collect::<Vec<_>>())
+                        "Missing 'path' parameter. Received fields: {}",
+                        summarize_json_value_for_error(input)
                     ),
                 )
             }
@@ -404,16 +587,17 @@ impl ToolExecutor {
                         )
                     }
                 };
-                let new_s =
-                    match item.get("new_string").and_then(|v| v.as_str()) {
-                        Some(s) => s.to_string(),
-                        None => return ToolOutput::error(
+                let new_s = match item.get("new_string").and_then(|v| v.as_str()) {
+                    Some(s) => s.to_string(),
+                    None => {
+                        return ToolOutput::error(
                             "parameter_error",
                             &format!(
                                 "edits[{i}] missing 'new_string' (pass empty string to delete)."
                             ),
-                        ),
-                    };
+                        )
+                    }
+                };
                 let ra = item
                     .get("replace_all")
                     .and_then(|v| v.as_bool())
@@ -534,12 +718,28 @@ impl ToolExecutor {
     }
 
     async fn write_file(&self, input: &serde_json::Value) -> ToolOutput {
-        let rel_path = match input["path"].as_str() {
+        if input
+            .get("__tool_use_input_compacted__")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return ToolOutput::error(
+                "parameter_error",
+                "This is a compacted historical tool_use input stub, not executable arguments. Re-create the write_file call with explicit path/content fields instead of copying the history stub.",
+            );
+        }
+        let rel_path = match input["path"]
+            .as_str()
+            .or_else(|| input["file_path"].as_str())
+        {
             Some(p) => p,
             None => {
                 return ToolOutput::error(
                     "parameter_error",
-                    &format!("Missing 'path' parameter. Received: {input}"),
+                    &format!(
+                        "Missing 'path' parameter. Received fields: {}",
+                        summarize_json_value_for_error(input)
+                    ),
                 )
             }
         };
@@ -549,12 +749,16 @@ impl ToolExecutor {
                 return ToolOutput::error(
                     "parameter_error",
                     &format!(
-                        "Missing 'content' parameter. Received keys: {:?}",
-                        input.as_object().map(|o| o.keys().collect::<Vec<_>>())
+                        "Missing 'content' parameter. Received fields: {}",
+                        summarize_json_value_for_error(input)
                     ),
                 )
             }
         };
+        let append = input
+            .get("append")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let full_path = match self.resolve_path(rel_path) {
             Ok(p) => p,
             Err(e) => return ToolOutput::error("sandbox_violation", &e.to_string()),
@@ -565,14 +769,32 @@ impl ToolExecutor {
                 return ToolOutput::error("io_error", &e.to_string());
             }
         }
-        match tokio::fs::write(&full_path, content).await {
+        let result = if append {
+            use tokio::io::AsyncWriteExt;
+            match tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&full_path)
+                .await
+            {
+                Ok(mut file) => file.write_all(content.as_bytes()).await,
+                Err(e) => Err(e),
+            }
+        } else {
+            tokio::fs::write(&full_path, content).await
+        };
+        match result {
             Ok(()) => {
                 // 关键修复：写完后必须把 canonical 路径登记进 read_paths，否则
                 // agent 接下来想 edit_file 这个文件会被 edit_without_read 拒绝，
                 // 强迫它再读一遍刚刚自己写的文件——纯浪费 token。
                 let canonical = full_path.canonicalize().unwrap_or(full_path);
                 self.record_path_mtime(canonical);
-                ToolOutput::ok(format!("Written {} bytes to {rel_path}", content.len()))
+                if append {
+                    ToolOutput::ok(format!("Appended {} bytes to {rel_path}", content.len()))
+                } else {
+                    ToolOutput::ok(format!("Written {} bytes to {rel_path}", content.len()))
+                }
             }
             Err(e) => ToolOutput::error("io_error", &e.to_string()),
         }
@@ -596,6 +818,7 @@ impl ToolExecutor {
             }
         };
         let base_rel = input["path"].as_str().unwrap_or(".");
+        let explicit_path = input["path"].as_str().is_some();
         let base = match self.resolve_path(base_rel) {
             Ok(p) => p,
             Err(e) => return ToolOutput::error("sandbox_violation", &e.to_string()),
@@ -622,16 +845,33 @@ impl ToolExecutor {
             }
         };
 
-        let workspace_canonical = self
-            .workspace_root
-            .canonicalize()
-            .unwrap_or_else(|_| self.workspace_root.clone());
+        let base_scope = self.path_scope(
+            &base
+                .canonicalize()
+                .unwrap_or_else(|_| Self::normalize_lexical(&base)),
+        );
+        let allowed_root = match base_scope {
+            PathScope::Evidence => self
+                .evidence_root
+                .canonicalize()
+                .unwrap_or_else(|_| Self::normalize_lexical(&self.evidence_root)),
+            _ => self
+                .workspace_root
+                .canonicalize()
+                .unwrap_or_else(|_| self.workspace_root.clone()),
+        };
 
         let mut entries: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
         for path in walk.flatten() {
             // sandbox 兜底：glob 不会自己越界，但符号链接可能；显式校验。
             let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
-            if !canonical.starts_with(&workspace_canonical) {
+            if !canonical.starts_with(&allowed_root) {
+                continue;
+            }
+            if !explicit_path
+                && !matches!(base_scope, PathScope::Evidence)
+                && is_internal_evidence_or_persisted_path(&canonical, &self.workspace_root)
+            {
                 continue;
             }
             // 只列文件，不列目录——和 GlobTool 语义一致；LLM 列目录用 list_files。
@@ -652,14 +892,12 @@ impl ToolExecutor {
         // 输出相对路径让 LLM 可以直接喂给 read_file/edit_file。
         let mut lines: Vec<String> = entries
             .iter()
-            .map(|(_, path)| {
-                path.strip_prefix(&workspace_canonical)
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| path.display().to_string())
-            })
+            .map(|(_, path)| self.display_path(&path))
             .collect();
         if truncated {
-            lines.push(format!("... ({} matches; showing newest {})", total, limit));
+            lines.push(format!(
+                "... [glob truncated: {total} total matches, showing newest {limit}; use a narrower pattern/path or raise limit up to 500]"
+            ));
         }
         if lines.is_empty() {
             ToolOutput::ok(format!("No files matched `{pattern}` under `{base_rel}`."))
@@ -696,7 +934,10 @@ impl ToolExecutor {
             None => {
                 return ToolOutput::error(
                     "parameter_error",
-                    &format!("Missing 'pattern' parameter. Received: {input}"),
+                    &format!(
+                        "Missing 'pattern' parameter. Received fields: {}",
+                        summarize_json_value_for_error(input)
+                    ),
                 )
             }
         };
@@ -707,6 +948,7 @@ impl ToolExecutor {
             },
             None => self.workspace_root.clone(),
         };
+        let explicit_path = input["path"].as_str().is_some();
 
         let glob_pat = input.get("glob").and_then(|v| v.as_str());
         let type_filter = input.get("type").and_then(|v| v.as_str());
@@ -724,7 +966,8 @@ impl ToolExecutor {
         let head_limit = input
             .get("head_limit")
             .and_then(|v| v.as_u64())
-            .unwrap_or(200) as usize;
+            .unwrap_or(200)
+            .max(1) as usize;
         let output_mode = input
             .get("output_mode")
             .and_then(|v| v.as_str())
@@ -775,28 +1018,100 @@ impl ToolExecutor {
             args.push("--type".into());
             args.push(t.into());
         }
+        if !explicit_path && !matches!(self.path_scope(&search_path), PathScope::Evidence) {
+            args.push("--glob".into());
+            args.push("!.miragenty-evidence/**".into());
+            args.push("--glob".into());
+            args.push("!.miragenty/tool-results/**".into());
+            if let Some(workspace_name) = self
+                .workspace_root
+                .file_name()
+                .and_then(|name| name.to_str())
+            {
+                args.push("--glob".into());
+                args.push(format!("!assets/{workspace_name}/**"));
+            }
+        }
         // 始终 color=never，避免前端拿到 ANSI 控制字符。
         args.push("--color=never".into());
         // 用 -e 把 pattern 当字面参数传，避免 pattern 以 `-` 开头被当 flag。
         args.push("-e".into());
         args.push(pattern.into());
 
-        let output = match Command::new("rg")
+        let mut child = match Command::new("rg")
             .args(&args)
             .current_dir(&search_path)
-            .output()
-            .await
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
         {
-            Ok(o) => o,
-            Err(e) => return ToolOutput::error("io_error", &format!("failed to spawn rg: {e}")),
+            Ok(child) => child,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return ToolOutput::error(
+                    "dependency_missing",
+                    "grep requires ripgrep (`rg`) so regex semantics stay consistent; install rg or use shell_exec with an available search tool",
+                );
+            }
+            Err(e) => {
+                return capability_tool_error(
+                    "grep",
+                    "dependency_spawn_failure",
+                    format!("failed to spawn rg: {e}"),
+                )
+            }
         };
+        let Some(stdout) = child.stdout.take() else {
+            return ToolOutput::error("rg_error", "failed to capture rg stdout");
+        };
+        let Some(mut stderr) = child.stderr.take() else {
+            return ToolOutput::error("rg_error", "failed to capture rg stderr");
+        };
+        let stdout_task = tokio::spawn(async move {
+            let mut reader = BufReader::new(stdout).lines();
+            let mut lines = Vec::new();
+            let mut truncated = false;
+            while let Some(line) = reader.next_line().await? {
+                if lines.len() < head_limit {
+                    lines.push(line);
+                } else {
+                    truncated = true;
+                    break;
+                }
+            }
+            Ok::<_, std::io::Error>((lines, truncated))
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = String::new();
+            stderr.read_to_string(&mut buf).await?;
+            Ok::<_, std::io::Error>(buf)
+        });
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let exit_code = output.status.code().unwrap_or(-1);
+        let (lines, truncated) = match stdout_task.await {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => {
+                return ToolOutput::error("rg_error", &format!("failed reading rg stdout: {e}"))
+            }
+            Err(e) => return ToolOutput::error("rg_error", &format!("rg stdout task failed: {e}")),
+        };
+        if truncated {
+            let _ = child.kill().await;
+        }
+        let status = match child.wait().await {
+            Ok(status) => status,
+            Err(e) => return ToolOutput::error("rg_error", &format!("failed waiting for rg: {e}")),
+        };
+        let stderr = match stderr_task.await {
+            Ok(Ok(stderr)) => stderr,
+            Ok(Err(e)) => {
+                return ToolOutput::error("rg_error", &format!("failed reading rg stderr: {e}"))
+            }
+            Err(e) => return ToolOutput::error("rg_error", &format!("rg stderr task failed: {e}")),
+        };
+        let exit_code = status.code().unwrap_or(-1);
 
-        // rg 退出码：0=有匹配 1=无匹配 2+=真正的错误。
-        if exit_code == 1 {
+        // rg 退出码：0=有匹配 1=无匹配 2+=真正的错误。截断时会主动 kill，
+        // 此时 status 可能是 signal/nonzero，但已成功取得 head_limit 行。
+        if !truncated && exit_code == 1 {
             return ToolOutput::ok(format!(
                 "No matches for pattern `{pattern}`{}.",
                 glob_pat
@@ -804,32 +1119,31 @@ impl ToolExecutor {
                     .unwrap_or_default()
             ));
         }
-        if exit_code >= 2 {
+        if !truncated && exit_code >= 2 {
             return ToolOutput::error(
                 "rg_error",
                 &format!("ripgrep exited with code {exit_code}: {}", stderr.trim()),
             );
         }
 
-        // head_limit 截断（按行数）。
-        let lines: Vec<&str> = stdout.lines().collect();
-        let total = lines.len();
-        let truncated = total > head_limit;
-        let kept = if truncated {
-            &lines[..head_limit]
-        } else {
-            &lines[..]
-        };
-        let mut body = kept.join("\n");
+        let mut body = lines
+            .iter()
+            .map(|line| truncate_middle_chars(line, GREP_MAX_LINE_CHARS))
+            .collect::<Vec<_>>()
+            .join("\n");
         if truncated {
             body.push_str(&format!(
-                "\n... [truncated {} more lines; pass head_limit higher or narrow with glob/type]",
-                total - head_limit
+                "\n... [truncated after {head_limit} lines; pass head_limit higher or narrow with glob/type]"
             ));
         }
         if body.is_empty() {
             body = format!("(rg returned no output for `{pattern}`)");
         }
+        body = cap_text_with_notice(
+            body,
+            GREP_MAX_OUTPUT_CHARS,
+            "use a narrower pattern, glob/type filter, output_mode=count/files_with_matches, or lower head_limit",
+        );
         ToolOutput::ok(body)
     }
 
@@ -846,13 +1160,17 @@ impl ToolExecutor {
         &self,
         input: &serde_json::Value,
         stream_ctx: Option<StreamCtx>,
+        _exec_ctx: Option<ToolExecutionContext>,
     ) -> ToolOutput {
         let command = match input["command"].as_str() {
             Some(c) => c,
             None => {
                 return ToolOutput::error(
                     "parameter_error",
-                    &format!("Missing 'command' parameter. Received: {input}"),
+                    &format!(
+                        "Missing 'command' parameter. Received fields: {}",
+                        summarize_json_value_for_error(input)
+                    ),
                 )
             }
         };
@@ -894,14 +1212,25 @@ impl ToolExecutor {
             "shell_exec spawning"
         );
 
-        let mut child = match Command::new("sh")
+        let mut command_builder = Command::new("sh");
+        command_builder
             .args(["-c", command])
             .current_dir(&self.workspace_root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-        {
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        unsafe {
+            command_builder.pre_exec(|| {
+                if libc::setpgid(0, 0) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+
+        let mut child = match command_builder.spawn() {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(
@@ -913,7 +1242,7 @@ impl ToolExecutor {
                 if let Some(ctx) = &stream_ctx {
                     emit_stream_meta(ctx, &format!("[spawn error] {e}\n"));
                 }
-                return ToolOutput::error("shell_error", &e.to_string());
+                return Self::format_shell_spawn_error(e, wall_secs);
             }
         };
         let pid = child.id();
@@ -927,6 +1256,12 @@ impl ToolExecutor {
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
 
+        let evidence = _exec_ctx.as_ref().and_then(|ctx| {
+            ShellEvidence::create(&self.workspace_root, &self.evidence_root, ctx).ok()
+        });
+        let stdout_evidence = evidence.as_ref().map(|e| e.stdout.clone());
+        let stderr_evidence = evidence.as_ref().map(|e| e.stderr.clone());
+
         let last_byte_at = Arc::new(Mutex::new(Instant::now()));
         let stdout_buf = Arc::new(Mutex::new(TruncatedBuffer::new(SHELL_OUTPUT_MAX_BYTES)));
         let stderr_buf = Arc::new(Mutex::new(TruncatedBuffer::new(SHELL_OUTPUT_MAX_BYTES)));
@@ -937,6 +1272,7 @@ impl ToolExecutor {
                 stdout_buf.clone(),
                 last_byte_at.clone(),
                 stream_ctx.clone().map(|c| (c, "stdout".to_string())),
+                stdout_evidence,
             )
         });
         let stderr_handle = stderr_pipe.map(|p| {
@@ -945,6 +1281,7 @@ impl ToolExecutor {
                 stderr_buf.clone(),
                 last_byte_at.clone(),
                 stream_ctx.clone().map(|c| (c, "stderr".to_string())),
+                stderr_evidence,
             )
         });
 
@@ -969,36 +1306,15 @@ impl ToolExecutor {
                         stdout_text: String,
                         stderr_text: String,
                         elapsed: std::time::Duration| {
-            match status {
-                Ok(status) if termination_reason.is_some() => Self::format_killed(
-                    termination_reason.unwrap(),
-                    status.code(),
-                    stdout_text,
-                    stderr_text,
-                    elapsed,
-                ),
-                Ok(status) if status.success() => {
-                    let mut combined = stdout_text;
-                    if !stderr_text.is_empty() {
-                        if !combined.is_empty() {
-                            combined.push('\n');
-                        }
-                        combined.push_str("[stderr] ");
-                        combined.push_str(&stderr_text);
-                    }
-                    ToolOutput::ok(combined)
-                }
-                Ok(status) => {
-                    let code = status.code().unwrap_or(-1);
-                    let msg = format!(
-                        "Command failed (exit code {code}, elapsed {:.1}s)\n\
-                             [stdout]\n{stdout_text}\n[stderr]\n{stderr_text}",
-                        elapsed.as_secs_f64()
-                    );
-                    ToolOutput::error("shell_error", &msg)
-                }
-                Err(e) => ToolOutput::error("shell_error", &e.to_string()),
-            }
+            Self::finalize_shell_output(
+                status,
+                termination_reason,
+                stdout_text,
+                stderr_text,
+                elapsed,
+                evidence.as_ref(),
+                command,
+            )
         };
 
         loop {
@@ -1112,6 +1428,186 @@ impl ToolExecutor {
     /// 把"被 watchdog 强制终止"的结果封装成 LLM 友好的结构化错误：
     /// content 是 JSON，error="shell_killed"，附 reason / partial_exit_code / 末尾 stdout / 末尾 stderr，
     /// 让 LLM 据此决定是换种方式（加超时声明、换命令、跳过装包）还是放弃。
+    fn finalize_shell_output(
+        status: std::io::Result<std::process::ExitStatus>,
+        termination_reason: Option<String>,
+        stdout_text: String,
+        stderr_text: String,
+        elapsed: std::time::Duration,
+        evidence: Option<&ShellEvidence>,
+        command: &str,
+    ) -> ToolOutput {
+        let output = match status {
+            Ok(status) if termination_reason.is_some() => Self::format_killed(
+                termination_reason.unwrap(),
+                status.code(),
+                stdout_text,
+                stderr_text,
+                elapsed,
+            ),
+            Ok(status) if status.success() => {
+                let mut combined = stdout_text;
+                if !stderr_text.is_empty() {
+                    if !combined.is_empty() {
+                        combined.push('\n');
+                    }
+                    combined.push_str("[stderr] ");
+                    combined.push_str(&stderr_text);
+                }
+                ToolOutput::ok(combined)
+            }
+            Ok(status) => {
+                let code = status.code().unwrap_or(-1);
+                Self::format_shell_error(code, stdout_text, stderr_text, elapsed)
+            }
+            Err(e) => Self::format_shell_wait_error(e, elapsed),
+        };
+        Self::attach_shell_evidence(output, evidence, command, elapsed)
+    }
+
+    fn attach_shell_evidence(
+        mut output: ToolOutput,
+        evidence: Option<&ShellEvidence>,
+        command: &str,
+        elapsed: std::time::Duration,
+    ) -> ToolOutput {
+        let Some(evidence) = evidence else {
+            return output;
+        };
+        let stdout_stats = evidence.stdout.lock().unwrap().stats();
+        let stderr_stats = evidence.stderr.lock().unwrap().stats();
+        let compacted = output.content.chars().count() > SHELL_COMPACT_THRESHOLD_CHARS
+            || stdout_stats.bytes + stderr_stats.bytes > SHELL_COMPACT_THRESHOLD_CHARS;
+        let proxy_env_present = std::env::var_os("ALL_PROXY").is_some()
+            || std::env::var_os("all_proxy").is_some()
+            || std::env::var_os("HTTPS_PROXY").is_some()
+            || std::env::var_os("https_proxy").is_some()
+            || std::env::var_os("HTTP_PROXY").is_some()
+            || std::env::var_os("http_proxy").is_some();
+        let output_kind = classify_shell_output(evidence);
+        let command_family = classify_shell_command_family(command);
+        let content_source = command_content_source(command);
+        let content_shape =
+            classify_shell_content_shape(output_kind, evidence, content_source.as_deref());
+        let evidence_meta = serde_json::json!({
+            "kind": "shell_exec_output",
+            "output_kind": output_kind.as_str(),
+            "command_family": command_family,
+            "content_source": content_source.unwrap_or_else(|| "unknown".to_string()),
+            "content_shape": content_shape,
+            "stdout_path": evidence.stdout_path,
+            "stderr_path": evidence.stderr_path,
+            "stdout_bytes": stdout_stats.bytes,
+            "stdout_lines": stdout_stats.lines,
+            "stdout_capture_truncated": stdout_stats.capture_truncated,
+            "stderr_bytes": stderr_stats.bytes,
+            "stderr_lines": stderr_stats.lines,
+            "stderr_capture_truncated": stderr_stats.capture_truncated,
+            "compacted": compacted,
+            "elapsed_seconds": elapsed.as_secs_f64(),
+            "proxy_env_present": proxy_env_present,
+        });
+        if compacted {
+            output.content = render_shell_compact_manifest(
+                command,
+                output.is_error,
+                elapsed,
+                evidence,
+                stdout_stats,
+                stderr_stats,
+                output_kind,
+            );
+        }
+        output.meta = Some(merge_tool_meta(output.meta.take(), evidence_meta));
+        output
+    }
+
+    fn shell_error_class(exit_code: i32, stderr_text: &str) -> &'static str {
+        let lower = stderr_text.to_ascii_lowercase();
+        if exit_code == 127 {
+            "command_not_found"
+        } else if exit_code == 126 {
+            "not_executable_or_permission_denied"
+        } else if lower.contains("illegal option")
+            || lower.contains("invalid option")
+            || lower.contains("unknown option")
+            || lower.contains("unsupported option")
+            || lower.contains("unrecognized option")
+        {
+            "tool_option_or_platform_mismatch"
+        } else if lower.contains("permission denied") {
+            "permission_denied"
+        } else {
+            "nonzero_exit"
+        }
+    }
+
+    fn format_shell_error(
+        exit_code: i32,
+        stdout_text: String,
+        stderr_text: String,
+        elapsed: std::time::Duration,
+    ) -> ToolOutput {
+        let shell_error_class = Self::shell_error_class(exit_code, &stderr_text);
+        let payload = serde_json::json!({
+            "error": "shell_error",
+            "shell_error_class": shell_error_class,
+            "capability_feedback": matches!(shell_error_class, "command_not_found" | "not_executable_or_permission_denied" | "tool_option_or_platform_mismatch" | "permission_denied"),
+            "exit_code": exit_code,
+            "elapsed_seconds": elapsed.as_secs_f64(),
+            "stdout_tail": stdout_text,
+            "stderr_tail": stderr_text,
+            "hint": "Use the exit code and stderr as observed environment facts. Adapt the command to the available shell/tools instead of repeating the same failing command."
+        });
+        ToolOutput {
+            content: payload.to_string(),
+            is_error: true,
+            meta: Some(serde_json::json!({
+                "shell_error_class": shell_error_class,
+                "capability_feedback": true,
+                "exit_code": exit_code,
+            })),
+        }
+    }
+
+    fn format_shell_wait_error(e: std::io::Error, elapsed: std::time::Duration) -> ToolOutput {
+        let payload = serde_json::json!({
+            "error": "shell_error",
+            "shell_error_class": "process_wait_error",
+            "capability_feedback": false,
+            "elapsed_seconds": elapsed.as_secs_f64(),
+            "message": e.to_string(),
+            "hint": "The shell process could not be awaited cleanly; inspect the error and retry only if the command itself is still appropriate."
+        });
+        ToolOutput {
+            content: payload.to_string(),
+            is_error: true,
+            meta: Some(serde_json::json!({
+                "shell_error_class": "process_wait_error",
+                "capability_feedback": false,
+            })),
+        }
+    }
+
+    fn format_shell_spawn_error(e: std::io::Error, wall_secs: u64) -> ToolOutput {
+        let payload = serde_json::json!({
+            "error": "shell_error",
+            "shell_error_class": "spawn_failure",
+            "capability_feedback": true,
+            "message": e.to_string(),
+            "timeout_seconds": wall_secs,
+            "hint": "The shell command could not be spawned in this runtime environment. Check workspace access and available shell/tool capabilities before retrying."
+        });
+        ToolOutput {
+            content: payload.to_string(),
+            is_error: true,
+            meta: Some(serde_json::json!({
+                "shell_error_class": "spawn_failure",
+                "capability_feedback": true,
+            })),
+        }
+    }
+
     fn format_killed(
         reason: String,
         partial_exit_code: Option<i32>,
@@ -1131,11 +1627,19 @@ impl ToolExecutor {
         ToolOutput {
             content: payload.to_string(),
             is_error: true,
+            meta: None,
         }
     }
 
     async fn list_files(&self, input: &serde_json::Value) -> ToolOutput {
         let rel_path = input["path"].as_str().unwrap_or(".");
+        let explicit_path = input["path"].as_str().is_some();
+        let limit = input
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(LIST_FILES_DEFAULT_LIMIT)
+            .min(LIST_FILES_HARD_LIMIT);
         let full_path = match self.resolve_path(rel_path) {
             Ok(p) => p,
             Err(e) => return ToolOutput::error("sandbox_violation", &e.to_string()),
@@ -1161,6 +1665,14 @@ impl ToolExecutor {
                         Err(_) => continue,
                     };
                     let name = entry.file_name().to_string_lossy().to_string();
+                    if !explicit_path
+                        && is_internal_evidence_or_persisted_path(
+                            &entry.path(),
+                            &self.workspace_root,
+                        )
+                    {
+                        continue;
+                    }
                     let suffix = if file_type.is_dir() { "/" } else { "" };
                     entries.push(format!("{name}{suffix}"));
                 }
@@ -1169,11 +1681,249 @@ impl ToolExecutor {
             }
         }
         entries.sort();
-        ToolOutput::ok(entries.join("\n"))
+        let total = entries.len();
+        let truncated = total > limit;
+        entries.truncate(limit);
+        let mut out = format!(
+            "[list_files path={rel_path} entries_shown={} entries_total={}{}]\n",
+            entries.len(),
+            total,
+            if truncated { " truncated=true" } else { "" }
+        );
+        out.push_str(&entries.join("\n"));
+        if truncated {
+            out.push_str(&format!(
+                "\n... [truncated {} entries; pass a more specific path or increase limit up to {LIST_FILES_HARD_LIMIT}]",
+                total - limit
+            ));
+        }
+        ToolOutput::ok(out)
+    }
+
+    async fn notebook_edit(&self, input: &serde_json::Value) -> ToolOutput {
+        let rel_path = match input["path"].as_str() {
+            Some(p) => p,
+            None => return ToolOutput::error("parameter_error", "Missing 'path' parameter."),
+        };
+        let operation = match input["operation"].as_str() {
+            Some(op) => op,
+            None => return ToolOutput::error("parameter_error", "Missing 'operation' parameter."),
+        };
+        if !rel_path.ends_with(".ipynb") {
+            return ToolOutput::error(
+                "parameter_error",
+                "notebook_edit only supports .ipynb files.",
+            );
+        }
+
+        let full_path = match self.resolve_path(rel_path) {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error("sandbox_violation", &e.to_string()),
+        };
+        let canonical = full_path
+            .canonicalize()
+            .unwrap_or_else(|_| full_path.clone());
+
+        let raw = match tokio::fs::read_to_string(&full_path).await {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return ToolOutput::error("file_not_found", &format!("File not found: {rel_path}"));
+            }
+            Err(e) => return ToolOutput::error("io_error", &e.to_string()),
+        };
+        let mut notebook: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(e) => return ToolOutput::error("invalid_notebook", &e.to_string()),
+        };
+        if !notebook.get("cells").is_some_and(|v| v.is_array()) {
+            return ToolOutput::error("invalid_notebook", "Notebook JSON is missing cells array.");
+        }
+
+        match operation {
+            "read_cells" => {
+                let limit = input
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(NOTEBOOK_READ_CELLS_DEFAULT_LIMIT as u64)
+                    .min(NOTEBOOK_READ_CELLS_HARD_LIMIT as u64)
+                    as usize;
+                let cells = notebook["cells"].as_array().unwrap();
+                let mut source_budget = NOTEBOOK_READ_CELLS_TOTAL_SOURCE_CHARS;
+                let mut truncated_sources = 0usize;
+                let rendered = cells
+                    .iter()
+                    .take(limit)
+                    .enumerate()
+                    .map(|(index, cell)| {
+                        let source = notebook_source_to_string(cell.get("source"));
+                        let original_chars = source.chars().count();
+                        let per_cell_cap = NOTEBOOK_CELL_SOURCE_MAX_CHARS.min(source_budget);
+                        let source_truncated = original_chars > per_cell_cap;
+                        let rendered_source = truncate_chars(&source, per_cell_cap);
+                        let rendered_chars = rendered_source.chars().count();
+                        if source_truncated {
+                            truncated_sources += 1;
+                        }
+                        source_budget = source_budget.saturating_sub(rendered_chars);
+                        serde_json::json!({
+                            "index": index,
+                            "cell_type": cell.get("cell_type").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                            "source_chars": original_chars,
+                            "source_truncated": source_truncated,
+                            "source": rendered_source,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                ToolOutput::ok(
+                    serde_json::json!({
+                        "path": rel_path,
+                        "cell_count": cells.len(),
+                        "returned": rendered.len(),
+                        "truncated_cells": cells.len().saturating_sub(rendered.len()),
+                        "truncated_sources": truncated_sources,
+                        "hint": if cells.len() > rendered.len() || truncated_sources > 0 {
+                            "Use a smaller limit or read/update a specific cell by index. Large cell sources are truncated in read_cells output."
+                        } else {
+                            ""
+                        },
+                        "cells": rendered,
+                    })
+                    .to_string(),
+                )
+            }
+            "insert_cell" => {
+                let source = match parse_notebook_source(input.get("source")) {
+                    Ok(s) => s,
+                    Err(e) => return ToolOutput::error("parameter_error", &e),
+                };
+                let cell_type = input["cell_type"].as_str().unwrap_or("code");
+                let insert_index = match notebook_insert_index(&notebook, input) {
+                    Ok(i) => i,
+                    Err(e) => return ToolOutput::error("parameter_error", &e),
+                };
+                let cell_count = {
+                    let cells = notebook["cells"].as_array_mut().unwrap();
+                    if insert_index > cells.len() {
+                        return ToolOutput::error(
+                            "parameter_error",
+                            &format!(
+                                "insert index {insert_index} is past cell count {}",
+                                cells.len()
+                            ),
+                        );
+                    }
+                    cells.insert(insert_index, make_notebook_cell(cell_type, source));
+                    cells.len()
+                };
+                if let Err(e) = write_notebook_json(&full_path, &notebook).await {
+                    return ToolOutput::error("io_error", &e.to_string());
+                }
+                self.record_path_mtime(canonical);
+                ToolOutput::ok(
+                    serde_json::json!({
+                        "path": rel_path,
+                        "operation": operation,
+                        "inserted_index": insert_index,
+                        "cell_count": cell_count,
+                    })
+                    .to_string(),
+                )
+            }
+            "update_cell" => {
+                let index = match input.get("index").and_then(|v| v.as_u64()) {
+                    Some(i) => i as usize,
+                    None => {
+                        return ToolOutput::error("parameter_error", "update_cell requires index.")
+                    }
+                };
+                let source = match parse_notebook_source(input.get("source")) {
+                    Ok(s) => s,
+                    Err(e) => return ToolOutput::error("parameter_error", &e),
+                };
+                let cell_count = {
+                    let cells = notebook["cells"].as_array_mut().unwrap();
+                    if index >= cells.len() {
+                        return ToolOutput::error(
+                            "parameter_error",
+                            &format!(
+                                "cell index {index} is out of range for {} cells",
+                                cells.len()
+                            ),
+                        );
+                    }
+                    if let Some(cell_type) = input["cell_type"].as_str() {
+                        cells[index]["cell_type"] =
+                            serde_json::Value::String(cell_type.to_string());
+                    }
+                    cells[index]["source"] = source_lines_json(&source);
+                    if cells[index].get("metadata").is_none() {
+                        cells[index]["metadata"] = serde_json::json!({});
+                    }
+                    cells.len()
+                };
+                if let Err(e) = write_notebook_json(&full_path, &notebook).await {
+                    return ToolOutput::error("io_error", &e.to_string());
+                }
+                self.record_path_mtime(canonical);
+                ToolOutput::ok(
+                    serde_json::json!({
+                        "path": rel_path,
+                        "operation": operation,
+                        "updated_index": index,
+                        "cell_count": cell_count,
+                    })
+                    .to_string(),
+                )
+            }
+            "delete_cell" => {
+                let index = match input.get("index").and_then(|v| v.as_u64()) {
+                    Some(i) => i as usize,
+                    None => {
+                        return ToolOutput::error("parameter_error", "delete_cell requires index.")
+                    }
+                };
+                let cell_count = {
+                    let cells = notebook["cells"].as_array_mut().unwrap();
+                    if index >= cells.len() {
+                        return ToolOutput::error(
+                            "parameter_error",
+                            &format!(
+                                "cell index {index} is out of range for {} cells",
+                                cells.len()
+                            ),
+                        );
+                    }
+                    cells.remove(index);
+                    cells.len()
+                };
+                if let Err(e) = write_notebook_json(&full_path, &notebook).await {
+                    return ToolOutput::error("io_error", &e.to_string());
+                }
+                self.record_path_mtime(canonical);
+                ToolOutput::ok(
+                    serde_json::json!({
+                        "path": rel_path,
+                        "operation": operation,
+                        "deleted_index": index,
+                        "cell_count": cell_count,
+                    })
+                    .to_string(),
+                )
+            }
+            _ => ToolOutput::error(
+                "parameter_error",
+                "operation must be one of read_cells, insert_cell, update_cell, delete_cell.",
+            ),
+        }
     }
 
     fn resolve_path(&self, rel_path: &str) -> Result<PathBuf> {
-        let full = self.workspace_root.join(rel_path);
+        let candidate = PathBuf::from(rel_path);
+        let full = if candidate.is_absolute() {
+            candidate
+        } else {
+            self.workspace_root.join(rel_path)
+        };
         let canonical = full
             .canonicalize()
             .unwrap_or_else(|_| Self::normalize_lexical(&full));
@@ -1182,15 +1932,47 @@ impl ToolExecutor {
             .workspace_root
             .canonicalize()
             .unwrap_or_else(|_| Self::normalize_lexical(&self.workspace_root));
+        let evidence_canonical = self
+            .evidence_root
+            .canonicalize()
+            .unwrap_or_else(|_| Self::normalize_lexical(&self.evidence_root));
 
-        if !canonical.starts_with(&workspace_canonical) {
+        if !canonical.starts_with(&workspace_canonical)
+            && !canonical.starts_with(&evidence_canonical)
+        {
             bail!(
-                "Path escapes workspace: {} is outside {}",
+                "Path escapes workspace: {} is outside {} or evidence root {}",
                 canonical.display(),
-                workspace_canonical.display()
+                workspace_canonical.display(),
+                evidence_canonical.display()
             );
         }
         Ok(full)
+    }
+
+    fn path_scope(&self, path: &std::path::Path) -> PathScope {
+        let canonical = path
+            .canonicalize()
+            .unwrap_or_else(|_| Self::normalize_lexical(path));
+        let workspace = self
+            .workspace_root
+            .canonicalize()
+            .unwrap_or_else(|_| Self::normalize_lexical(&self.workspace_root));
+        let evidence = self
+            .evidence_root
+            .canonicalize()
+            .unwrap_or_else(|_| Self::normalize_lexical(&self.evidence_root));
+        if canonical.starts_with(&evidence) {
+            PathScope::Evidence
+        } else if canonical.starts_with(&workspace) {
+            PathScope::Workspace
+        } else {
+            PathScope::Other
+        }
+    }
+
+    fn display_path(&self, path: &std::path::Path) -> String {
+        path_display_for_agent(&self.workspace_root, &self.evidence_root, path)
     }
 
     /// Resolve `.` and `..` components lexically (without touching the filesystem).
@@ -1212,7 +1994,158 @@ impl ToolExecutor {
     }
 }
 
-/// edit_file 内部错误。`kind` 直接喂 ToolOutput::error，message 拼回 LLM。
+fn is_internal_evidence_or_persisted_path(
+    path: &std::path::Path,
+    workspace_root: &std::path::Path,
+) -> bool {
+    let normalized = ToolExecutor::normalize_lexical(path);
+    let workspace = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| ToolExecutor::normalize_lexical(workspace_root));
+    if !normalized.starts_with(&workspace) {
+        return false;
+    }
+    if normalized.components().any(|component| {
+        let name = component.as_os_str().to_string_lossy();
+        name == ".miragenty-evidence" || name == "tool-results"
+    }) {
+        return true;
+    }
+    is_mirrored_benchmark_asset_path(&normalized, &workspace)
+}
+
+fn is_mirrored_benchmark_asset_path(
+    path: &std::path::Path,
+    workspace_root: &std::path::Path,
+) -> bool {
+    let workspace_name = workspace_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if workspace_name.is_empty() {
+        return false;
+    }
+    let Ok(rel) = path.strip_prefix(workspace_root) else {
+        return false;
+    };
+    if rel.components().count() == 1 && rel == std::path::Path::new("assets") {
+        return true;
+    }
+    let mut components = rel.components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(first)), Some(std::path::Component::Normal(second)))
+            if first == "assets" && second == workspace_name
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathScope {
+    Workspace,
+    Evidence,
+    Other,
+}
+
+fn notebook_source_to_string(source: Option<&serde_json::Value>) -> String {
+    match source {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(lines)) => lines
+            .iter()
+            .filter_map(|line| line.as_str())
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => String::new(),
+    }
+}
+
+fn parse_notebook_source(
+    source: Option<&serde_json::Value>,
+) -> std::result::Result<String, String> {
+    match source {
+        Some(serde_json::Value::String(s)) => Ok(s.clone()),
+        Some(serde_json::Value::Array(lines)) => {
+            let mut out = String::new();
+            for (i, line) in lines.iter().enumerate() {
+                let Some(line) = line.as_str() else {
+                    return Err(format!("source[{i}] must be a string"));
+                };
+                out.push_str(line);
+            }
+            Ok(out)
+        }
+        Some(_) => Err("source must be a string or array of strings".to_string()),
+        None => Err("Missing 'source' parameter.".to_string()),
+    }
+}
+
+fn source_lines_json(source: &str) -> serde_json::Value {
+    if source.is_empty() {
+        return serde_json::json!([]);
+    }
+    let mut lines = source
+        .split_inclusive('\n')
+        .map(|line| serde_json::Value::String(line.to_string()))
+        .collect::<Vec<_>>();
+    if !source.ends_with('\n') {
+        if lines.is_empty() {
+            lines.push(serde_json::Value::String(source.to_string()));
+        }
+    }
+    serde_json::Value::Array(lines)
+}
+
+fn make_notebook_cell(cell_type: &str, source: String) -> serde_json::Value {
+    let mut cell = serde_json::json!({
+        "cell_type": cell_type,
+        "metadata": {},
+        "source": source_lines_json(&source),
+    });
+    if cell_type == "code" {
+        cell["execution_count"] = serde_json::Value::Null;
+        cell["outputs"] = serde_json::json!([]);
+    }
+    cell
+}
+
+fn notebook_insert_index(
+    notebook: &serde_json::Value,
+    input: &serde_json::Value,
+) -> std::result::Result<usize, String> {
+    let cells = notebook["cells"]
+        .as_array()
+        .ok_or_else(|| "Notebook JSON is missing cells array.".to_string())?;
+    if let Some(index) = input.get("index").and_then(|v| v.as_u64()) {
+        return Ok(index as usize);
+    }
+    if let Some(index) = input.get("after_cell_index").and_then(|v| v.as_u64()) {
+        let index = index as usize;
+        if index >= cells.len() {
+            return Err(format!(
+                "after_cell_index {index} is out of range for {} cells",
+                cells.len()
+            ));
+        }
+        return Ok(index + 1);
+    }
+    if let Some(needle) = input.get("after_source_contains").and_then(|v| v.as_str()) {
+        let Some((index, _)) = cells
+            .iter()
+            .enumerate()
+            .find(|(_, cell)| notebook_source_to_string(cell.get("source")).contains(needle))
+        else {
+            return Err(format!("no cell source contains {needle:?}"));
+        };
+        return Ok(index + 1);
+    }
+    Ok(cells.len())
+}
+
+async fn write_notebook_json(path: &std::path::Path, notebook: &serde_json::Value) -> Result<()> {
+    let content = serde_json::to_string_pretty(notebook)?;
+    tokio::fs::write(path, format!("{content}\n")).await?;
+    Ok(())
+}
+
 struct EditError {
     kind: String,
     message: String,
@@ -1393,7 +2326,731 @@ fn desanitize_text(s: &str) -> String {
     out
 }
 
-/// 限长的字节缓冲：超过 `cap` 时丢弃头部、保留尾部，并标记 `truncated_head_bytes`。
+#[derive(Debug, Clone, Copy)]
+struct EvidenceStats {
+    bytes: usize,
+    lines: usize,
+    capture_truncated: bool,
+}
+
+struct EvidenceSink {
+    path: PathBuf,
+    file: Option<std::fs::File>,
+    bytes: usize,
+    lines: usize,
+    capture_truncated: bool,
+}
+
+impl EvidenceSink {
+    fn new(path: PathBuf) -> Self {
+        let file = std::fs::File::create(&path).ok();
+        Self {
+            path,
+            file,
+            bytes: 0,
+            lines: 0,
+            capture_truncated: false,
+        }
+    }
+
+    fn write_chunk(&mut self, bytes: &[u8]) {
+        self.lines += bytes.iter().filter(|b| **b == b'\n').count();
+        if self.bytes >= SHELL_EVIDENCE_CAPTURE_MAX_BYTES {
+            self.capture_truncated = true;
+            return;
+        }
+        let remaining = SHELL_EVIDENCE_CAPTURE_MAX_BYTES - self.bytes;
+        let to_write = bytes.len().min(remaining);
+        if to_write < bytes.len() {
+            self.capture_truncated = true;
+        }
+        if let Some(file) = &mut self.file {
+            let _ = file.write_all(&bytes[..to_write]);
+        }
+        self.bytes += to_write;
+    }
+
+    fn stats(&self) -> EvidenceStats {
+        EvidenceStats {
+            bytes: self.bytes,
+            lines: self.lines,
+            capture_truncated: self.capture_truncated,
+        }
+    }
+}
+
+struct ShellEvidence {
+    stdout_path: String,
+    stderr_path: String,
+    stdout: Arc<Mutex<EvidenceSink>>,
+    stderr: Arc<Mutex<EvidenceSink>>,
+}
+
+impl ShellEvidence {
+    fn create(
+        workspace_root: &std::path::Path,
+        evidence_root: &std::path::Path,
+        ctx: &ToolExecutionContext,
+    ) -> Result<Self> {
+        let dir = evidence_root
+            .join(sanitize_path_segment(&ctx.agent_id))
+            .join(format!("step-{:04}", ctx.step))
+            .join(sanitize_path_segment(&ctx.tool_use_id));
+        std::fs::create_dir_all(&dir)?;
+        let stdout = dir.join("stdout.txt");
+        let stderr = dir.join("stderr.txt");
+        Ok(Self {
+            stdout_path: path_display_for_agent(workspace_root, evidence_root, &stdout),
+            stderr_path: path_display_for_agent(workspace_root, evidence_root, &stderr),
+            stdout: Arc::new(Mutex::new(EvidenceSink::new(stdout))),
+            stderr: Arc::new(Mutex::new(EvidenceSink::new(stderr))),
+        })
+    }
+}
+
+fn sanitize_path_segment(value: &str) -> String {
+    let cleaned: String = value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "unknown".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn path_display_for_agent(
+    workspace_root: &std::path::Path,
+    evidence_root: &std::path::Path,
+    path: &std::path::Path,
+) -> String {
+    if let Ok(relative) = path.strip_prefix(workspace_root) {
+        return relative.display().to_string();
+    }
+    if let Ok(relative) = path.strip_prefix(evidence_root) {
+        return evidence_root.join(relative).display().to_string();
+    }
+    path.display().to_string()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellOutputKind {
+    Log,
+    Html,
+    Data,
+    Text,
+}
+
+impl ShellOutputKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            ShellOutputKind::Log => "log",
+            ShellOutputKind::Html => "html",
+            ShellOutputKind::Data => "data",
+            ShellOutputKind::Text => "text",
+        }
+    }
+}
+
+fn classify_shell_output(evidence: &ShellEvidence) -> ShellOutputKind {
+    let stdout = evidence
+        .stdout
+        .lock()
+        .ok()
+        .and_then(|sink| std::fs::read_to_string(&sink.path).ok())
+        .unwrap_or_default();
+    let stderr = evidence
+        .stderr
+        .lock()
+        .ok()
+        .and_then(|sink| std::fs::read_to_string(&sink.path).ok())
+        .unwrap_or_default();
+    let sample = format!(
+        "{}\n{}",
+        stdout.chars().take(16_000).collect::<String>(),
+        stderr.chars().take(4_000).collect::<String>()
+    );
+    let lower = sample.to_ascii_lowercase();
+    if lower.contains("<!doctype html") || lower.contains("<html") || lower.contains("</html>") {
+        return ShellOutputKind::Html;
+    }
+    if stderr.lines().any(|line| is_log_signal_line(line))
+        || lower.contains("traceback")
+        || lower.contains("npm err!")
+        || lower.contains("error[")
+    {
+        return ShellOutputKind::Log;
+    }
+    let dataish_lines = stdout
+        .lines()
+        .take(80)
+        .filter(|line| {
+            let trimmed = line.trim();
+            (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+                || trimmed.matches(',').count() >= 2
+                || trimmed.matches('\t').count() >= 2
+                || trimmed.matches('|').count() >= 2
+        })
+        .count();
+    if dataish_lines >= 2 {
+        return ShellOutputKind::Data;
+    }
+    ShellOutputKind::Text
+}
+
+fn is_log_signal_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    [
+        "error:",
+        "error[",
+        " failed",
+        "failure",
+        "panic",
+        "exception",
+        "traceback",
+        "assert",
+        "not found",
+        "permission denied",
+        "warning:",
+        "npm err!",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn classify_shell_command_family(command: &str) -> &'static str {
+    let lower = command.to_ascii_lowercase();
+    let first = lower.split_whitespace().next().unwrap_or("");
+    if (matches!(
+        first,
+        "cargo" | "npm" | "pnpm" | "yarn" | "pytest" | "go" | "make"
+    ) && (lower.contains(" test")
+        || lower.contains(" check")
+        || lower.contains(" build")
+        || lower.contains(" run")))
+        || lower.contains("python -m pytest")
+        || lower.contains("python3 -m pytest")
+    {
+        return "build_test";
+    }
+    if matches!(first, "curl" | "wget")
+        || lower.contains("requests.get")
+        || lower.contains("httpx.get")
+        || lower.contains("urllib.request")
+    {
+        return "fetch";
+    }
+    if matches!(first, "cat" | "jq") || lower.contains(".read()") || lower.contains("read_text(") {
+        return "file_dump";
+    }
+    if matches!(first, "head" | "tail" | "sed" | "awk") {
+        return "file_excerpt";
+    }
+    if matches!(first, "ls" | "find") {
+        return "directory_listing";
+    }
+    if lower.contains("assert")
+        || lower.contains("required")
+        || lower.contains("json.load")
+        || lower.contains("csv")
+        || lower.contains("wc -")
+    {
+        return "validation";
+    }
+    "generic"
+}
+
+fn command_content_source(command: &str) -> Option<String> {
+    extract_url(command).or_else(|| extract_probable_path(command))
+}
+
+fn extract_url(text: &str) -> Option<String> {
+    for token in
+        text.split(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | ')' | '(' | '<' | '>'))
+    {
+        if token.starts_with("http://") || token.starts_with("https://") {
+            return Some(
+                token
+                    .trim_end_matches(|c: char| matches!(c, ',' | ';'))
+                    .to_string(),
+            );
+        }
+    }
+    None
+}
+
+fn extract_probable_path(command: &str) -> Option<String> {
+    command
+        .split_whitespace()
+        .map(|t| t.trim_matches(|c| matches!(c, '\'' | '"' | ',' | ';')))
+        .find(|t| {
+            t.contains('/')
+                || [
+                    ".json", ".csv", ".md", ".txt", ".html", ".xml", ".ipynb", ".rs", ".ts", ".tsx",
+                ]
+                .iter()
+                .any(|ext| t.ends_with(ext))
+        })
+        .map(|s| s.to_string())
+}
+
+fn classify_shell_content_shape(
+    output_kind: ShellOutputKind,
+    evidence: &ShellEvidence,
+    source: Option<&str>,
+) -> &'static str {
+    if let Some(source) = source {
+        if let Some(shape) = shape_from_path_or_url(source) {
+            return shape;
+        }
+    }
+    let stdout_path = evidence.stdout.lock().unwrap().path.clone();
+    let sample = std::fs::read_to_string(stdout_path).unwrap_or_default();
+    classify_text_shape(&sample)
+        .strip_prefix("")
+        .unwrap_or(match output_kind {
+            ShellOutputKind::Html => "html",
+            ShellOutputKind::Data => "json",
+            ShellOutputKind::Log => "log",
+            ShellOutputKind::Text => "text",
+        })
+}
+
+fn classify_text_shape(content: &str) -> &'static str {
+    let sample = content.trim_start();
+    let lower = sample
+        .chars()
+        .take(512)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if lower.contains("<!doctype html") || lower.contains("<html") {
+        "html"
+    } else if lower.starts_with("<?xml") || lower.starts_with("<feed") || lower.starts_with("<rss")
+    {
+        "xml"
+    } else if sample.starts_with('{') || sample.starts_with('[') {
+        "json"
+    } else if sample
+        .lines()
+        .take(5)
+        .any(|line| line.matches(',').count() >= 2)
+    {
+        "csv"
+    } else if sample.lines().take(20).any(|line| line.starts_with('#')) {
+        "markdown"
+    } else if lower.contains("traceback") || lower.contains("error:") || lower.contains("warning:")
+    {
+        "log"
+    } else {
+        "text"
+    }
+}
+
+fn shape_from_path_or_url(source: &str) -> Option<&'static str> {
+    let lower = source.to_ascii_lowercase();
+    if lower.ends_with(".html") || lower.ends_with(".htm") {
+        Some("html")
+    } else if lower.ends_with(".json") {
+        Some("json")
+    } else if lower.ends_with(".xml") || lower.ends_with(".rss") {
+        Some("xml")
+    } else if lower.ends_with(".csv") || lower.ends_with(".tsv") {
+        Some("csv")
+    } else if lower.ends_with(".md") || lower.ends_with(".markdown") {
+        Some("markdown")
+    } else if lower.ends_with(".ipynb") {
+        Some("notebook")
+    } else {
+        None
+    }
+}
+
+fn render_evidence_read_ref(path: &str, content: &str, bytes: u64, lines: usize) -> String {
+    let mut out = format!(
+        "[evidence_read_ref]\npath: {path}\nbytes: {bytes}\nlines: {lines}\ncontent_shape: {}\n",
+        classify_text_shape(content)
+    );
+    out.push_str("\nExcerpt:\n");
+    out.push_str(&head_tail_excerpt(content, EVIDENCE_READ_EXCERPT_CHARS));
+    out.push_str("\n\nSuggested next steps:\n");
+    out.push_str(&format!(
+        "- grep {{\"path\":\"{path}\",\"pattern\":\"<narrow-pattern>\",\"context\":4}}\n- read_file {{\"path\":\"{path}\",\"offset\":<line>,\"limit\":120}}"
+    ));
+    out
+}
+
+fn head_tail_excerpt(content: &str, max_chars: usize) -> String {
+    let count = content.chars().count();
+    if count <= max_chars {
+        return content.to_string();
+    }
+    let head_len = max_chars / 2;
+    let tail_len = max_chars.saturating_sub(head_len);
+    let head = content.chars().take(head_len).collect::<String>();
+    let tail = content
+        .chars()
+        .rev()
+        .take(tail_len)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!(
+        "{head}\n... [middle omitted: {} chars] ...\n{tail}",
+        count.saturating_sub(max_chars)
+    )
+}
+
+fn strip_html_tags(line: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in line.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                out.push(' ');
+            }
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn html_high_signal_excerpts(evidence: &ShellEvidence) -> Vec<String> {
+    let stdout_path = evidence.stdout.lock().unwrap().path.clone();
+    let Ok(content) = std::fs::read_to_string(stdout_path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (idx, raw_line) in content.lines().enumerate() {
+        let line = raw_line.trim();
+        let lower = line.to_ascii_lowercase();
+        let is_signal = lower.contains("<title")
+            || lower.contains("<h1")
+            || lower.contains("<h2")
+            || lower.contains("<meta name=\"description")
+            || lower.contains("abstract")
+            || lower.contains("paper")
+            || lower.contains("model")
+            || lower.contains("price")
+            || lower.contains("pricing")
+            || lower.contains("table");
+        let is_noise = lower.contains("console.error")
+            || lower.contains("--error")
+            || lower.contains(".error")
+            || lower.contains("error-text")
+            || lower.contains("stylesheet")
+            || lower.contains("script");
+        if is_signal && !is_noise {
+            let display = strip_html_tags(line);
+            if display.is_empty() {
+                continue;
+            }
+            out.push(format!(
+                "stdout:{}: {}",
+                idx + 1,
+                truncate_chars(&display, 220)
+            ));
+            if out.len() >= 12 {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+fn data_high_signal_excerpts(evidence: &ShellEvidence) -> Vec<String> {
+    let stdout_path = evidence.stdout.lock().unwrap().path.clone();
+    let Ok(content) = std::fs::read_to_string(stdout_path) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let dataish = (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+                || trimmed.matches(',').count() >= 2
+                || trimmed.matches('\t').count() >= 2
+                || trimmed.matches('|').count() >= 2;
+            dataish.then(|| format!("stdout:{}: {}", idx + 1, truncate_chars(trimmed, 220)))
+        })
+        .take(12)
+        .collect()
+}
+
+fn text_high_signal_excerpts(evidence: &ShellEvidence) -> Vec<String> {
+    let stdout_path = evidence.stdout.lock().unwrap().path.clone();
+    let Ok(content) = std::fs::read_to_string(stdout_path) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            let trimmed = line.trim();
+            if trimmed.len() < 20 {
+                return None;
+            }
+            Some(format!(
+                "stdout:{}: {}",
+                idx + 1,
+                truncate_chars(trimmed, 220)
+            ))
+        })
+        .take(12)
+        .collect()
+}
+fn render_shell_compact_manifest(
+    command: &str,
+    is_error: bool,
+    elapsed: std::time::Duration,
+    evidence: &ShellEvidence,
+    stdout_stats: EvidenceStats,
+    stderr_stats: EvidenceStats,
+    output_kind: ShellOutputKind,
+) -> String {
+    let mut out = format!(
+        "[shell_exec_output_compacted]\ncommand: {}\nstatus: {}\nelapsed_seconds: {:.1}\noutput_kind: {}\nstdout: {} lines, {} bytes -> {}{}\nstderr: {} lines, {} bytes -> {}{}\n",
+        truncate_chars(command, 240),
+        if is_error { "error" } else { "success" },
+        elapsed.as_secs_f64(),
+        output_kind.as_str(),
+        stdout_stats.lines,
+        stdout_stats.bytes,
+        evidence.stdout_path,
+        if stdout_stats.capture_truncated { " (capture truncated)" } else { "" },
+        stderr_stats.lines,
+        stderr_stats.bytes,
+        evidence.stderr_path,
+        if stderr_stats.capture_truncated { " (capture truncated)" } else { "" },
+    );
+    out.push_str("\nHigh-signal excerpts:\n");
+    let excerpts = collect_high_signal_excerpts(evidence, output_kind);
+    if excerpts.is_empty() {
+        out.push_str("- (none detected; inspect evidence with grep/read_file if needed)\n");
+    } else {
+        for line in excerpts {
+            out.push_str("- ");
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out.push_str("\nSuggested next steps:\n");
+    match output_kind {
+        ShellOutputKind::Log => {
+            out.push_str(&format!(
+                "- grep {{\"pattern\":\"error|failed|panic|Traceback|Exception|warning\",\"path\":\"{}\",\"context\":6}}\n",
+                evidence.stderr_path
+            ));
+            out.push_str(&format!(
+                "- read_file {{\"path\":\"{}\",\"offset\":1,\"limit\":120}}\n",
+                evidence.stderr_path
+            ));
+        }
+        ShellOutputKind::Html => {
+            out.push_str(&format!(
+                "- grep {{\"pattern\":\"<title|<h1|<h2|abstract|model|price|pricing|table\",\"path\":\"{}\",\"context\":4}}\n",
+                evidence.stdout_path
+            ));
+            out.push_str(&format!(
+                "- read_file {{\"path\":\"{}\",\"offset\":1,\"limit\":160}}\n",
+                evidence.stdout_path
+            ));
+        }
+        ShellOutputKind::Data => {
+            out.push_str(&format!(
+                "- read_file {{\"path\":\"{}\",\"offset\":1,\"limit\":80}}\n",
+                evidence.stdout_path
+            ));
+            out.push_str("- Use a focused shell/python parser on the evidence file if exact aggregation is needed.\n");
+        }
+        ShellOutputKind::Text => {
+            out.push_str(&format!(
+                "- grep {{\"pattern\":\"TODO|ERROR|result|summary|conclusion|key|required\",\"path\":\"{}\",\"context\":4}}\n",
+                evidence.stdout_path
+            ));
+            out.push_str(&format!(
+                "- read_file {{\"path\":\"{}\",\"offset\":1,\"limit\":120}}\n",
+                evidence.stdout_path
+            ));
+        }
+    }
+    truncate_chars(&out, SHELL_COMPACT_MAX_CHARS)
+}
+
+fn collect_high_signal_excerpts(
+    evidence: &ShellEvidence,
+    output_kind: ShellOutputKind,
+) -> Vec<String> {
+    match output_kind {
+        ShellOutputKind::Html => html_high_signal_excerpts(evidence),
+        ShellOutputKind::Data => data_high_signal_excerpts(evidence),
+        ShellOutputKind::Text => text_high_signal_excerpts(evidence),
+        ShellOutputKind::Log => collect_log_high_signal_excerpts(evidence),
+    }
+}
+
+fn collect_log_high_signal_excerpts(evidence: &ShellEvidence) -> Vec<String> {
+    let stderr_path = evidence.stderr.lock().unwrap().path.clone();
+    let stdout_path = evidence.stdout.lock().unwrap().path.clone();
+    let mut out = Vec::new();
+    for (label, path) in [("stderr", stderr_path), ("stdout", stdout_path)] {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            for (idx, line) in content.lines().enumerate() {
+                if is_log_signal_line(line) {
+                    out.push(format!(
+                        "{label}:{}: {}",
+                        idx + 1,
+                        truncate_chars(line, 220)
+                    ));
+                    if out.len() >= 12 {
+                        return out;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut truncated = s.chars().take(max.saturating_sub(1)).collect::<String>();
+        truncated.push('…');
+        truncated
+    }
+}
+
+fn truncate_middle_chars(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        return s.to_string();
+    }
+    if max <= 1 {
+        return "…".to_string();
+    }
+    let head_len = max / 2;
+    let tail_len = max.saturating_sub(head_len + 1);
+    let head: String = s.chars().take(head_len).collect();
+    let tail: String = s
+        .chars()
+        .rev()
+        .take(tail_len)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{head}…{tail}")
+}
+
+fn cap_text_with_notice(text: String, max_chars: usize, notice: &str) -> String {
+    if text.chars().count() <= max_chars {
+        return text;
+    }
+    let kept = text.chars().take(max_chars).collect::<String>();
+    format!("{kept}\n... [truncated to {max_chars} chars; {notice}]")
+}
+
+fn capability_tool_error(tool: &str, class: &str, message: String) -> ToolOutput {
+    let payload = serde_json::json!({
+        "error": "tool_capability_error",
+        "tool": tool,
+        "capability_error_class": class,
+        "capability_feedback": true,
+        "message": message,
+        "hint": "This tool dependency is not available or could not be launched in the current runtime environment. Adapt using the runtime profile and available tools instead of retrying the same failing call."
+    });
+    ToolOutput {
+        content: payload.to_string(),
+        is_error: true,
+        meta: Some(serde_json::json!({
+            "capability_feedback": true,
+            "capability_error_class": class,
+            "tool": tool,
+        })),
+    }
+}
+
+fn content_source_from_tool_context(tool_name: &str, output: &ToolOutput) -> String {
+    output
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("content_source"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+        .or_else(|| {
+            output
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("path"))
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+        })
+        .unwrap_or_else(|| tool_name.to_string())
+}
+
+fn merge_tool_meta(
+    existing: Option<serde_json::Value>,
+    next: serde_json::Value,
+) -> serde_json::Value {
+    match (existing, next) {
+        (Some(serde_json::Value::Object(mut base)), serde_json::Value::Object(add)) => {
+            for (k, v) in add {
+                base.insert(k, v);
+            }
+            serde_json::Value::Object(base)
+        }
+        (Some(existing), next) => serde_json::json!({
+            "previous_meta": existing,
+            "meta": next,
+        }),
+        (None, next) => next,
+    }
+}
+
+fn summarize_json_value_for_error(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => {
+            let fields = map
+                .iter()
+                .map(|(k, v)| {
+                    let summary = match v {
+                        serde_json::Value::String(s) => {
+                            format!("string({} chars)", s.chars().count())
+                        }
+                        serde_json::Value::Array(a) => format!("array({} items)", a.len()),
+                        serde_json::Value::Object(o) => format!("object({} keys)", o.len()),
+                        serde_json::Value::Null => "null".to_string(),
+                        serde_json::Value::Bool(_) => "bool".to_string(),
+                        serde_json::Value::Number(_) => "number".to_string(),
+                    };
+                    format!("{k}: {summary}")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{fields}}}")
+        }
+        other => truncate_chars(&other.to_string(), 240),
+    }
+}
+
 struct TruncatedBuffer {
     cap: usize,
     inner: Vec<u8>,
@@ -1438,6 +3095,7 @@ fn spawn_pipe_reader<R>(
     buf: Arc<Mutex<TruncatedBuffer>>,
     last_byte_at: Arc<Mutex<Instant>>,
     emit: Option<(StreamCtx, String)>,
+    evidence: Option<Arc<Mutex<EvidenceSink>>>,
 ) -> tokio::task::JoinHandle<()>
 where
     R: AsyncReadExt + Unpin + Send + 'static,
@@ -1455,6 +3113,9 @@ where
                 Ok(n) => {
                     *last_byte_at.lock().unwrap() = Instant::now();
                     buf.lock().unwrap().push(&chunk[..n]);
+                    if let Some(evidence) = &evidence {
+                        evidence.lock().unwrap().write_chunk(&chunk[..n]);
+                    }
                     if let Some((ctx, stream)) = &emit {
                         let text = String::from_utf8_lossy(&chunk[..n]).into_owned();
                         emit_stream_chunk(ctx, stream, &text, false);
@@ -1502,6 +3163,12 @@ fn emit_stream_meta(ctx: &StreamCtx, text: &str) {
 /// 终止子进程：watchdog 触发的对象基本是死循环 / hang，直接 SIGKILL（tokio
 /// `start_kill` 在 unix 等价于 SIGKILL）。`kill_on_drop` 已经做了二次保险。
 async fn terminate_child(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        unsafe {
+            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
     let _ = child.start_kill();
 }
 
@@ -1515,6 +3182,141 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let exec = ToolExecutor::new(dir.path().to_path_buf());
         (dir, exec)
+    }
+
+    #[tokio::test]
+    async fn shell_large_output_writes_evidence_and_returns_manifest() {
+        let (dir, exec) = setup();
+        let ctx = ToolExecutionContext {
+            agent_id: "agent-1".into(),
+            step: 7,
+            tool_use_id: "tool-1".into(),
+            tool_name: "shell_exec".into(),
+        };
+        let out = exec
+            .shell_exec(
+                &serde_json::json!({
+                    "command": "python3 - <<'PY'\nfor i in range(3000):\n    print(f'line {i}')\nprint('error: buried signal')\nPY"
+                }),
+                None,
+                Some(ctx),
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("[shell_exec_output_compacted]"));
+        assert!(out.content.contains("buried signal"));
+        let meta = out.meta.expect("shell output should include evidence meta");
+        let stdout_path = meta["stdout_path"].as_str().unwrap();
+        let stdout = fs::read_to_string(dir.path().join(stdout_path)).unwrap();
+        assert!(stdout.contains("line 0"));
+        assert!(stdout.contains("error: buried signal"));
+        assert_eq!(meta["compacted"], true);
+    }
+
+    #[tokio::test]
+    async fn shell_html_manifest_ignores_css_error_noise() {
+        let (dir, exec) = setup();
+        let ctx = ToolExecutionContext {
+            agent_id: "agent-1".into(),
+            step: 8,
+            tool_use_id: "tool-html".into(),
+            tool_name: "shell_exec".into(),
+        };
+        let html = format!(
+            "<!doctype html><html><head><title>Pricing Page</title><style>.error-text{{color:red}}</style></head><body><h1>Model Pricing</h1>{}</body></html>",
+            " filler".repeat(30_000)
+        );
+        let script = format!("import sys\nsys.stdout.write({html:?})");
+        let out = exec
+            .shell_exec(
+                &serde_json::json!({"command": format!("python3 - <<'PY'\n{script}\nPY")}),
+                None,
+                Some(ctx),
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("output_kind: html"), "{}", out.content);
+        assert!(out.content.contains("Pricing Page") || out.content.contains("Model Pricing"));
+        let high_signal = out
+            .content
+            .split("High-signal excerpts:")
+            .nth(1)
+            .and_then(|s| s.split("Suggested next steps:").next())
+            .unwrap_or(&out.content);
+        assert!(
+            !high_signal.contains(".error-text"),
+            "html CSS error noise leaked"
+        );
+        let meta = out.meta.expect("meta");
+        assert_eq!(meta["output_kind"], "html");
+        let stdout_path = meta["stdout_path"].as_str().unwrap();
+        assert!(fs::read_to_string(dir.path().join(stdout_path))
+            .unwrap()
+            .contains(".error-text"));
+    }
+    #[tokio::test]
+    async fn shell_small_output_keeps_content_and_adds_evidence_meta() {
+        let (dir, exec) = setup();
+        let ctx = ToolExecutionContext {
+            agent_id: "agent-1".into(),
+            step: 1,
+            tool_use_id: "tool-2".into(),
+            tool_name: "shell_exec".into(),
+        };
+        let out = exec
+            .shell_exec(
+                &serde_json::json!({"command": "printf hello"}),
+                None,
+                Some(ctx),
+            )
+            .await;
+        assert!(!out.is_error);
+        assert_eq!(out.content, "hello");
+        let meta = out.meta.expect("shell output should include evidence meta");
+        assert_eq!(meta["compacted"], false);
+        assert_eq!(meta["command_family"], "generic");
+        assert_eq!(meta["content_shape"], "text");
+        let stdout_path = meta["stdout_path"].as_str().unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join(stdout_path)).unwrap(),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn shell_command_classifier_detects_content_commands() {
+        assert_eq!(
+            classify_shell_command_family("curl https://example.com/a.json"),
+            "fetch"
+        );
+        assert_eq!(
+            classify_shell_command_family("cat reports/out.md"),
+            "file_dump"
+        );
+        assert_eq!(
+            classify_shell_command_family("head -40 reports/out.md"),
+            "file_excerpt"
+        );
+        assert_eq!(
+            classify_shell_command_family("find . -type f"),
+            "directory_listing"
+        );
+        assert_eq!(
+            classify_shell_command_family("python3 -m pytest"),
+            "build_test"
+        );
+        assert_eq!(
+            command_content_source("curl https://example.com/a.json").as_deref(),
+            Some("https://example.com/a.json")
+        );
+    }
+
+    #[test]
+    fn text_shape_classifier_detects_common_artifact_shapes() {
+        assert_eq!(classify_text_shape("{\"ok\":true}"), "json");
+        assert_eq!(classify_text_shape("<!doctype html><html></html>"), "html");
+        assert_eq!(classify_text_shape("# Title\nbody"), "markdown");
+        assert_eq!(classify_text_shape("a,b,c\n1,2,3"), "csv");
     }
 
     #[tokio::test]
@@ -1550,7 +3352,9 @@ mod tests {
         assert!(out.is_error);
         let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
         assert_eq!(v["error"], "shell_error");
-        assert!(v["message"].as_str().unwrap().contains("127"));
+        assert_eq!(v["exit_code"], 127);
+        assert_eq!(v["shell_error_class"], "command_not_found");
+        assert_eq!(v["capability_feedback"], true);
     }
 
     #[tokio::test]
@@ -1641,6 +3445,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shell_timeout_kills_pipeline_process_group() {
+        let (_dir, exec) = setup();
+        let out = exec
+            .shell_exec(
+                &serde_json::json!({"command": "yes | python3 -c 'import sys, time; sys.stdin.read(1); time.sleep(5)'", "timeout_seconds": 1, "idle_timeout_seconds": 1}),
+                None,
+                None,
+            )
+            .await;
+        assert!(out.is_error);
+        let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+        assert_eq!(v["error"], "shell_killed");
+        assert!(
+            v["reason"].as_str().unwrap().contains("exceeded")
+                || v["reason"].as_str().unwrap().contains("idle")
+        );
+    }
+
+    #[tokio::test]
     async fn shell_explicit_timeout_seconds_is_enforced() {
         let (_dir, exec) = setup();
         let out = exec
@@ -1652,7 +3475,10 @@ mod tests {
         assert!(out.is_error);
         let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
         assert_eq!(v["error"], "shell_killed");
-        assert!(v["reason"].as_str().unwrap().contains("wall_clock 1s exceeded"));
+        assert!(v["reason"]
+            .as_str()
+            .unwrap()
+            .contains("wall_clock 1s exceeded"));
     }
 
     /// TruncatedBuffer：超过 cap 时丢头保尾。
@@ -1663,6 +3489,36 @@ mod tests {
         let s = buf.render();
         assert!(s.contains("89ABCDEF"));
         assert!(s.contains("truncated"));
+    }
+
+    #[tokio::test]
+    async fn non_shell_large_output_persists_tool_result_with_context() {
+        let (_dir, exec) = setup();
+        let original = "x".repeat(3 * 1024);
+        let out = exec.attach_persisted_tool_result(
+            ToolOutput {
+                content: original.clone(),
+                is_error: false,
+                meta: None,
+            },
+            Some(&ToolExecutionContext {
+                agent_id: "agent-large".to_string(),
+                step: 2,
+                tool_use_id: "read-large".to_string(),
+                tool_name: "read_file".to_string(),
+            }),
+        );
+
+        assert!(!out.is_error, "got error: {}", out.content);
+        let meta = out.meta.expect("large non-shell output should have meta");
+        let persisted_path = meta["persisted_path"]
+            .as_str()
+            .expect("persisted path should be present");
+        assert!(persisted_path.contains("agent-large"));
+        assert!(persisted_path.contains("read-large"));
+        let persisted = fs::read_to_string(persisted_path).unwrap();
+        assert_eq!(persisted, original);
+        assert_eq!(meta["kind"], "persisted_tool_result");
     }
 
     #[tokio::test]
@@ -1679,7 +3535,189 @@ mod tests {
         assert_eq!(content, "hello world");
     }
 
-    // ---- Single-Agent Uplift Phase 1.1: edit_file 单测 ----
+    #[tokio::test]
+    async fn write_file_appends_chunks() {
+        let (dir, exec) = setup();
+        let first = exec
+            .execute(
+                "write_file",
+                &serde_json::json!({"path": "chunked.py", "content": "print('a')\n"}),
+            )
+            .await;
+        assert!(!first.is_error, "got error: {}", first.content);
+        let second = exec
+            .execute(
+                "write_file",
+                &serde_json::json!({"path": "chunked.py", "content": "print('b')\n", "append": true}),
+            )
+            .await;
+        assert!(!second.is_error, "got error: {}", second.content);
+        let content = fs::read_to_string(dir.path().join("chunked.py")).unwrap();
+        assert_eq!(content, "print('a')\nprint('b')\n");
+    }
+
+    #[tokio::test]
+    async fn write_file_accepts_file_path_alias() {
+        let (dir, exec) = setup();
+        let out = exec
+            .execute(
+                "write_file",
+                &serde_json::json!({"file_path": "alias.txt", "content": "hello alias"}),
+            )
+            .await;
+        assert!(!out.is_error, "got error: {}", out.content);
+        let content = fs::read_to_string(dir.path().join("alias.txt")).unwrap();
+        assert_eq!(content, "hello alias");
+    }
+
+    #[tokio::test]
+    async fn write_file_rejects_compacted_history_stub() {
+        let (_dir, exec) = setup();
+        let out = exec
+            .execute(
+                "write_file",
+                &serde_json::json!({
+                    "__tool_use_input_compacted__": true,
+                    "original_path": "big.py",
+                    "__tool_use_input_excerpt__": "{\"path\":\"big.py\",\"content\":\"..."
+                }),
+            )
+            .await;
+        assert!(out.is_error);
+        assert!(out
+            .content
+            .contains("compacted historical tool_use input stub"));
+        assert!(out.content.contains("explicit path/content"));
+    }
+
+    #[tokio::test]
+    async fn notebook_edit_reads_cells() {
+        let (dir, exec) = setup();
+        fs::write(
+            dir.path().join("analysis.ipynb"),
+            serde_json::json!({
+                "cells": [
+                    {
+                        "cell_type": "code",
+                        "metadata": {},
+                        "execution_count": null,
+                        "outputs": [],
+                        "source": ["summary = {'ok': True}\n"]
+                    }
+                ],
+                "metadata": {},
+                "nbformat": 4,
+                "nbformat_minor": 5
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let out = exec
+            .execute(
+                "notebook_edit",
+                &serde_json::json!({"path": "analysis.ipynb", "operation": "read_cells"}),
+            )
+            .await;
+        assert!(!out.is_error, "got error: {}", out.content);
+        let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+        assert_eq!(v["cell_count"], 1);
+        assert_eq!(v["cells"][0]["source"], "summary = {'ok': True}\n");
+    }
+
+    #[tokio::test]
+    async fn notebook_edit_read_cells_truncates_large_sources() {
+        let (dir, exec) = setup();
+        fs::write(
+            dir.path().join("large.ipynb"),
+            serde_json::json!({
+                "cells": [
+                    {
+                        "cell_type": "code",
+                        "metadata": {},
+                        "execution_count": null,
+                        "outputs": [],
+                        "source": [format!("{}TAIL\n", "x".repeat(NOTEBOOK_CELL_SOURCE_MAX_CHARS + 512))]
+                    },
+                    {
+                        "cell_type": "markdown",
+                        "metadata": {},
+                        "source": ["short\n"]
+                    }
+                ],
+                "metadata": {},
+                "nbformat": 4,
+                "nbformat_minor": 5
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let out = exec
+            .execute(
+                "notebook_edit",
+                &serde_json::json!({"path": "large.ipynb", "operation": "read_cells", "limit": 1}),
+            )
+            .await;
+        assert!(!out.is_error, "got error: {}", out.content);
+        let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+        assert_eq!(v["returned"], 1);
+        assert_eq!(v["truncated_cells"], 1);
+        assert_eq!(v["truncated_sources"], 1);
+        assert_eq!(v["cells"][0]["source_truncated"], true);
+        assert!(v["cells"][0]["source"].as_str().unwrap().contains('…'));
+        assert!(v["hint"].as_str().unwrap().contains("Large cell sources"));
+    }
+
+    #[tokio::test]
+    async fn notebook_edit_inserts_cell_after_source_match() {
+        let (dir, exec) = setup();
+        fs::write(
+            dir.path().join("analysis.ipynb"),
+            serde_json::json!({
+                "cells": [
+                    {
+                        "cell_type": "code",
+                        "metadata": {},
+                        "execution_count": null,
+                        "outputs": [],
+                        "source": ["summary = {'ok': True}\n"]
+                    }
+                ],
+                "metadata": {},
+                "nbformat": 4,
+                "nbformat_minor": 5
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let out = exec
+            .execute(
+                "notebook_edit",
+                &serde_json::json!({
+                    "path": "analysis.ipynb",
+                    "operation": "insert_cell",
+                    "after_source_contains": "summary =",
+                    "cell_type": "code",
+                    "source": "release_snapshot = {'status': 'ready'}\nrelease_snapshot\n"
+                }),
+            )
+            .await;
+        assert!(!out.is_error, "got error: {}", out.content);
+        let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+        assert_eq!(v["inserted_index"], 1);
+
+        let notebook: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.path().join("analysis.ipynb")).unwrap())
+                .unwrap();
+        assert_eq!(notebook["cells"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            notebook["cells"][1]["source"][0],
+            "release_snapshot = {'status': 'ready'}\n"
+        );
+        assert_eq!(notebook["cells"][1]["source"][1], "release_snapshot\n");
+    }
 
     /// 没读过文件就 edit → 拒绝。这是 edit_without_read 不变量的回归测试。
     #[tokio::test]
@@ -1867,6 +3905,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn glob_reports_truncation_with_next_step_hint() {
+        let (dir, exec) = setup();
+        for i in 0..5 {
+            fs::write(dir.path().join(format!("g-{i}.rs")), "x").unwrap();
+        }
+
+        let out = exec
+            .execute("glob", &serde_json::json!({"pattern": "*.rs", "limit": 2}))
+            .await;
+        assert!(!out.is_error, "got: {}", out.content);
+        assert!(
+            out.content.contains("glob truncated"),
+            "got:\n{}",
+            out.content
+        );
+        assert!(
+            out.content.contains("5 total matches"),
+            "got:\n{}",
+            out.content
+        );
+        assert!(
+            out.content.contains("narrower pattern/path"),
+            "got:\n{}",
+            out.content
+        );
+    }
+
+    #[tokio::test]
     async fn glob_empty_match_returns_friendly_message() {
         let (_dir, exec) = setup();
         let out = exec
@@ -1933,6 +3999,107 @@ mod tests {
         );
         // 应当告知有截断（end_idx=12 < 50）
         assert!(out.content.contains("truncated at line 12 of 50"));
+    }
+
+    #[tokio::test]
+    async fn read_file_offset_beyond_eof_returns_notice() {
+        let (dir, exec) = setup();
+        fs::write(dir.path().join("short.txt"), "alpha\nbeta\n").unwrap();
+
+        let out = exec
+            .execute(
+                "read_file",
+                &serde_json::json!({"path": "short.txt", "offset": 99, "limit": 3}),
+            )
+            .await;
+
+        assert!(!out.is_error, "got: {}", out.content);
+        assert!(out
+            .content
+            .contains("requested offset 99 is beyond end of file"));
+        assert!(out.content.contains("file has 2 lines"));
+    }
+    #[tokio::test]
+    async fn read_file_truncates_extremely_long_lines() {
+        let (dir, exec) = setup();
+        let long_line = format!("{}TAIL", "a".repeat(READ_FILE_MAX_LINE_CHARS + 512));
+        fs::write(dir.path().join("long-line.txt"), &long_line).unwrap();
+
+        let out = exec
+            .execute(
+                "read_file",
+                &serde_json::json!({"path": "long-line.txt", "limit": 1}),
+            )
+            .await;
+        assert!(!out.is_error, "got: {}", out.content);
+        assert!(out.content.contains('…'), "got:\n{}", out.content);
+        assert!(out.content.contains("TAIL"), "got:\n{}", out.content);
+        assert!(out.content.chars().count() < long_line.chars().count());
+    }
+
+    #[tokio::test]
+    async fn read_file_caps_total_output_with_hint() {
+        let (dir, exec) = setup();
+        let content = (0..3000)
+            .map(|i| format!("line-{i:04}-{}\n", "x".repeat(80)))
+            .collect::<String>();
+        fs::write(dir.path().join("huge.txt"), content).unwrap();
+
+        let out = exec
+            .execute(
+                "read_file",
+                &serde_json::json!({"path": "huge.txt", "limit": 5000}),
+            )
+            .await;
+        assert!(!out.is_error, "got: {}", out.content);
+        assert!(
+            out.content.contains("truncated to"),
+            "got:\n{}",
+            out.content
+        );
+        assert!(
+            out.content
+                .contains("use a smaller limit/offset window or grep for a narrower pattern"),
+            "got:\n{}",
+            out.content
+        );
+    }
+
+    #[tokio::test]
+    async fn parameter_errors_summarize_large_inputs() {
+        let (_dir, exec) = setup();
+        let huge = "x".repeat(20_000);
+
+        let out = exec
+            .execute("read_file", &serde_json::json!({"content": huge.clone()}))
+            .await;
+        assert!(out.is_error);
+        assert!(out.content.contains("content: string(20000 chars)"));
+        assert!(!out.content.contains(&"x".repeat(1000)));
+
+        let out = exec
+            .execute("shell_exec", &serde_json::json!({"content": huge.clone()}))
+            .await;
+        assert!(out.is_error);
+        assert!(out.content.contains("content: string(20000 chars)"));
+        assert!(!out.content.contains(&"x".repeat(1000)));
+
+        let out = exec
+            .execute("write_file", &serde_json::json!({"content": huge.clone()}))
+            .await;
+        assert!(out.is_error);
+        assert!(out.content.contains("content: string(20000 chars)"));
+        assert!(!out.content.contains(&"x".repeat(1000)));
+
+        let out = exec
+            .execute(
+                "edit_file",
+                &serde_json::json!({"old_string": huge.clone()}),
+            )
+            .await;
+        assert!(out.is_error);
+        assert!(out.content.contains("old_string: string(20000 chars)"));
+        assert!(!out.content.contains(&"x".repeat(1000)));
     }
 
     // ---- A2: file_unchanged_since_last_read stub ----
@@ -2125,8 +4292,218 @@ mod tests {
         );
     }
 
-    // ---- search_files 升级 ----
-    // 注意：search_files 走外部 `rg`。如果当前机器没装 ripgrep，跳过——CI/dev 机器需要装。
+    #[tokio::test]
+    async fn default_search_glob_and_list_skip_internal_evidence_dirs() {
+        if !rg_available() {
+            return;
+        }
+        let (dir, exec) = setup();
+        fs::write(dir.path().join("visible.txt"), "needle\n").unwrap();
+        fs::create_dir_all(dir.path().join(".miragenty-evidence/run/step")).unwrap();
+        fs::write(
+            dir.path().join(".miragenty-evidence/run/step/stdout.txt"),
+            "needle hidden\n",
+        )
+        .unwrap();
+
+        let grep = exec
+            .execute("grep", &serde_json::json!({"pattern": "needle"}))
+            .await;
+        assert!(!grep.is_error, "got: {}", grep.content);
+        assert!(
+            grep.content.contains("visible.txt"),
+            "got:\n{}",
+            grep.content
+        );
+        assert!(
+            !grep.content.contains(".miragenty-evidence"),
+            "got:\n{}",
+            grep.content
+        );
+
+        let glob = exec
+            .execute("glob", &serde_json::json!({"pattern": "**/*.txt"}))
+            .await;
+        assert!(!glob.is_error, "got: {}", glob.content);
+        assert!(
+            glob.content.contains("visible.txt"),
+            "got:\n{}",
+            glob.content
+        );
+        assert!(
+            !glob.content.contains(".miragenty-evidence"),
+            "got:\n{}",
+            glob.content
+        );
+
+        let list = exec
+            .execute("list_files", &serde_json::json!({"path": "."}))
+            .await;
+        assert!(!list.is_error, "got: {}", list.content);
+        assert!(
+            !list.content.contains(".miragenty-evidence"),
+            "got:\n{}",
+            list.content
+        );
+    }
+
+    #[tokio::test]
+    async fn default_discovery_skips_mirrored_benchmark_assets() {
+        if !rg_available() {
+            return;
+        }
+        let (dir, exec) = setup();
+        let workspace_name = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        fs::write(dir.path().join("README.md"), "needle visible\n").unwrap();
+        let mirrored_dir = dir.path().join("assets").join(&workspace_name);
+        fs::create_dir_all(&mirrored_dir).unwrap();
+        fs::write(mirrored_dir.join("README.md"), "needle mirrored\n").unwrap();
+
+        let grep = exec
+            .execute("grep", &serde_json::json!({"pattern": "needle"}))
+            .await;
+        assert!(!grep.is_error, "got: {}", grep.content);
+        assert!(grep.content.contains("README.md"), "got:\n{}", grep.content);
+        assert!(!grep.content.contains("assets/"), "got:\n{}", grep.content);
+
+        let glob = exec
+            .execute("glob", &serde_json::json!({"pattern": "**/*.md"}))
+            .await;
+        assert!(!glob.is_error, "got: {}", glob.content);
+        assert!(glob.content.contains("README.md"), "got:\n{}", glob.content);
+        assert!(!glob.content.contains("assets/"), "got:\n{}", glob.content);
+
+        let root_list = exec
+            .execute("list_files", &serde_json::json!({"path": "."}))
+            .await;
+        assert!(!root_list.is_error, "got: {}", root_list.content);
+        assert!(
+            root_list.content.contains("README.md"),
+            "got:\n{}",
+            root_list.content
+        );
+        assert!(
+            !root_list.content.contains("assets/"),
+            "got:\n{}",
+            root_list.content
+        );
+
+        let list = exec
+            .execute("list_files", &serde_json::json!({"path": "assets"}))
+            .await;
+        assert!(!list.is_error, "got: {}", list.content);
+        assert!(
+            !list.content.contains(&workspace_name),
+            "got:\n{}",
+            list.content
+        );
+
+        let explicit = exec
+            .execute(
+                "read_file",
+                &serde_json::json!({"path": format!("assets/{workspace_name}/README.md")}),
+            )
+            .await;
+        assert!(!explicit.is_error, "got: {}", explicit.content);
+        assert!(
+            explicit.content.contains("needle mirrored"),
+            "got:\n{}",
+            explicit.content
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_evidence_path_can_be_read_grepped_and_listed() {
+        if !rg_available() {
+            return;
+        }
+        let (dir, exec) = setup();
+        let evidence_root = dir.path().join("evidence-root");
+        fs::create_dir_all(&evidence_root).unwrap();
+        fs::write(
+            evidence_root.join("stdout.txt"),
+            "needle evidence\n".repeat(300),
+        )
+        .unwrap();
+        let exec = exec.with_evidence_root(evidence_root.clone());
+        let evidence_path = evidence_root.join("stdout.txt").display().to_string();
+        let evidence_dir = evidence_root.display().to_string();
+
+        let read = exec
+            .execute("read_file", &serde_json::json!({"path": evidence_path}))
+            .await;
+        assert!(!read.is_error, "got: {}", read.content);
+        assert!(
+            read.content.starts_with("[evidence_read_ref]"),
+            "got:\n{}",
+            read.content
+        );
+        assert!(read.content.contains("offset"), "got:\n{}", read.content);
+
+        let grep = exec
+            .execute(
+                "grep",
+                &serde_json::json!({"path": evidence_dir, "pattern": "needle", "head_limit": 2}),
+            )
+            .await;
+        assert!(!grep.is_error, "got: {}", grep.content);
+        assert!(
+            grep.content.contains("stdout.txt"),
+            "got:\n{}",
+            grep.content
+        );
+
+        let list = exec
+            .execute(
+                "list_files",
+                &serde_json::json!({"path": evidence_root.display().to_string()}),
+            )
+            .await;
+        assert!(!list.is_error, "got: {}", list.content);
+        assert!(
+            list.content.contains("stdout.txt"),
+            "got:\n{}",
+            list.content
+        );
+    }
+
+    #[tokio::test]
+    async fn list_files_respects_limit_and_reports_truncation() {
+        let (dir, exec) = setup();
+        for i in 0..5 {
+            fs::write(dir.path().join(format!("file-{i}.txt")), "x").unwrap();
+        }
+
+        let out = exec
+            .execute("list_files", &serde_json::json!({"path": ".", "limit": 2}))
+            .await;
+        assert!(!out.is_error, "got: {}", out.content);
+        assert!(
+            out.content.contains("entries_shown=2"),
+            "got:\n{}",
+            out.content
+        );
+        assert!(
+            out.content.contains("entries_total=5"),
+            "got:\n{}",
+            out.content
+        );
+        assert!(
+            out.content.contains("truncated=true"),
+            "got:\n{}",
+            out.content
+        );
+        assert!(
+            out.content.contains("truncated 3 entries"),
+            "got:\n{}",
+            out.content
+        );
+    }
 
     fn rg_available() -> bool {
         std::process::Command::new("rg")
@@ -2247,6 +4624,53 @@ mod tests {
             out.content
         );
         assert!(out.content.contains("b.rs:1"), "got:\n{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn grep_truncates_long_matching_lines() {
+        if !rg_available() {
+            return;
+        }
+        let (dir, exec) = setup();
+        let line = format!("needle-{}-TAIL\n", "x".repeat(GREP_MAX_LINE_CHARS + 512));
+        fs::write(dir.path().join("long.txt"), line).unwrap();
+
+        let out = exec
+            .execute("grep", &serde_json::json!({"pattern": "needle"}))
+            .await;
+        assert!(!out.is_error, "got: {}", out.content);
+        assert!(out.content.contains('…'), "got:\n{}", out.content);
+        assert!(out.content.contains("TAIL"), "got:\n{}", out.content);
+        assert!(out.content.chars().count() < GREP_MAX_LINE_CHARS + 512);
+    }
+
+    #[tokio::test]
+    async fn grep_head_limit_stops_after_requested_lines() {
+        if !rg_available() {
+            return;
+        }
+        let (dir, exec) = setup();
+        fs::write(dir.path().join("many.txt"), "needle\n".repeat(1000)).unwrap();
+
+        let out = exec
+            .execute(
+                "grep",
+                &serde_json::json!({"pattern": "needle", "head_limit": 3}),
+            )
+            .await;
+        assert!(!out.is_error, "got: {}", out.content);
+        assert_eq!(
+            out.content
+                .lines()
+                .filter(|line| line.contains("needle"))
+                .count(),
+            3
+        );
+        assert!(
+            out.content.contains("truncated after 3 lines"),
+            "got:\n{}",
+            out.content
+        );
     }
 
     /// 关键回归：通过主名 `grep` 调与通过 alias `search_files` 调，行为必须**字节相等**。

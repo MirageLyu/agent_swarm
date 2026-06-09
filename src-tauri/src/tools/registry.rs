@@ -14,17 +14,93 @@
 
 use crate::llm::ToolDefinition;
 
+pub enum ResultBudgetMode {
+    Inline,
+    ReferencePreferred,
+    ManifestPreferred,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceFingerprintMode {
+    Input,
+    Path,
+    Pattern,
+    CommandSource,
+}
+
 /// 工具元数据。一个 tool name 对应一个 ToolSpec。
 pub struct ToolSpec {
     pub name: &'static str,
     /// 是否可与其它 concurrency-safe 工具并发执行（无副作用 + 不抢 lock）。
     /// 写盘 / 跑 shell / 改 DB 一律 false。
     pub is_concurrency_safe: bool,
+    pub max_result_size_chars: usize,
+    pub is_read_only: bool,
+    pub is_search_or_read_command: bool,
+    pub result_budget_mode: ResultBudgetMode,
+    pub source_fingerprint_mode: SourceFingerprintMode,
     /// 生成给 LLM 看的 schema。lazy 一点 —— 每次 hot-reload 都重建，保证修描述时不需要重启。
     pub make_definition: fn() -> ToolDefinition,
 }
 
 impl ToolSpec {
+    const fn new(
+        name: &'static str,
+        is_concurrency_safe: bool,
+        max_result_size_chars: usize,
+        is_read_only: bool,
+        is_search_or_read_command: bool,
+        result_budget_mode: ResultBudgetMode,
+        source_fingerprint_mode: SourceFingerprintMode,
+        make_definition: fn() -> ToolDefinition,
+    ) -> Self {
+        Self {
+            name,
+            is_concurrency_safe,
+            max_result_size_chars,
+            is_read_only,
+            is_search_or_read_command,
+            result_budget_mode,
+            source_fingerprint_mode,
+            make_definition,
+        }
+    }
+
+    const fn read_tool(
+        name: &'static str,
+        max_result_size_chars: usize,
+        source_fingerprint_mode: SourceFingerprintMode,
+        make_definition: fn() -> ToolDefinition,
+    ) -> Self {
+        Self::new(
+            name,
+            true,
+            max_result_size_chars,
+            true,
+            true,
+            ResultBudgetMode::ReferencePreferred,
+            source_fingerprint_mode,
+            make_definition,
+        )
+    }
+
+    const fn write_tool(
+        name: &'static str,
+        max_result_size_chars: usize,
+        make_definition: fn() -> ToolDefinition,
+    ) -> Self {
+        Self::new(
+            name,
+            false,
+            max_result_size_chars,
+            false,
+            false,
+            ResultBudgetMode::ManifestPreferred,
+            SourceFingerprintMode::Path,
+            make_definition,
+        )
+    }
+
     pub fn definition(&self) -> ToolDefinition {
         (self.make_definition)()
     }
@@ -35,44 +111,52 @@ impl ToolSpec {
 /// 这里 + ToolExecutor::execute 的 match 是新工具唯一要碰的两处。
 /// Phase 1 增量加的：edit_file / glob / todo_write。
 pub const TOOLS: &[ToolSpec] = &[
-    ToolSpec {
-        name: "read_file",
-        is_concurrency_safe: true,
-        make_definition: defs::read_file_def,
-    },
-    ToolSpec {
-        name: "write_file",
-        is_concurrency_safe: false,
-        make_definition: defs::write_file_def,
-    },
-    ToolSpec {
-        name: "edit_file",
-        is_concurrency_safe: false,
-        make_definition: defs::edit_file_def,
-    },
-    ToolSpec {
-        // 历史名 `search_files`；2026-05 重命名为 `grep` 对齐业界（Claude Code / Cursor 都叫 Grep），
-        // 让 LLM tool-routing 更准。`search_files` 作为 alias 仍被 `lookup` / `executor` 接受，
-        // 保留旧 hook config / 旧 session replay 的兼容性（详见 `canonicalize`）。
-        name: "grep",
-        is_concurrency_safe: true,
-        make_definition: defs::grep_def,
-    },
-    ToolSpec {
-        name: "glob",
-        is_concurrency_safe: true,
-        make_definition: defs::glob_def,
-    },
-    ToolSpec {
-        name: "list_files",
-        is_concurrency_safe: true,
-        make_definition: defs::list_files_def,
-    },
-    ToolSpec {
-        name: "shell_exec",
-        is_concurrency_safe: false,
-        make_definition: defs::shell_exec_def,
-    },
+    ToolSpec::read_tool(
+        "read_file",
+        10 * 1024,
+        SourceFingerprintMode::Path,
+        defs::read_file_def,
+    ),
+    ToolSpec::write_tool("write_file", 4 * 1024, defs::write_file_def),
+    ToolSpec::write_tool("edit_file", 4 * 1024, defs::edit_file_def),
+    ToolSpec::read_tool(
+        "grep",
+        8 * 1024,
+        SourceFingerprintMode::Pattern,
+        defs::grep_def,
+    ),
+    ToolSpec::read_tool(
+        "glob",
+        6 * 1024,
+        SourceFingerprintMode::Pattern,
+        defs::glob_def,
+    ),
+    ToolSpec::read_tool(
+        "list_files",
+        6 * 1024,
+        SourceFingerprintMode::Path,
+        defs::list_files_def,
+    ),
+    ToolSpec::new(
+        "notebook_edit",
+        false,
+        8 * 1024,
+        false,
+        false,
+        ResultBudgetMode::ManifestPreferred,
+        SourceFingerprintMode::Path,
+        defs::notebook_edit_def,
+    ),
+    ToolSpec::new(
+        "shell_exec",
+        false,
+        6 * 1024,
+        false,
+        true,
+        ResultBudgetMode::ReferencePreferred,
+        SourceFingerprintMode::CommandSource,
+        defs::shell_exec_def,
+    ),
 ];
 
 /// Tool alias 表：`(old_name, canonical_name)`。
@@ -135,6 +219,9 @@ mod defs {
                    output ends with a hint telling you the next offset to pass.\n\
                  - With offset (1-indexed) and/or limit: returns that explicit window. Use this \
                    to page through large files (e.g. offset=2001 limit=2000).\n\
+                 - If you read a large evidence/output file, the tool may return an evidence ref \
+                   with bytes/lines/hash/excerpt instead of the full text; use grep or offset/limit \
+                   for targeted retrieval.\n\
                  - If you re-read a file whose mtime has not changed since your last read or \
                    write, you'll get an `unchanged_since_last_read` stub instead of the full \
                    content — reuse the previous output rather than re-reading.\n\
@@ -165,26 +252,39 @@ mod defs {
             name: "write_file".to_string(),
             description:
                 "Write content to a file (creates parent directories if needed). \
-                 \n\n**Size limit guidance**: Keep `content` under ~6KB per call. The LLM API has a \
+                 Accepts either `path` or `file_path` for the target path. Set `append: true` to \
+                 append a chunk without overwriting the file.\
+                 \n\n**Hard size guidance**: Keep `content` under ~4KB per call. The LLM API has a \
                  per-response output token cap (typically 16K tokens) — generating a single huge \
                  `content` string risks the response being truncated mid-string, which corrupts \
-                 the JSON arguments and causes the call to fail. \
+                 the JSON arguments and causes the call to fail. Never emit a full long script/report \
+                 in one write_file call.\
                  \n**For large files**, prefer this pattern:\n\
-                 1. write_file with a short skeleton (headers, outline, top-level structure)\n\
-                 2. edit_file (with `edits[]`) to insert each section using anchor strings\n\
-                 Or use shell_exec with `cat <<EOF >> path` to append in chunks (each chunk \
-                 must finish in one call)."
+                 1. write_file with `append: false` or omitted for the first short skeleton/chunk\n\
+                 2. write_file with `append: true` for each additional small chunk\n\
+                 3. use edit_file only for targeted corrections\n\
+                 Avoid shell heredocs for long scripts unless each heredoc is short enough to finish \
+                 in one tool call. For generated artifacts, create a minimal valid artifact early and iterate."
                     .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "File path relative to workspace root" },
+                    "file_path": { "type": "string", "description": "Alias for path, accepted for Claude Code-style calls" },
                     "content": {
                         "type": "string",
-                        "description": "Content to write. Keep under ~6KB per call; split large files into a skeleton + edit_file appends."
+                        "description": "Content to write. Keep under ~4KB per call; split large files into chunks and pass append=true after the first chunk."
+                    },
+                    "append": {
+                        "type": "boolean",
+                        "description": "Append content to the existing file instead of overwriting it (default false). Use for chunked large files."
                     }
                 },
-                "required": ["path", "content"]
+                "required": ["content"],
+                "anyOf": [
+                    { "required": ["path"] },
+                    { "required": ["file_path"] }
+                ]
             }),
             cache_control: None,
         }
@@ -255,7 +355,9 @@ mod defs {
             description:
                 "A powerful search tool built on ripgrep. Use this to search file contents \
                  (regex over text). For finding files by name/path pattern use `glob`; for \
-                 listing a directory use `list_files`.\n\n\
+                 listing a directory use `list_files`. Use focused patterns and small context \
+                 windows when searching evidence/output paths so repeated broad outputs stay out \
+                 of the model context.\n\n\
                  Output modes:\n\
                  - `content` (default): matching lines with `path:lineno:text`. Optional context \
                    via `context_before` / `context_after` / `context`.\n\
@@ -324,7 +426,9 @@ mod defs {
             description: "Find files by name/path glob pattern, sorted by recency (most-recently \
                           modified first). Examples: `**/*.rs`, `src/**/test_*.ts`, \
                           `**/migrations/*.sql`. Use this when you know the filename shape; use \
-                          `grep` (ripgrep) for content search."
+                          `grep` (ripgrep) for content search. Default workspace glob/list views \
+                          avoid evidence directories; pass an explicit evidence path only when you \
+                          need to inspect preserved tool output."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -351,12 +455,74 @@ mod defs {
     pub fn list_files_def() -> ToolDefinition {
         ToolDefinition {
             name: "list_files".to_string(),
-            description: "List files and directories at a given path".to_string(),
+            description: "List files and directories at a given path. Returns at most `limit` entries (default 200, max 1000) and reports when output is truncated. Default workspace listing avoids evidence directories; pass an explicit evidence path only when you need to inspect preserved tool output.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Directory path (default: workspace root)" }
+                    "path": { "type": "string", "description": "Directory path (default: workspace root)" },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max entries to return (default 200, max 1000). Use a more specific path when truncated."
+                    }
                 }
+            }),
+            cache_control: None,
+        }
+    }
+
+    pub fn notebook_edit_def() -> ToolDefinition {
+        ToolDefinition {
+            name: "notebook_edit".to_string(),
+            description:
+                "Read or edit a Jupyter .ipynb notebook without using Python. Use this for notebook \
+                 tasks instead of treating .ipynb as plain text. Operations: `read_cells`, \
+                 `insert_cell`, `update_cell`, and `delete_cell`. Cell indexes are zero-based. \
+                 For insertion, pass either `index` to insert at an exact position, or \
+                 `after_cell_index` / `after_source_contains` to insert after an existing cell. \
+                 Source may be a string or an array of lines. For notebooks that will be checked \
+                 statically, include required computed values visibly in the cell source as comments, \
+                 asserts, or displayed literals while preserving the derivation; do not rely only on \
+                 unevaluated expressions whose values are invisible to a static grader."
+                    .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Notebook path relative to workspace root" },
+                    "operation": {
+                        "type": "string",
+                        "enum": ["read_cells", "insert_cell", "update_cell", "delete_cell"],
+                        "description": "Notebook operation to perform"
+                    },
+                    "index": {
+                        "type": "integer",
+                        "description": "Zero-based cell index for read/update/delete, or exact insertion index for insert_cell"
+                    },
+                    "after_cell_index": {
+                        "type": "integer",
+                        "description": "For insert_cell: insert after this zero-based cell index"
+                    },
+                    "after_source_contains": {
+                        "type": "string",
+                        "description": "For insert_cell: insert after the first cell whose source contains this text"
+                    },
+                    "cell_type": {
+                        "type": "string",
+                        "enum": ["code", "markdown", "raw"],
+                        "description": "Cell type for insert_cell/update_cell; defaults to code for inserted cells"
+                    },
+                    "source": {
+                        "description": "Cell source as a string or array of lines. When inserting/updating derived results for statically graded notebooks, keep formulas plus visible expected values in comments/asserts/literals (for example `# mean_value = 7.25`) so the saved source is auditable without executing the notebook.",
+                        "oneOf": [
+                            { "type": "string" },
+                            { "type": "array", "items": { "type": "string" } }
+                        ]
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "For read_cells: max cells to return (default 50)"
+                    }
+                },
+                "required": ["path", "operation"]
             }),
             cache_control: None,
         }
@@ -366,12 +532,7 @@ mod defs {
         ToolDefinition {
             name: "shell_exec".to_string(),
             description:
-                "Execute a shell command (sh -c). Killed by a watchdog when it goes silent for \
-                 too long or runs past the wall-clock cap. Default thresholds are 60s idle / \
-                 5min wall — set `expect_long_running: true` for known long commands like \
-                 `npm install`, `cargo build`, `cargo test` (raises to 120s idle / 30min wall), \
-                 or pass `timeout_seconds` / `idle_timeout_seconds` for an explicit command-level cap. \
-                 The subprocess inherits the agent environment, including proxy variables like ALL_PROXY."
+                "Execute a shell command (sh -c) in the workspace. Commands run in the agent process environment, not an interactive login shell, so PATH and tool availability may differ from your terminal. Killed by a watchdog when it goes silent for too long or runs past the wall-clock cap. Default thresholds are 60s idle / 5min wall — set `expect_long_running: true` for known long commands like `npm install`, `cargo build`, `cargo test` (raises to 120s idle / 30min wall), or pass `timeout_seconds` / `idle_timeout_seconds` for an explicit command-level cap. The subprocess inherits proxy variables like ALL_PROXY, but values are not shown. Large, content-shaped, or repeated stdout/stderr may be returned as a compact evidence ref or repeat ref instead of full text; the original output remains preserved in the referenced evidence files and events. Prefer focused extraction commands, `grep`, or `read_file` with offset/limit over repeating broad `curl`, `cat`, `find`, or listing commands just to see the same full output again. When a command is missing, not executable, uses unsupported options, or times out, the tool returns structured capability feedback with exit code and stderr so you can adapt to the observed runtime instead of repeating the same command."
                     .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -460,6 +621,18 @@ mod tests {
     }
 
     #[test]
+    fn all_definitions_exposes_notebook_edit() {
+        let defs = all_definitions();
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            names.contains(&"notebook_edit"),
+            "notebook_edit must be exposed for .ipynb benchmark tasks; got {names:?}"
+        );
+        let spec = lookup("notebook_edit").expect("notebook_edit should be in TOOLS");
+        assert!(!spec.is_concurrency_safe);
+    }
+
+    #[test]
     fn grep_definition_description_mentions_ripgrep_and_grep() {
         // LLM 命名识别基础：description 第一段应明示 ripgrep + 区分 glob 用途。
         let def = lookup("grep").unwrap().definition();
@@ -472,6 +645,35 @@ mod tests {
         assert!(
             desc.contains("glob"),
             "desc should hint when to use glob instead"
+        );
+    }
+
+    #[test]
+    fn descriptions_explain_evidence_refs_for_large_outputs() {
+        let shell = lookup("shell_exec").unwrap().definition();
+        let shell_desc = shell.description.to_lowercase();
+        assert!(
+            shell_desc.contains("evidence ref"),
+            "shell_exec desc should mention evidence refs"
+        );
+        assert!(
+            shell_desc.contains("repeat ref"),
+            "shell_exec desc should mention repeat refs"
+        );
+        assert!(
+            shell_desc.contains("grep"),
+            "shell_exec desc should suggest focused grep retrieval"
+        );
+
+        let read_file = lookup("read_file").unwrap().definition();
+        let read_desc = read_file.description.to_lowercase();
+        assert!(
+            read_desc.contains("evidence ref"),
+            "read_file desc should mention evidence refs"
+        );
+        assert!(
+            read_desc.contains("offset/limit"),
+            "read_file desc should suggest paged retrieval"
         );
     }
 }

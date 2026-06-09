@@ -1139,6 +1139,7 @@ impl Scheduler {
             max_steps: cfg.max_agent_steps,
             timeout_secs: cfg.agent_timeout_seconds,
             guardrails,
+            task_contract: None,
             guardrail_retry_budget: retry_budget.max(0) as u32,
             produces,
             expected_output: expected_output.filter(|s| !s.trim().is_empty()),
@@ -1168,6 +1169,7 @@ impl Scheduler {
                 }
             },
             fallback_sticky: cfg.agent_fallback_sticky,
+            extra_tools: Vec::new(),
         })
     }
 

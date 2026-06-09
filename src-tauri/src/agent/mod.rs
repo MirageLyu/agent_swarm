@@ -22,13 +22,16 @@ pub mod recovery_log;
 mod registry;
 pub mod report_generator;
 pub mod roles;
+pub mod runtime_env;
 pub mod scheduler;
 pub mod streaming_tool_executor;
+pub mod task_contract;
+pub mod tool_result_policy;
 pub mod tool_summarizer;
 mod types;
 pub mod user_questions;
 
-pub use engine::{AgentEngine, AgentRunOptions};
+pub use engine::{AgentEngine, AgentRunOptions, CustomToolHandler};
 pub use evaluator::EvaluatorAgent;
 pub use registry::AgentRegistry;
 pub use scheduler::Scheduler;

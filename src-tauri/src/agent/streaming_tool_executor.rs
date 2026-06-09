@@ -159,6 +159,7 @@ impl StreamingToolExecutor {
                         "{{\"error\":\"tool_panic\",\"message\":\"join handle failed: {e}\"}}"
                     ),
                     is_error: true,
+                    meta: None,
                 });
                 results.push((tu_id.clone(), output));
             } else if let Some(idx) = self.unsafe_queue.iter().position(|(id, _, _)| id == tu_id) {
@@ -176,7 +177,8 @@ impl StreamingToolExecutor {
                             "{{\"error\":\"internal\",\"message\":\"tool_use_id {tu_id} not in any queue\"}}"
                         ),
                         is_error: true,
-                    },
+            meta: None,
+        },
                 ));
             }
         }
@@ -301,6 +303,7 @@ mod tests {
                 .unwrap_or(ToolOutput {
                     content: format!("default-ok({name})"),
                     is_error: false,
+                    meta: None,
                 })
         }
 
@@ -317,6 +320,7 @@ mod tests {
             ToolOutput {
                 content: "ok".into(),
                 is_error: false,
+                meta: None,
             },
         )
         .await;

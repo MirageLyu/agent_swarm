@@ -8,7 +8,10 @@ use tauri::Manager;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::agent::guardrail::{Guardrail, SummaryMatchMode};
+use crate::agent::task_contract::{
+    ArtifactContract, ArtifactKind, CompletionPolicy, FinalResponseContract, FinalResponseFormat,
+    TaskContract,
+};
 use crate::agent::{AgentEngine, AgentRunOptions, AgentStatus};
 use crate::commands::ConfigManager;
 use crate::db::{queries, Database};
@@ -17,6 +20,9 @@ use crate::llm::{AnthropicProvider, LlmProvider, OpenAICompatProvider};
 use super::grader::execute_python_grader;
 use super::importer::{import_suite_from_path, resolve_asset_paths};
 use super::metrics::{aggregate_run_metrics, extract_case_metrics, CostRecordInput};
+use super::sop_bench::{
+    grade_sop_response, is_sop_case, sanitized_csv, SopBenchToolRuntime, SOP_GRADER_KIND,
+};
 use super::types::{
     BenchmarkCase, BenchmarkMetricSnapshot, BenchmarkMetrics, BenchmarkResult, BenchmarkRun,
     BenchmarkRunConfig, BenchmarkSuite, BenchmarkSummary,
@@ -38,7 +44,51 @@ pub fn prepare_case_workspace(
     for asset in resolve_asset_paths(&case.assets, source_root) {
         copy_asset(source_root, &asset, &workspace, &case.task_id)?;
     }
+    if is_sop_case(case) {
+        prepare_sop_bench_workspace(case, &workspace)?;
+    }
     Ok(workspace)
+}
+
+fn prepare_sop_bench_workspace(case: &BenchmarkCase, workspace: &Path) -> Result<()> {
+    for required in ["sop.txt", "tools.py", "toolspecs.json"] {
+        let path = workspace.join(required);
+        if !path.exists() {
+            return Err(anyhow!(
+                "SOP-Bench workspace missing required asset {} for case {}",
+                required,
+                case.task_id
+            ));
+        }
+    }
+    let columns = case
+        .raw_json
+        .get("columns")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow!("SOP-Bench case {} missing raw columns", case.task_id))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| anyhow!("SOP-Bench case {} has non-string column", case.task_id))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let values = case
+        .raw_json
+        .get("values")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow!("SOP-Bench case {} missing raw values", case.task_id))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| anyhow!("SOP-Bench case {} has non-string value", case.task_id))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    fs::write(workspace.join("data.csv"), sanitized_csv(&columns, &values))?;
+    Ok(())
 }
 
 pub async fn import_and_run_benchmark(
@@ -124,6 +174,7 @@ pub async fn import_and_run_benchmark(
                 "entrypoint": "dev_cli",
                 "suitePath": suite_path.to_string_lossy(),
                 "traceRoot": trace_root.as_ref().map(|path| path.to_string_lossy().to_string()),
+                "proxyEnvPresent": benchmark_proxy_env_present(),
             }))?,
         )?;
         queries::update_benchmark_run_status(conn, &run_id, "running")
@@ -327,7 +378,15 @@ pub async fn run_single_case(
     })?;
 
     let cancel_token = CancellationToken::new();
-    let engine = AgentEngine::new(provider, workspace.clone(), app.clone(), cancel_token);
+    let sop_runtime = if is_sop_case(&case) {
+        Some(Arc::new(SopBenchToolRuntime::new(workspace.clone())?))
+    } else {
+        None
+    };
+    let mut engine = AgentEngine::new(provider, workspace.clone(), app.clone(), cancel_token);
+    if let Some(runtime) = sop_runtime.as_ref() {
+        engine = engine.with_custom_tool_handler(runtime.clone());
+    }
     let opts = AgentRunOptions {
         model: run.model.clone(),
         max_steps: run
@@ -351,12 +410,16 @@ pub async fn run_single_case(
         fallback_model: (!config.agent_fallback_model.trim().is_empty())
             .then_some(config.agent_fallback_model.clone()),
         fallback_sticky: config.agent_fallback_sticky,
-        guardrails: benchmark_guardrails(&case),
-        guardrail_retry_budget: 2,
+        guardrails: Vec::new(),
+        task_contract: benchmark_task_contract(&case),
+        extra_tools: sop_runtime
+            .as_ref()
+            .map(|runtime| runtime.definitions())
+            .unwrap_or_default(),
         ..AgentRunOptions::default()
     };
 
-    let task_prompt = benchmark_task_prompt(&case.prompt);
+    let task_prompt = benchmark_task_prompt(&case);
     let (status, run_error) = match engine
         .run_with_options(&agent_id, &task_prompt, &opts)
         .await
@@ -374,22 +437,29 @@ pub async fn run_single_case(
     let mut success = None;
     let mut grading_status = "ungraded".to_string();
     if let Some(grader) = &case.grader {
-        match execute_python_grader(&source_root, grader, &workspace, &response_file, 120).await {
+        let grader_output = if grader.kind == "python" {
+            execute_python_grader(&source_root, grader, &workspace, &response_file, 120).await
+        } else if grader.kind == SOP_GRADER_KIND {
+            Ok(grade_sop_response(
+                &case,
+                final_response.as_deref().unwrap_or_default(),
+                &workspace,
+            ))
+        } else {
+            Err(anyhow!("unsupported grader kind: {}", grader.kind))
+        };
+        match grader_output {
             Ok(output) => {
                 success = output.task_success;
-                grading_status = if output.exit_code == Some(0) {
-                    "passed"
-                } else {
-                    "failed"
-                }
-                .to_string();
+                grading_status =
+                    benchmark_grading_status(output.task_success, output.exit_code).to_string();
                 let artifact_id = Uuid::new_v4().to_string();
                 db.with_conn(|conn| {
                     queries::insert_benchmark_grader_artifact(
                         conn,
                         &artifact_id,
                         &result_id,
-                        "python",
+                        &grader.kind,
                         &serde_json::to_string(&output.command)?,
                         output.exit_code,
                         output
@@ -411,7 +481,7 @@ pub async fn run_single_case(
                         conn,
                         &Uuid::new_v4().to_string(),
                         &result_id,
-                        "python",
+                        &grader.kind,
                         "[]",
                         None,
                         None,
@@ -424,12 +494,8 @@ pub async fn run_single_case(
         }
     }
 
-    let result_status = match status {
-        AgentStatus::Completed => "completed",
-        AgentStatus::Cancelled => "cancelled",
-        AgentStatus::Failed => "failed",
-        _ => "failed",
-    };
+    let (result_status, _agent_status, protocol_error) = benchmark_result_status(status, success);
+    let result_error = run_error.as_deref().or(protocol_error.as_deref());
     let metrics = db.with_conn(|conn| {
         queries::complete_benchmark_result(
             conn,
@@ -438,7 +504,7 @@ pub async fn run_single_case(
             success,
             &grading_status,
             final_response.as_deref(),
-            run_error.as_deref(),
+            result_error,
         )?;
         let events = queries::get_events_for_agent(conn, &agent_id)?;
         let costs = queries::list_cost_records_for_agent(conn, &agent_id)?
@@ -480,30 +546,161 @@ pub async fn run_single_case(
     })
 }
 
-fn benchmark_task_prompt(prompt: &str) -> String {
-    format!(
-        "{prompt}\n\n[Benchmark harness instruction]\nWhen you finish, call task_complete exactly once. The task_complete summary must contain the exact final answer requested by the task, not a meta-summary of what you did. If the task asks for a JSON/text/code block, put that block verbatim in task_complete.summary with no extra explanation."
-    )
+fn benchmark_proxy_env_present() -> bool {
+    [
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    ]
+    .iter()
+    .any(|key| std::env::var_os(key).is_some())
 }
 
-fn benchmark_guardrails(case: &BenchmarkCase) -> Vec<Guardrail> {
-    let mut guardrails = Vec::new();
-    if case.expected_outputs.iter().any(|output| output == "final_response") {
-        if case.prompt.contains("```json") {
-            guardrails.push(Guardrail::SummaryMatches {
-                mode: SummaryMatchMode::JsonCodeBlock,
-            });
-        } else if case.prompt.contains("```text") {
-            guardrails.push(Guardrail::SummaryMatches {
-                mode: SummaryMatchMode::TextCodeBlock,
-            });
-        } else if case.prompt.contains("输出 `OK`") || case.prompt.contains("输出 `OK` 即可") {
-            guardrails.push(Guardrail::SummaryMatches {
-                mode: SummaryMatchMode::ExactOk,
-            });
-        }
+fn benchmark_grading_status(task_success: Option<bool>, exit_code: Option<i32>) -> &'static str {
+    match task_success {
+        Some(true) => "passed",
+        Some(false) => "failed",
+        None if exit_code == Some(0) => "ungraded",
+        None => "failed",
     }
-    guardrails
+}
+
+fn benchmark_result_status(
+    agent_status: AgentStatus,
+    success: Option<bool>,
+) -> (&'static str, &'static str, Option<String>) {
+    let agent_status_str = match agent_status {
+        AgentStatus::Completed => "completed",
+        AgentStatus::Cancelled => "cancelled",
+        AgentStatus::Failed => "failed",
+        _ => "failed",
+    };
+    let result_status = if success == Some(true) && agent_status_str == "failed" {
+        "completed"
+    } else {
+        agent_status_str
+    };
+    let protocol_error = (success == Some(true) && agent_status_str != "completed").then(|| {
+        format!(
+            "agent finished with status `{agent_status_str}` after grader success; benchmark counted the sample successful by grader result"
+        )
+    });
+    (result_status, agent_status_str, protocol_error)
+}
+
+fn benchmark_task_prompt(case: &BenchmarkCase) -> String {
+    case.prompt.clone()
+}
+
+fn benchmark_task_contract(case: &BenchmarkCase) -> Option<TaskContract> {
+    if let Some(contract) = explicit_task_contract_from_raw_json(&case.raw_json) {
+        return (!contract.is_empty()).then_some(contract);
+    }
+    let file_outputs = case
+        .expected_outputs
+        .iter()
+        .filter(|output| output.as_str() != "final_response")
+        .cloned()
+        .collect::<Vec<_>>();
+    let contract = TaskContract {
+        final_response: case
+            .expected_outputs
+            .iter()
+            .any(|output| output == "final_response")
+            .then(|| fallback_final_response_contract(&case.prompt)),
+        artifacts: file_outputs
+            .iter()
+            .map(|output| {
+                let (min_text_chars, max_non_ws_chars) =
+                    text_length_contract_for_output(output, &case.prompt);
+                ArtifactContract {
+                    path: output.to_string(),
+                    required: true,
+                    kind: ArtifactKind::Infer,
+                    require_non_empty: true,
+                    required_json_keys: Vec::new(),
+                    csv_header: None,
+                    min_rows: None,
+                    min_non_ws_chars: None,
+                    max_non_ws_chars,
+                    min_text_chars,
+                    required_headings: Vec::new(),
+                    required_terms_any: Vec::new(),
+                    forbidden_placeholders: false,
+                    require_static_visible_derived_values: output.ends_with(".ipynb"),
+                    pptx: None,
+                }
+            })
+            .collect(),
+        source_grounding: None,
+        completion_policy: CompletionPolicy {
+            self_check_before_complete: true,
+            create_artifacts_early: !file_outputs.is_empty(),
+            stop_exploration_during_repair: true,
+        },
+    };
+    (!contract.is_empty()).then_some(contract)
+}
+
+fn fallback_final_response_contract(prompt: &str) -> FinalResponseContract {
+    let mut contract = FinalResponseContract {
+        required: true,
+        format: FinalResponseFormat::Any,
+        fenced: false,
+        exact_text: None,
+        required_json_keys: Vec::new(),
+        array_lengths: Vec::new(),
+        require_non_empty: true,
+        no_extra_explanation: false,
+    };
+    if prompt.contains("```json") {
+        contract.format = FinalResponseFormat::Json;
+        contract.fenced = true;
+    } else if prompt.contains("```text") {
+        contract.format = FinalResponseFormat::Text;
+        contract.fenced = true;
+    } else if prompt.contains("输出 `OK`") || prompt.contains("输出 `OK` 即可") {
+        contract.exact_text = Some("OK".to_string());
+        contract.no_extra_explanation = true;
+    }
+    contract
+}
+
+fn text_length_contract_for_output(output: &str, prompt: &str) -> (Option<usize>, Option<usize>) {
+    if !matches!(
+        Path::new(output).extension().and_then(|ext| ext.to_str()),
+        Some("md" | "markdown" | "txt")
+    ) {
+        return (None, None);
+    }
+    let min = extract_number_after_marker(prompt, "不少于");
+    let max = extract_number_after_marker(prompt, "不多于");
+    (min, max)
+}
+
+fn extract_number_after_marker(text: &str, marker: &str) -> Option<usize> {
+    let idx = text.find(marker)? + marker.len();
+    let tail = &text[idx..];
+    let digits = tail
+        .chars()
+        .skip_while(|ch| ch.is_whitespace() || *ch == '`')
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    digits.parse::<usize>().ok()
+}
+fn explicit_task_contract_from_raw_json(raw: &serde_json::Value) -> Option<TaskContract> {
+    [
+        raw.get("taskContract"),
+        raw.get("task_contract"),
+        raw.pointer("/metadata/taskContract"),
+        raw.pointer("/metadata/task_contract"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|value| serde_json::from_value::<TaskContract>(value.clone()).ok())
 }
 
 fn select_benchmark_cases(
@@ -528,19 +725,21 @@ fn select_benchmark_cases(
     Ok(selected)
 }
 
-fn copy_asset(source_root: &Path, asset_path: &Path, workspace: &Path, task_id: &str) -> Result<()> {
+fn copy_asset(
+    source_root: &Path,
+    asset_path: &Path,
+    workspace: &Path,
+    task_id: &str,
+) -> Result<()> {
     let relative = asset_path.strip_prefix(source_root).unwrap_or(asset_path);
-    let target = workspace.join(relative);
-    copy_path(asset_path, &target)?;
 
     if let Ok(rest) = relative.strip_prefix(Path::new("assets").join(task_id)) {
-        if !rest.as_os_str().is_empty() {
-            let flat_target = workspace.join(rest);
-            if flat_target != target {
-                copy_path(asset_path, &flat_target)?;
-            }
-        }
+        copy_path(asset_path, &workspace.join(rest))?;
+        copy_path(asset_path, &workspace.join(relative))?;
+        return Ok(());
     }
+
+    copy_path(asset_path, &workspace.join(relative))?;
     Ok(())
 }
 
@@ -957,6 +1156,16 @@ fn benchmark_metric_from_row(
             guardrail_retry_count: row.guardrail_retry_count,
             recovery_attempt_count: row.recovery_attempt_count,
             read_only_loop_hint_count: row.read_only_loop_hint_count,
+            context_saved_chars: row.context_saved_chars,
+            tool_result_ref_count: row.tool_result_ref_count,
+            tool_result_repeat_count: row.tool_result_repeat_count,
+            evidence_read_ref_count: row.evidence_read_ref_count,
+            shell_content_command_count: row.shell_content_command_count,
+            persisted_tool_result_count: row.persisted_tool_result_count,
+            per_message_budget_replacement_count: row.per_message_budget_replacement_count,
+            contract_validation_attempt_count: row.contract_validation_attempt_count,
+            contract_violation_count: row.contract_violation_count,
+            contract_repair_retry_count: row.contract_repair_retry_count,
         },
         raw_json: serde_json::from_str(&row.raw_json)?,
         created_at: row.created_at,
@@ -980,33 +1189,375 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[test]
-    fn prepare_case_workspace_flattens_ga_case_assets_to_root() {
-        let source = tempdir().unwrap();
-        let workspace_root = tempdir().unwrap();
-        let asset_dir = source.path().join("assets/teb_06_notebook_inspect");
-        fs::create_dir_all(&asset_dir).unwrap();
-        fs::write(asset_dir.join("analysis.ipynb"), "{}").unwrap();
-
-        let case = BenchmarkCase {
+    fn test_case(
+        task_id: &str,
+        task_type: &str,
+        prompt: &str,
+        expected_outputs: Vec<&str>,
+    ) -> BenchmarkCase {
+        BenchmarkCase {
             id: "case-id".to_string(),
             suite_id: "suite-id".to_string(),
-            task_id: "teb_06_notebook_inspect".to_string(),
-            task_type: "simple_tool_generalization".to_string(),
+            task_id: task_id.to_string(),
+            task_type: task_type.to_string(),
             source_suite: "claude_code".to_string(),
             target_tool_or_capability: "NotebookEdit".to_string(),
-            prompt: "".to_string(),
-            assets: vec!["assets/teb_06_notebook_inspect/analysis.ipynb".to_string()],
-            expected_outputs: vec![],
+            prompt: prompt.to_string(),
+            assets: vec![],
+            expected_outputs: expected_outputs.into_iter().map(str::to_string).collect(),
             grader: None,
             expected_output: None,
             raw_json: serde_json::json!({}),
             case_hash: "hash".to_string(),
             created_at: "".to_string(),
-        };
+        }
+    }
 
-        let workspace = prepare_case_workspace(source.path(), &case, workspace_root.path()).unwrap();
-        assert!(workspace.join("assets/teb_06_notebook_inspect/analysis.ipynb").exists());
+    #[test]
+    fn prepare_case_workspace_copies_ga_case_assets_to_root_and_original_path() {
+        let source = tempdir().unwrap();
+        let workspace_root = tempdir().unwrap();
+        let asset_dir = source.path().join("assets/contract_notebook_inspect");
+        fs::create_dir_all(&asset_dir).unwrap();
+        fs::write(asset_dir.join("analysis.ipynb"), "{}").unwrap();
+
+        let mut case = test_case(
+            "contract_notebook_inspect",
+            "simple_tool_generalization",
+            "",
+            vec![],
+        );
+        case.assets = vec!["assets/contract_notebook_inspect/analysis.ipynb".to_string()];
+
+        let workspace =
+            prepare_case_workspace(source.path(), &case, workspace_root.path()).unwrap();
         assert!(workspace.join("analysis.ipynb").exists());
+        assert!(workspace
+            .join("assets/contract_notebook_inspect/analysis.ipynb")
+            .exists());
+    }
+
+    #[test]
+    fn prepare_case_workspace_sanitizes_sop_bench_row() {
+        let source = tempdir().unwrap();
+        let workspace_root = tempdir().unwrap();
+        fs::write(source.path().join("sop.txt"), "SOP").unwrap();
+        fs::write(source.path().join("tools.py"), "# tools").unwrap();
+        fs::write(source.path().join("toolspecs.json"), "[]").unwrap();
+
+        let mut case = test_case("ORD001", "sop_task_completion", "", vec!["final_response"]);
+        case.source_suite = "sop_bench".to_string();
+        case.assets = vec![
+            "sop.txt".to_string(),
+            "tools.py".to_string(),
+            "toolspecs.json".to_string(),
+        ];
+        case.expected_output = Some("fulfill_immediately".to_string());
+        case.raw_json = serde_json::json!({
+            "columns": ["order_id", "product_id", "expected_output"],
+            "values": ["ORD001", "PROD001", "fulfill_immediately"]
+        });
+
+        let workspace =
+            prepare_case_workspace(source.path(), &case, workspace_root.path()).unwrap();
+        assert!(workspace.join("sop.txt").exists());
+        assert!(workspace.join("tools.py").exists());
+        assert!(workspace.join("toolspecs.json").exists());
+        let data_csv = fs::read_to_string(workspace.join("data.csv")).unwrap();
+        assert_eq!(
+            data_csv,
+            "order_id,product_id,expected_output\nORD001,PROD001,\n"
+        );
+        assert!(!data_csv.contains("fulfill_immediately"));
+    }
+    #[test]
+    fn benchmark_proxy_env_detection_checks_standard_proxy_vars() {
+        let keys = [
+            "ALL_PROXY",
+            "all_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+        ];
+        let previous = keys
+            .iter()
+            .map(|key| (*key, std::env::var_os(key)))
+            .collect::<Vec<_>>();
+        for key in keys {
+            std::env::remove_var(key);
+        }
+        assert!(!benchmark_proxy_env_present());
+        std::env::set_var("ALL_PROXY", "http://127.0.0.1:7890");
+        assert!(benchmark_proxy_env_present());
+        std::env::remove_var("ALL_PROXY");
+        for (key, value) in previous {
+            if let Some(value) = value {
+                std::env::set_var(key, value);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+    }
+
+    #[test]
+    fn benchmark_contract_loads_explicit_raw_json_contract() {
+        let mut case = test_case(
+            "explicit_contract",
+            "custom",
+            "prompt text without schema",
+            vec![],
+        );
+        case.raw_json = serde_json::json!({
+            "metadata": {
+                "taskContract": {
+                    "finalResponse": {
+                        "required": true,
+                        "format": "json",
+                        "fenced": true,
+                        "requiredJsonKeys": ["answer"],
+                        "requireNonEmpty": true,
+                        "noExtraExplanation": true
+                    },
+                    "artifacts": [{
+                        "path": "out.json",
+                        "kind": "json",
+                        "required": true,
+                        "requireNonEmpty": true,
+                        "requiredJsonKeys": ["answer"]
+                    }]
+                }
+            }
+        });
+
+        let contract = benchmark_task_contract(&case).unwrap();
+        let final_response = contract.final_response.unwrap();
+        assert_eq!(final_response.format, FinalResponseFormat::Json);
+        assert!(final_response.fenced);
+        assert_eq!(
+            final_response.required_json_keys,
+            vec!["answer".to_string()]
+        );
+        assert_eq!(
+            contract.artifacts[0].required_json_keys,
+            vec!["answer".to_string()]
+        );
+    }
+
+    #[test]
+    fn benchmark_contract_fallback_declares_only_minimal_outputs() {
+        let case = test_case(
+            "contract_experiment_analysis",
+            "long_horizon_complex",
+            "analysis_report.md 必须使用中文，正文不少于 `600` 字，不多于 `1200` 字。`chart_data.csv` 必须是整理后的图表数据，且至少包含以下列：`variant,segment,conversion_rate,payer_rate,arpu,net_revenue`。summary.json 必须包含以下字段。",
+            vec!["analysis_report.md", "chart_data.csv", "summary.json", "figure_1.png", "figure_2.png"],
+        );
+
+        let contract = benchmark_task_contract(&case).unwrap();
+        assert!(contract.final_response.is_none());
+        let report = contract
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.path == "analysis_report.md")
+            .unwrap();
+        assert_eq!(report.min_non_ws_chars, None);
+        assert_eq!(report.max_non_ws_chars, Some(1200));
+        assert!(report.required_headings.is_empty());
+        let csv = contract
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.path == "chart_data.csv")
+            .unwrap();
+        assert!(csv.csv_header.is_none());
+        let summary = contract
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.path == "summary.json")
+            .unwrap();
+        assert!(summary.required_json_keys.is_empty());
+    }
+
+    #[test]
+    fn benchmark_prompt_is_raw_case_prompt_and_direct_response_is_contract() {
+        let case = test_case(
+            "contract_direct_response",
+            "simple_tool_generalization",
+            "请直接输出 JSON 代码块。```json\n{\"facts\": []}\n```",
+            vec!["final_response"],
+        );
+
+        let prompt = benchmark_task_prompt(&case);
+        assert_eq!(prompt, case.prompt);
+        assert!(!prompt.contains("Benchmark harness instruction"));
+        assert!(!prompt.contains("do not create files merely to hold the final answer"));
+        let contract = benchmark_task_contract(&case).unwrap();
+        let final_response = contract.final_response.unwrap();
+        assert_eq!(final_response.format, FinalResponseFormat::Json);
+        assert!(final_response.fenced);
+    }
+
+    #[test]
+    fn benchmark_contract_fallback_preserves_exact_ok_validation() {
+        let case = test_case(
+            "contract_exact_ok",
+            "simple_tool_generalization",
+            "如果检查通过，输出 `OK` 即可。",
+            vec!["final_response"],
+        );
+
+        let contract = benchmark_task_contract(&case).unwrap();
+        let final_response = contract.final_response.unwrap();
+        assert_eq!(final_response.exact_text.as_deref(), Some("OK"));
+        assert!(final_response.no_extra_explanation);
+    }
+
+    #[test]
+    fn benchmark_contract_fallback_does_not_infer_source_grounding() {
+        let case = test_case(
+            "contract_fact_extract",
+            "delegation",
+            "工作区中提供了一个文本文件 `notes.txt`。请输出一个 JSON 代码块：```json\n{\"used_worker\": true, \"facts\": []}\n```",
+            vec!["final_response"],
+        );
+
+        let contract = benchmark_task_contract(&case).unwrap();
+        assert!(contract.source_grounding.is_none());
+        let final_response = contract.final_response.unwrap();
+        assert!(final_response.array_lengths.is_empty());
+    }
+
+    #[test]
+    fn benchmark_contract_fallback_does_not_infer_prompt_required_analysis_terms() {
+        let case = test_case(
+            "contract_sql_analysis",
+            "database_analysis",
+            "请输出 `analysis.md`：简要说明你的计算口径、核心 join 关系，以及结果中排名第 `1` 的渠道为什么入选。",
+            vec!["analysis.md"],
+        );
+
+        let contract = benchmark_task_contract(&case).unwrap();
+        let analysis = contract
+            .artifacts
+            .iter()
+            .find(|a| a.path == "analysis.md")
+            .unwrap();
+        let labels = analysis
+            .required_terms_any
+            .iter()
+            .map(|term| term.label.as_str())
+            .collect::<Vec<_>>();
+        assert!(labels.is_empty());
+    }
+
+    #[test]
+    fn benchmark_contract_fallback_does_not_infer_pptx_and_notes_requirements() {
+        let case = test_case(
+            "contract_paper_ppt",
+            "long_horizon_complex",
+            "presentation.pptx 最后一页必须给出这篇论文最值得关注的 3 个点和 1 个仍然开放的问题。同时输出文件 `presentation_notes.md`，用于说明你的 PPT 结构和信息来源。`presentation_notes.md` 必须说明你使用了哪些来源链接、PPT 总页数、哪一页是图表页、哪一页是结构图或流程图页。需要真实插入图片。",
+            vec!["presentation.pptx", "presentation_notes.md"],
+        );
+
+        let contract = benchmark_task_contract(&case).unwrap();
+        let pptx = contract
+            .artifacts
+            .iter()
+            .find(|a| a.path == "presentation.pptx")
+            .unwrap();
+        assert!(pptx.pptx.is_none());
+        let notes = contract
+            .artifacts
+            .iter()
+            .find(|a| a.path == "presentation_notes.md")
+            .unwrap();
+        assert!(!notes.forbidden_placeholders);
+        assert!(notes.required_terms_any.is_empty());
+    }
+
+    #[test]
+    fn benchmark_contract_fallback_does_not_infer_json_keys() {
+        let case = test_case(
+            "contract_dapo_reproduction_feasibility",
+            "long_horizon_complex",
+            "输出 report_08.json",
+            vec!["report_08.json"],
+        );
+
+        let contract = benchmark_task_contract(&case).unwrap();
+        assert!(contract.completion_policy.create_artifacts_early);
+        let report = contract
+            .artifacts
+            .iter()
+            .find(|a| a.path == "report_08.json")
+            .unwrap();
+        assert!(report.required_json_keys.is_empty());
+    }
+
+    #[test]
+    fn grader_success_counts_completed_even_if_agent_protocol_failed() {
+        let (result_status, agent_status, protocol_error) =
+            benchmark_result_status(AgentStatus::Failed, Some(true));
+        assert_eq!(agent_status, "failed");
+        assert_eq!(result_status, "completed");
+        assert!(protocol_error
+            .as_deref()
+            .unwrap()
+            .contains("grader success"));
+    }
+
+    #[test]
+    fn benchmark_grading_status_reflects_task_success_not_process_exit() {
+        assert_eq!(benchmark_grading_status(Some(true), Some(0)), "passed");
+        assert_eq!(benchmark_grading_status(Some(false), Some(0)), "failed");
+        assert_eq!(benchmark_grading_status(None, Some(0)), "ungraded");
+        assert_eq!(benchmark_grading_status(None, Some(1)), "failed");
+    }
+
+    #[test]
+    fn benchmark_prompt_does_not_inject_notebook_or_artifact_strategy() {
+        let case = test_case(
+            "contract_notebook_inspect",
+            "simple_tool_generalization",
+            "输出 `OK` 即可",
+            vec!["analysis.ipynb", "final_response"],
+        );
+
+        let prompt = benchmark_task_prompt(&case);
+        assert_eq!(prompt, case.prompt);
+        assert!(!prompt.contains("inline comments next to the derived expressions"));
+        let contract = benchmark_task_contract(&case).unwrap();
+        assert_eq!(
+            contract.final_response.unwrap().exact_text.as_deref(),
+            Some("OK")
+        );
+        assert!(contract
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.path == "analysis.ipynb"
+                && artifact.kind == ArtifactKind::Infer
+                && artifact.require_static_visible_derived_values));
+    }
+
+    #[test]
+    fn benchmark_contract_fallback_does_not_infer_ppt_image_requirements() {
+        let case = test_case(
+            "contract_ppt_image",
+            "long_horizon_complex",
+            "presentation.pptx 最后一页必须给出 3 个点和 1 个问题。PPT 至少包含 1 页图表页，需要真实插入图片。",
+            vec!["presentation.pptx"],
+        );
+
+        let prompt = benchmark_task_prompt(&case);
+        assert_eq!(prompt, case.prompt);
+        assert!(!prompt.contains("embed at least one real image"));
+        assert!(!prompt.contains("literal last slide"));
+        let contract = benchmark_task_contract(&case).unwrap();
+        assert!(contract.completion_policy.create_artifacts_early);
+        let pptx = contract
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.path == "presentation.pptx")
+            .unwrap();
+        assert!(pptx.pptx.is_none());
     }
 }

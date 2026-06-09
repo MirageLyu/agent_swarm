@@ -9,7 +9,7 @@ pub use definitions::{
     todo_write_tool_definition, ASK_USER_QUESTION_TOOL, ENTER_PLAN_MODE_TOOL,
     PROPOSE_FOLLOWUP_TOOL, TASK_COMPLETE_TOOL, TODO_WRITE_TOOL,
 };
-pub use executor::{ToolExecutor, ToolOutput};
+pub use executor::{ToolExecutionContext, ToolExecutor, ToolOutput};
 pub use registry::{
     canonicalize as canonicalize_tool_name, lookup as lookup_tool_spec, ToolSpec, TOOLS,
 };

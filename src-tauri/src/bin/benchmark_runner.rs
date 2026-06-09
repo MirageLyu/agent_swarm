@@ -86,6 +86,22 @@ async fn main() -> Result<()> {
         println!("llm_requests={}", m.llm_request_count);
         println!("tool_calls={}", m.tool_call_count);
         println!("tool_errors={}", m.tool_error_count);
+        println!("context_saved_chars={}", m.context_saved_chars);
+        println!("tool_result_refs={}", m.tool_result_ref_count);
+        println!("tool_result_repeats={}", m.tool_result_repeat_count);
+        println!("evidence_read_refs={}", m.evidence_read_ref_count);
+        println!("shell_content_commands={}", m.shell_content_command_count);
+        println!("persisted_tool_results={}", m.persisted_tool_result_count);
+        println!(
+            "per_message_budget_replacements={}",
+            m.per_message_budget_replacement_count
+        );
+        println!(
+            "contract_validation_attempts={}",
+            m.contract_validation_attempt_count
+        );
+        println!("contract_violations={}", m.contract_violation_count);
+        println!("contract_repair_retries={}", m.contract_repair_retry_count);
     }
     println!("json={}", json_path.display());
     println!("markdown={}", md_path.display());

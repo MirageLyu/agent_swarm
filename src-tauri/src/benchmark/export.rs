@@ -40,7 +40,47 @@ pub fn export_summary_markdown(summary: &BenchmarkSummary) -> String {
         out.push_str(&format!("| Cost USD | {:.6} |\n", m.cost_usd));
         out.push_str(&format!("| LLM requests | {} |\n", m.llm_request_count));
         out.push_str(&format!("| Tool calls | {} |\n", m.tool_call_count));
-        out.push_str(&format!("| Tool errors | {} |\n\n", m.tool_error_count));
+        out.push_str(&format!("| Tool errors | {} |\n", m.tool_error_count));
+        out.push_str(&format!(
+            "| Context saved chars | {} |\n",
+            m.context_saved_chars
+        ));
+        out.push_str(&format!(
+            "| Tool result refs | {} |\n",
+            m.tool_result_ref_count
+        ));
+        out.push_str(&format!(
+            "| Tool result repeats | {} |\n",
+            m.tool_result_repeat_count
+        ));
+        out.push_str(&format!(
+            "| Evidence read refs | {} |\n",
+            m.evidence_read_ref_count
+        ));
+        out.push_str(&format!(
+            "| Shell content commands | {} |\n",
+            m.shell_content_command_count
+        ));
+        out.push_str(&format!(
+            "| Persisted tool results | {} |\n",
+            m.persisted_tool_result_count
+        ));
+        out.push_str(&format!(
+            "| Per-message budget replacements | {} |\n",
+            m.per_message_budget_replacement_count
+        ));
+        out.push_str(&format!(
+            "| Contract validation attempts | {} |\n",
+            m.contract_validation_attempt_count
+        ));
+        out.push_str(&format!(
+            "| Contract violations | {} |\n",
+            m.contract_violation_count
+        ));
+        out.push_str(&format!(
+            "| Contract repair retries | {} |\n\n",
+            m.contract_repair_retry_count
+        ));
     }
 
     out.push_str("## Cases\n\n");

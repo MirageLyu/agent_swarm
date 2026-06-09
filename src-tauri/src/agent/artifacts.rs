@@ -120,6 +120,8 @@ pub enum ArtifactError {
     EmptyFilePaths(String),
     #[error("file `{0}` does not exist under repo root")]
     FileMissing(String),
+    #[error("file `{0}` is empty; publish_artifact requires non-empty files")]
+    FileEmpty(String),
     #[error("file `{0}` escapes repo root (sandbox violation)")]
     FileEscapesRepo(String),
     #[error("artifact `{0}` is already published in this task")]
@@ -252,7 +254,12 @@ pub fn record_publish(
 
     // 校验所有 file_paths 真实存在
     for fp in &input.file_paths {
-        validate_file_path(repo_root, fp)?;
+        let full = validate_file_path(repo_root, fp)?;
+        let metadata =
+            std::fs::metadata(&full).map_err(|_| ArtifactError::FileMissing(fp.clone()))?;
+        if metadata.is_file() && metadata.len() == 0 {
+            return Err(ArtifactError::FileEmpty(fp.clone()));
+        }
     }
 
     let id = artifact_id(task_id, &input.local_name);
@@ -556,6 +563,28 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ArtifactError::FileMissing(_)));
+    }
+
+    #[test]
+    fn record_publish_rejects_empty_file() {
+        let conn = open_in_memory();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("empty.md"), "").unwrap();
+        let err = record_publish(
+            &conn,
+            tmp.path(),
+            "M1",
+            "T1",
+            &PublishArtifactInput {
+                local_name: "empty_report".into(),
+                artifact_type: "report".into(),
+                summary: "s".into(),
+                file_paths: vec!["empty.md".into()],
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ArtifactError::FileEmpty(_)));
     }
 
     #[test]

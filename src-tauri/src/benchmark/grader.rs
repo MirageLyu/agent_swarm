@@ -35,24 +35,30 @@ pub async fn execute_python_grader(
     }
 
     let response_file_arg = grader_response_file_arg(&grader_path)?;
+    let workspace_arg = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let response_file_arg_path = response_file
+        .canonicalize()
+        .unwrap_or_else(|_| response_file.to_path_buf());
     let mut command_args = vec![
         "python3".to_string(),
         grader_path.to_string_lossy().to_string(),
         "--workspace".to_string(),
-        workspace.to_string_lossy().to_string(),
+        workspace_arg.to_string_lossy().to_string(),
     ];
     if let Some(flag) = response_file_arg {
         command_args.push(flag.to_string());
-        command_args.push(response_file.to_string_lossy().to_string());
+        command_args.push(response_file_arg_path.to_string_lossy().to_string());
     }
 
     let started = Instant::now();
     let mut cmd = Command::new("python3");
-    cmd.arg(&grader_path).arg("--workspace").arg(workspace);
+    cmd.arg(&grader_path).arg("--workspace").arg(&workspace_arg);
     if let Some(flag) = response_file_arg {
-        cmd.arg(flag).arg(response_file);
+        cmd.arg(flag).arg(&response_file_arg_path);
     }
-    cmd.current_dir(workspace)
+    cmd.current_dir(&workspace_arg)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -161,7 +167,7 @@ p = argparse.ArgumentParser()
 p.add_argument('--workspace', required=True)
 p.add_argument('--response-file', required=True)
 args = p.parse_args()
-print(json.dumps({'task_success': pathlib.Path(args.response_file).read_text() == 'done'}))
+print(json.dumps({'task_success': pathlib.Path(args.response_file).read_text() == 'done', 'response_is_absolute': pathlib.Path(args.response_file).is_absolute()}))
 "#,
         )
         .unwrap();
@@ -179,5 +185,13 @@ print(json.dumps({'task_success': pathlib.Path(args.response_file).read_text() =
         assert_eq!(output.exit_code, Some(0));
         assert!(output.command.iter().any(|arg| arg == "--response-file"));
         assert_eq!(output.task_success, Some(true));
+        assert_eq!(
+            output
+                .stdout_json
+                .as_ref()
+                .and_then(|value| value.get("response_is_absolute"))
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
     }
 }

@@ -10,7 +10,7 @@
 //! 等价于 Phase 2 行为；不会再因为 LLM "顺嘴说一句" 就误判完成。
 
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use tokio::sync::mpsc;
@@ -35,6 +35,8 @@ use super::recovery_log::{
     build_recovery_attempt_meta, build_recovery_succeeded_meta, format_attempt_content,
     format_succeeded_content, RecoveryStrategy, RecoveryTrigger,
 };
+use super::runtime_env;
+use super::task_contract::{self, ContractContext, TaskContract};
 use super::types::*;
 
 /// FR-11 默认值；Scheduler 可从配置覆盖。
@@ -50,6 +52,10 @@ const MAX_CONSECUTIVE_NO_TOOL: u32 = 3;
 const READ_ONLY_LOOP_THRESHOLD: u32 = 5;
 /// 步数距上限只剩 N 时注入"剩余 N 步"提示。
 const STEPS_REMAINING_HINT: u32 = 5;
+const ARTIFACT_FIRST_HINT_STEP: u32 = 3;
+const ARTIFACT_CHECKPOINT_REMAINING_STEPS: u32 = 12;
+const GUARDRAIL_PRECHECK_REMAINING_STEPS: u32 = 12;
+const FINALIZATION_TIMEOUT_FRACTION: f64 = 0.85;
 /// Issue 3: 单步 LLM 流被 idle watchdog 中止（卡住 180s）时，给 LLM 发"continue"
 /// 重试的次数预算。耗尽则真失败。**Step 级**：每个 step 开始时重置。
 ///
@@ -117,7 +123,609 @@ fn next_idle_retry_budget(resume_after_idle_retry: bool, current: u32, default: 
 /// 同时识别 `grep`（主名，2026-05 起）与 `search_files`（alias，旧 session replay
 /// 兼容）。如果将来加新只读工具，直接列举即可。
 fn is_read_only_tool(name: &str) -> bool {
-    matches!(name, "read_file" | "grep" | "search_files" | "list_files")
+    crate::tools::lookup_tool_spec(name)
+        .map(|spec| spec.is_read_only)
+        .unwrap_or(false)
+}
+
+fn tool_is_read_only_loop_exploration(name: &str, input: &serde_json::Value) -> bool {
+    is_read_only_tool(name)
+        || (name == "shell_exec" && shell_command_looks_like_read_only_exploration(input))
+}
+
+fn shell_command_looks_like_read_only_exploration(input: &serde_json::Value) -> bool {
+    let Some(command) = input.get("command").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let cmd = command.trim().to_ascii_lowercase();
+    if cmd.is_empty() {
+        return false;
+    }
+    if shell_command_has_output_redirection(&cmd) || shell_download_writes_file(&cmd) {
+        return false;
+    }
+    if cmd.contains("python")
+        && (cmd.contains("fitz")
+            || cmd.contains("pymupdf")
+            || cmd.contains("pypdf")
+            || cmd.contains("pdfplumber")
+            || cmd.contains("pdftotext")
+            || cmd.contains("get_text")
+            || cmd.contains("find_tables")
+            || cmd.contains("arxiv_page.html"))
+        && !cmd.contains("presentation()")
+        && !cmd.contains("prs.save")
+        && !cmd.contains("savefig")
+        && !cmd.contains("write_text")
+        && !cmd.contains("write_bytes")
+    {
+        return true;
+    }
+    let read_only_starters = [
+        "curl ", "wget ", "grep ", "rg ", "find ", "ls ", "cat ", "head ", "tail ", "sed -n",
+    ];
+    let read_only_pipes = [
+        "grep ",
+        "rg ",
+        "head ",
+        "tail ",
+        "sed -n",
+        "python3 -m json.tool",
+    ];
+    read_only_starters
+        .iter()
+        .any(|starter| cmd.starts_with(starter))
+        || read_only_pipes
+            .iter()
+            .any(|marker| cmd.contains(&format!("| {marker}")))
+}
+
+fn shell_command_has_output_redirection(cmd: &str) -> bool {
+    cmd.contains(" >") || cmd.contains(">>") || cmd.contains(" 1>") || cmd.contains("| tee ")
+}
+
+fn shell_download_writes_file(cmd: &str) -> bool {
+    let is_download = cmd.starts_with("curl ")
+        || cmd.starts_with("wget ")
+        || cmd.contains(" curl ")
+        || cmd.contains(" wget ");
+    is_download
+        && (cmd.contains(" -o ")
+            || cmd.contains(" -O")
+            || cmd.contains(" --output ")
+            || cmd.contains(" --output=")
+            || cmd.contains(" --output-document ")
+            || cmd.contains(" --output-document=")
+            || shell_command_has_output_redirection(cmd))
+}
+
+fn read_only_loop_allows_tool(name: &str, input: &serde_json::Value) -> bool {
+    artifact_checkpoint_allows_tool(name, input) || !tool_is_read_only_loop_exploration(name, input)
+}
+
+fn artifact_checkpoint_allows_tool(name: &str, input: &serde_json::Value) -> bool {
+    if matches!(
+        name,
+        "write_file" | "edit_file" | "notebook_edit" | "publish_artifact" | "task_complete"
+    ) {
+        return true;
+    }
+    name == "shell_exec" && shell_command_looks_like_artifact_work(input)
+}
+
+fn urgent_artifact_checkpoint_allows_tool(
+    name: &str,
+    input: &serde_json::Value,
+    missing: &[String],
+) -> bool {
+    if name == "task_complete" {
+        return true;
+    }
+    if matches!(name, "write_file" | "edit_file" | "notebook_edit") {
+        let Some(path) = input
+            .get("path")
+            .or_else(|| input.get("file_path"))
+            .and_then(|v| v.as_str())
+        else {
+            return false;
+        };
+        return missing
+            .iter()
+            .any(|missing_path| path.ends_with(missing_path));
+    }
+    if name != "shell_exec" || !shell_command_looks_like_artifact_work(input) {
+        return false;
+    }
+    let Some(command) = input.get("command").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let lower = command.to_ascii_lowercase();
+    if missing
+        .iter()
+        .any(|path| path.to_ascii_lowercase().ends_with(".pptx"))
+        && lower.contains("python")
+        && (lower.contains("ppt") || lower.contains("presentation"))
+        && (lower.contains(".py") || lower.contains("<<"))
+    {
+        return true;
+    }
+    missing
+        .iter()
+        .all(|path| lower.contains(&path.to_ascii_lowercase()))
+}
+
+fn artifact_checkpoint_allows_tool_for_remaining_steps(
+    name: &str,
+    input: &serde_json::Value,
+    missing: &[String],
+    remaining_steps: u32,
+) -> bool {
+    if remaining_steps <= 2 && !missing.is_empty() {
+        artifact_checkpoint_allows_tool(name, input)
+    } else if remaining_steps <= 4 && !missing.is_empty() {
+        urgent_artifact_checkpoint_allows_tool(name, input, missing)
+    } else {
+        artifact_checkpoint_allows_tool(name, input)
+    }
+}
+
+fn read_only_loop_block_feedback(blocked_tool: &str, missing: &[String]) -> String {
+    format!(
+        "[System] Tool `{blocked_tool}` was not run because this artifact-producing task is stuck in a read/search loop while required output artifact(s) are still missing or placeholder-only: {}. Stop gathering more evidence. Create or repair the required artifacts now using write_file/edit_file/notebook_edit or a local artifact-generation shell command, then validate and call task_complete.",
+        missing.join(", ")
+    )
+}
+
+fn finalization_allows_tool(name: &str, input: &serde_json::Value) -> bool {
+    artifact_checkpoint_allows_tool(name, input)
+}
+
+fn direct_output_loop_block_feedback(blocked_tool: &str) -> String {
+    format!(
+        "[System] Tool `{blocked_tool}` was not run because this direct-response task is stuck in a read/search loop. Stop gathering more evidence now and call task_complete with the requested final answer in task_complete.summary. Do not write files just to hold the final answer."
+    )
+}
+
+fn has_direct_response_contract(opts: &AgentRunOptions) -> bool {
+    opts.task_contract
+        .as_ref()
+        .map(|contract| contract.requires_direct_response())
+        .unwrap_or(false)
+        || has_direct_response_guardrail(&opts.guardrails)
+}
+
+fn has_direct_response_guardrail(guardrails: &[Guardrail]) -> bool {
+    guardrails.iter().any(|guardrail| {
+        matches!(
+            guardrail,
+            Guardrail::SummaryMatches { .. }
+                | Guardrail::SummaryJsonValid { .. }
+                | Guardrail::SummaryNonEmpty
+        )
+    })
+}
+
+fn shell_command_looks_like_artifact_work(input: &serde_json::Value) -> bool {
+    let Some(command) = input.get("command").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let cmd = command.to_ascii_lowercase();
+    if shell_command_has_output_redirection(&cmd) || shell_download_writes_file(&cmd) {
+        return true;
+    }
+    let artifact_terms = [
+        ".pptx", ".ipynb", ".json", ".csv", ".md", ".png", ".jpg", ".jpeg", ".pdf", ".html", ".txt",
+    ];
+    let script_terms = [".py", ".js", ".rb", ".sh"];
+    let generator_markers = [
+        "heredoc",
+        "<<'",
+        "<<\"",
+        "cat >",
+        "cat <<",
+        "tee ",
+        "build_",
+        "generate_",
+        "gen_",
+        "create_",
+        "make_",
+    ];
+    let local_execution = cmd.contains("python")
+        || cmd.contains("node")
+        || cmd.contains("ruby")
+        || cmd.contains("pandoc")
+        || cmd.contains("libreoffice")
+        || cmd.contains("jupyter")
+        || cmd.contains("zip")
+        || cmd.contains("unzip")
+        || cmd.contains("test -")
+        || cmd.contains("stat ")
+        || cmd.contains("file ");
+    let is_python_inline = cmd.contains("python -c")
+        || cmd.contains("python3 -c")
+        || cmd.contains("python -m")
+        || cmd.contains("python3 -m");
+    let inline_artifact_generation = cmd.contains("python")
+        && (cmd.contains("from pptx import")
+            || cmd.contains("presentation()")
+            || cmd.contains("prs.save")
+            || cmd.contains("savefig")
+            || cmd.contains("image.new")
+            || cmd.contains("zipfile")
+            || (artifact_terms.iter().any(|term| cmd.contains(term))
+                && (cmd.contains(".write(")
+                    || cmd.contains("write_bytes")
+                    || cmd.contains("write_text"))));
+    if is_python_inline {
+        return inline_artifact_generation;
+    }
+    let artifact_term_present = artifact_terms.iter().any(|term| cmd.contains(term));
+    if local_execution && artifact_term_present {
+        return true;
+    }
+    let shell_words = cmd.split_whitespace().collect::<Vec<_>>();
+    let executes_script_arg = shell_words.windows(2).any(|pair| {
+        matches!(
+            pair[0],
+            "python" | "python3" | "node" | "ruby" | "bash" | "sh"
+        ) && script_terms.iter().any(|ext| pair[1].ends_with(ext))
+    });
+    let executes_local_script =
+        cmd.contains("./") && script_terms.iter().any(|ext| cmd.contains(ext));
+    let writes_generator_script = script_terms.iter().any(|ext| cmd.contains(ext))
+        && generator_markers.iter().any(|marker| cmd.contains(marker))
+        && (cmd.contains('>') || cmd.contains("tee ") || cmd.contains("write_text"));
+    if executes_script_arg || executes_local_script || writes_generator_script {
+        return true;
+    }
+    inline_artifact_generation
+}
+
+fn artifact_checkpoint_feedback(
+    blocked_tool: &str,
+    missing: &[String],
+    remaining_steps: u32,
+) -> String {
+    format!(
+        "[System] Tool `{blocked_tool}` was not run because only {remaining_steps} step(s) remain and required output artifact(s) are still missing or empty: {}. Stop exploration and do not patch or inspect helper scripts. Create the missing required artifact(s) directly now. Prefer one bounded write_file/edit_file/notebook_edit call, or one local shell heredoc/generator that writes every missing artifact path explicitly, then call task_complete. Partial but well-formed artifacts are better than timing out with no output.",
+        missing.join(", ")
+    )
+}
+
+fn is_required_file_guardrail(guardrail: &Guardrail) -> Option<&[String]> {
+    match guardrail {
+        Guardrail::FilesNonEmpty { globs } | Guardrail::FilesJsonValid { globs, .. } => Some(globs),
+        _ => None,
+    }
+}
+
+fn required_file_outputs(opts: &AgentRunOptions) -> Vec<String> {
+    let mut files = opts
+        .task_contract
+        .as_ref()
+        .map(|contract| contract.required_artifact_paths())
+        .unwrap_or_default();
+    for guardrail in &opts.guardrails {
+        if let Some(globs) = is_required_file_guardrail(guardrail) {
+            files.extend(globs.iter().filter(|g| !g.trim().is_empty()).cloned());
+        }
+    }
+    files.sort();
+    files.dedup();
+    files
+}
+
+fn required_files_status(repo_root: &Path, globs: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut present = Vec::new();
+    let mut missing = Vec::new();
+    for g in globs {
+        let pattern = repo_root.join(g);
+        let pattern_str = pattern.to_string_lossy().to_string();
+        let mut any_ready = false;
+        if let Ok(entries) = glob::glob(&pattern_str) {
+            for entry in entries.flatten() {
+                if required_file_entry_is_ready(&entry) {
+                    any_ready = true;
+                    break;
+                }
+            }
+        }
+        if any_ready {
+            present.push(g.clone());
+        } else {
+            missing.push(g.clone());
+        }
+    }
+    (present, missing)
+}
+
+fn required_file_entry_is_ready(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() == 0 {
+        return false;
+    }
+    if metadata.len() > 256 * 1024 {
+        return true;
+    }
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return true;
+    };
+    !looks_like_placeholder_artifact(path, &content)
+}
+
+fn looks_like_placeholder_artifact(path: &Path, content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if [
+        "todo",
+        "tbd",
+        "placeholder",
+        "待补充",
+        "待定",
+        "待获取",
+        "待下载",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return true;
+    }
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("json"))
+        .unwrap_or(false)
+    {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            return json_value_looks_placeholder(&value);
+        }
+    }
+    false
+}
+
+fn json_value_looks_placeholder(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => map.values().any(json_value_looks_placeholder),
+        serde_json::Value::Array(values) => values.is_empty(),
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            trimmed.is_empty()
+                || matches!(
+                    trimmed.to_ascii_lowercase().as_str(),
+                    "todo" | "tbd" | "placeholder" | "unknown" | "n/a"
+                )
+        }
+        serde_json::Value::Null => true,
+        _ => false,
+    }
+}
+
+fn artifact_first_hint(missing: &[String], step: u32) -> String {
+    format!(
+        "[System] Required output artifact(s) are still missing or empty by step {step}: {}. Create or update these files now with best-effort valid content, then continue gathering evidence only if needed.",
+        missing.join(", ")
+    )
+}
+
+fn timeout_finalization_hint(remaining_secs: u64, missing: &[String]) -> String {
+    let missing_text = if missing.is_empty() {
+        "all required files appear to exist; finalize and call task_complete".to_string()
+    } else {
+        format!(
+            "these required files are still missing or empty: {}; write best-effort valid artifacts before task_complete",
+            missing.join(", ")
+        )
+    };
+    format!(
+        "[System] Wall-clock budget is nearly exhausted (~{remaining_secs}s remain). Stop exploration now: {missing_text}."
+    )
+}
+
+fn finalization_tool_block_feedback(
+    blocked_tool: &str,
+    remaining_secs: u64,
+    missing: &[String],
+) -> String {
+    let missing_text = if missing.is_empty() {
+        "required artifacts appear to exist".to_string()
+    } else {
+        format!(
+            "missing or empty required artifacts: {}",
+            missing.join(", ")
+        )
+    };
+    format!(
+        "[System] Tool `{blocked_tool}` was not run because the task is in timeout finalization (~{remaining_secs}s remain; {missing_text}). Only write/edit required artifacts, run local artifact-generation or artifact-validation commands, publish them, or call task_complete."
+    )
+}
+
+fn guardrail_repair_tool_block_feedback(
+    blocked_tool: &str,
+    last_repair_feedback: Option<&str>,
+) -> String {
+    let mut out = format!(
+        "[System] Tool `{blocked_tool}` was not run because late guardrail repair mode is active. The guardrail failure already identifies a concrete issue; stop exploring and call task_complete with a corrected final answer, or only edit/regenerate/validate required artifacts when files are required."
+    );
+    if let Some(feedback) = last_repair_feedback.filter(|s| !s.trim().is_empty()) {
+        out.push_str("\n\nLast guardrail repair instruction still applies:\n");
+        out.push_str(feedback);
+    }
+    out
+}
+
+fn guardrail_repair_instruction(feedback: &str, required_output_files: &[String]) -> String {
+    let mut out = String::from(
+        "[System][Guardrail Repair] The previous completion failed concrete validation. Do not gather new evidence or broaden the task. Repair only the failing artifact(s), run a local validation for the exact constraint, then call task_complete again.\n",
+    );
+    if !required_output_files.is_empty() {
+        out.push_str("Required artifact(s): ");
+        out.push_str(&required_output_files.join(", "));
+        out.push_str(".\n");
+    }
+    let lower = feedback.to_ascii_lowercase();
+    if lower.contains("length must be")
+        || lower.contains("non-whitespace chars")
+        || lower.contains("too short")
+        || lower.contains("too long")
+    {
+        out.push_str("- Length/shape repair: rewrite the named artifact to the requested size range. If it is overlong, condense each section and remove low-priority prose; if it is too short, add concise task-relevant substance. Preserve required headings, keys, columns, and facts.\n");
+    }
+    if lower.contains("source marker") || lower.contains("preserve exact source marker") {
+        out.push_str("- Source-marker repair: preserve all source marker substrings required by the task and every marker named in the feedback. Copy them verbatim into the final answer in the relevant fact strings; do not paraphrase, split, reorder words inside a marker, or fix only the latest missing marker while dropping earlier ones. If the task evidence is still visible in context, prefer exact phrases from that evidence for all facts that may be graded by source markers.\n");
+    }
+    if lower.contains("final json code block")
+        || lower.contains("requested json value")
+        || lower.contains("summary must be the final json")
+    {
+        out.push_str("- Final-response repair: call task_complete with exactly the requested fenced JSON/text block as the summary, not a prose summary of your work.\n");
+    }
+    if lower.contains("missing required header") || lower.contains("headers") {
+        out.push_str("- Header repair: add the missing required heading(s) exactly as named; do not rename or decorate them.\n");
+    }
+    if lower.contains("header mismatch") || lower.contains("csv") {
+        out.push_str("- CSV repair: make the header exactly match the required columns and keep at least one valid data row.\n");
+    }
+    if lower.contains("missing keys") || lower.contains("json") {
+        out.push_str("- JSON repair: update the existing JSON artifact so required keys are present and the file remains parseable.\n");
+    }
+    if lower.contains("placeholder") || lower.contains("todo") || lower.contains("tbd") {
+        out.push_str("- Placeholder repair: replace placeholder text with concrete content from the existing evidence.\n");
+    }
+    if lower.contains("pptx") || lower.contains("presentation") || lower.contains("slide") {
+        out.push_str("- Presentation repair: edit/regenerate the saved presentation and validate the actual saved file, not just the generator source. If the failure mentions the final slide or an open question, put the exact contiguous phrase `开放问题` (or `open question`) on the literal last slide; variants like `开放的问题` do not satisfy strict graders.\n");
+    }
+    out.push_str("\nExact guardrail feedback:\n");
+    out.push_str(feedback);
+    out
+}
+
+#[derive(Debug, Clone, Default)]
+struct InvalidToolArgsRecoveryState {
+    malformed_write_file_count: u32,
+}
+
+impl InvalidToolArgsRecoveryState {
+    fn observe_tool_batch(
+        &mut self,
+        tool_use_blocks: &[(String, String, serde_json::Value)],
+        tool_outputs: &[Option<crate::tools::ToolOutput>],
+        missing_required_files: &[String],
+    ) -> Option<String> {
+        let malformed_write_files = tool_use_blocks
+            .iter()
+            .filter(|(_, name, input)| {
+                name == "write_file" && tool_input_has_arg_parse_error(input)
+            })
+            .count() as u32;
+        if malformed_write_files > 0 {
+            self.malformed_write_file_count += malformed_write_files;
+            return Some(malformed_write_file_recovery_hint(
+                self.malformed_write_file_count,
+                missing_required_files,
+            ));
+        }
+
+        let delivery_succeeded = missing_required_files.is_empty()
+            && tool_use_blocks
+                .iter()
+                .zip(tool_outputs.iter())
+                .any(|((_, name, input), output)| {
+                    !tool_input_has_arg_parse_error(input)
+                        && matches!(
+                            name.as_str(),
+                            "write_file"
+                                | "edit_file"
+                                | "notebook_edit"
+                                | "shell_exec"
+                                | "publish_artifact"
+                        )
+                        && output.as_ref().map(|out| !out.is_error).unwrap_or(false)
+                });
+        if delivery_succeeded {
+            self.malformed_write_file_count = 0;
+        }
+        None
+    }
+}
+
+fn tool_input_has_arg_parse_error(input: &serde_json::Value) -> bool {
+    input
+        .as_object()
+        .and_then(|obj| obj.get(crate::llm::ARG_PARSE_ERROR_KEY))
+        .and_then(|v| v.as_str())
+        .is_some()
+}
+
+fn malformed_write_file_recovery_hint(attempts: u32, missing: &[String]) -> String {
+    let missing_text = if missing.is_empty() {
+        "required artifacts are not currently known to be missing".to_string()
+    } else {
+        format!(
+            "required artifacts still missing or empty: {}",
+            missing.join(", ")
+        )
+    };
+    if attempts <= 1 {
+        return format!(
+            "[System] The previous write_file call had malformed JSON arguments ({missing_text}). Do not retry a large write_file payload and do not spend remaining steps appending a long script chunk-by-chunk. Next, prefer exactly one local artifact-generation shell_exec command or heredoc that creates and validates the required files. If you cannot do that, write one minimal complete file/generator under ~1200 characters, then run it."
+        );
+    }
+    format!(
+        "[System][Recovery Escalation] write_file arguments have been malformed {attempts} times ({missing_text}). Stop attempting large write_file bodies. On the next turn choose exactly one bounded recovery action: (1) run a local artifact-generation shell command or heredoc that creates/validates the required files; (2) write a minimal complete generator/file with content under ~1200 characters; or (3) if valid artifacts already exist, publish them or call task_complete. Do not inspect script lines or retry another large JSON string."
+    )
+}
+
+fn llm_error_looks_transient_network(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("error sending request")
+        || lower.contains("connection reset")
+        || lower.contains("connection closed")
+        || lower.contains("connection aborted")
+        || lower.contains("operation timed out")
+        || lower.contains("deadline has elapsed")
+        || lower.contains("dns error")
+        || lower.contains("tcp")
+        || lower.contains("tls")
+}
+
+fn transient_network_retry_delay(attempt: u32, initial_ms: u64) -> std::time::Duration {
+    let shift = attempt.saturating_sub(1).min(5);
+    let millis = initial_ms.saturating_mul(1u64 << shift).min(16_000);
+    std::time::Duration::from_millis(millis.max(250))
+}
+
+fn long_task_policy_allows_tool(name: &str, remaining_steps: u32) -> bool {
+    if remaining_steps > LONG_TASK_FINALIZATION_STEPS {
+        return true;
+    }
+    !matches!(name, "todo_write" | "enter_plan_mode" | "ask_user_question")
+}
+
+fn long_task_policy_feedback(blocked_tool: &str, remaining_steps: u32) -> String {
+    format!(
+        "[System] This task is in the finalization phase ({remaining_steps} step(s) remain). \
+         Do not call `{blocked_tool}` now. Use the evidence already collected, write or validate \
+         the required artifacts, then call `task_complete`. Only run a new read/search/shell command \
+         if it directly verifies a required output."
+    )
+}
+
+fn no_tool_progress_hint(consecutive_no_tool: u32, last_response_had_visible_text: bool) -> String {
+    if last_response_had_visible_text {
+        return format!(
+            "[System] You have produced {} replies without using any tool. \
+             Either continue with a tool call or signal completion via the \
+             `task_complete` tool. The task is NOT considered complete until \
+             `task_complete` succeeds.",
+            consecutive_no_tool
+        );
+    }
+    "[System] Your previous replies contained no visible answer and no tool call. Produce a visible final answer now if the task asks for direct output, or use an appropriate tool; do not continue with hidden reasoning only.".to_string()
 }
 
 fn assistant_text_from_blocks(blocks: &[ContentBlock]) -> Option<String> {
@@ -236,11 +844,23 @@ impl ToolFollowupBuilder {
 const TOOL_RESULT_BUDGET_CHARS: usize = 8 * 1024;
 /// 截断后保留尾部 N chars——尾部往往是错误堆栈 / 最终输出，比头部更重要。
 const TOOL_RESULT_TAIL_CHARS: usize = 1024;
+const TOOL_USE_INPUT_BUDGET_CHARS: usize = 2 * 1024;
+const TOOL_USE_INPUT_EXCERPT_CHARS: usize = 700;
+const TOOL_USE_INPUT_RECENT_MESSAGE_WINDOW: usize = 8;
+const TASK_COMPLETE_EVENT_SUMMARY_CHARS: usize = 2048;
 /// "已经截过的"哨兵串前缀，避免重复截断把 sentinel 自己当原内容再截一次。
 const TRUNCATED_SENTINEL_PREFIX: &str = "[result truncated to keep context lean.";
 /// 整个 prompt 的 token 预算（粗估）。超过就 microcompact。
 /// 50K 是大多数 chat completion 模型 (Claude / GPT-4o / DeepSeek) 安全区的下沿。
 const MICROCOMPACT_TOKEN_THRESHOLD: usize = 50_000;
+/// 长轨迹 working-memory 压缩的提前触发阈值。它不等 prompt 撞到 50K，
+/// 而是在工具调用/消息数量已经显示出“会反复 replay”时先折叠早期轨迹。
+const WORKING_MEMORY_MESSAGE_THRESHOLD: usize = 18;
+const WORKING_MEMORY_TOOL_BLOCK_THRESHOLD: usize = 14;
+const WORKING_MEMORY_TOKEN_THRESHOLD: usize = 24_000;
+const WORKING_MEMORY_MIN_REMAINING_MESSAGES: usize = 8;
+/// 长任务后段不再允许重新规划类工具；此时应该收敛到产物验证和 task_complete。
+const LONG_TASK_FINALIZATION_STEPS: u32 = 8;
 /// chars-to-tokens 粗估常数。代码 / JSON 大约 3.5 chars/token，取 4 偏保守
 /// (略高估 → 提前触发压缩，宁可早一步也别超 ctx)。
 const CHARS_PER_TOKEN_ESTIMATE: usize = 4;
@@ -255,9 +875,7 @@ fn apply_tool_result_budget(messages: &mut [Message]) {
     for msg in messages.iter_mut() {
         for block in msg.content.iter_mut() {
             if let ContentBlock::ToolResult { content, .. } = block {
-                if content.starts_with(TRUNCATED_SENTINEL_PREFIX)
-                    || content.starts_with("[tool_summary]")
-                {
+                if crate::agent::tool_result_policy::is_already_compacted(content) {
                     continue;
                 }
                 let total = content.chars().count();
@@ -278,8 +896,84 @@ fn apply_tool_result_budget(messages: &mut [Message]) {
     }
 }
 
-/// 用 chars / 4 粗估 prompt 的 token 数。包含 system 之外的 messages（system 一般固定，
-/// microcompact 不动它）。仅作为触发阈值，不要求精确。
+fn collect_completed_tool_use_ids(messages: &[Message]) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    for msg in messages {
+        for block in &msg.content {
+            if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                ids.insert(tool_use_id.clone());
+            }
+        }
+    }
+    ids
+}
+
+fn compact_input_hash(input: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    input.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn compact_large_tool_use_inputs(messages: &mut [Message]) -> usize {
+    let completed = collect_completed_tool_use_ids(messages);
+    let mut compacted = 0usize;
+    let compact_until = messages
+        .len()
+        .saturating_sub(TOOL_USE_INPUT_RECENT_MESSAGE_WINDOW);
+    for msg in messages.iter_mut().take(compact_until) {
+        if !matches!(msg.role, MessageRole::Assistant) {
+            continue;
+        }
+        for block in msg.content.iter_mut() {
+            let ContentBlock::ToolUse { id, name, input } = block else {
+                continue;
+            };
+            if !completed.contains(id) {
+                continue;
+            }
+            if input
+                .get("__tool_use_input_compacted__")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let Ok(raw) = serde_json::to_string(input) else {
+                continue;
+            };
+            if raw.chars().count() <= TOOL_USE_INPUT_BUDGET_CHARS {
+                continue;
+            }
+            let hash = compact_input_hash(&raw);
+            let excerpt = char_safe_excerpt(&raw, TOOL_USE_INPUT_EXCERPT_CHARS);
+            let mut replacement = serde_json::json!({
+                "__tool_use_input_compacted__": true,
+                "__non_executable_history_stub__": true,
+                "note": "Historical completed tool_use arguments were compacted for context only. Do not copy this object into a new tool call; re-create valid arguments explicitly.",
+                "original_chars": raw.chars().count(),
+                "hash16": hash,
+                "__tool_use_input_excerpt__": excerpt,
+            });
+            if let Some(path) = input
+                .get("path")
+                .or_else(|| input.get("file_path"))
+                .and_then(|v| v.as_str())
+            {
+                replacement["original_path"] = serde_json::Value::String(path.to_string());
+            }
+            if let Some(command) = input.get("command").and_then(|v| v.as_str()) {
+                replacement["__tool_use_command_excerpt__"] =
+                    serde_json::Value::String(char_safe_excerpt(command, 240));
+            }
+            replacement["tool"] = serde_json::Value::String(name.clone());
+            *input = replacement;
+            compacted += 1;
+        }
+    }
+    compacted
+}
+
 fn approximate_tokens(messages: &[Message]) -> usize {
     let mut chars = 0usize;
     for msg in messages {
@@ -295,6 +989,121 @@ fn approximate_tokens(messages: &[Message]) -> usize {
         }
     }
     chars / CHARS_PER_TOKEN_ESTIMATE
+}
+
+fn compact_prefix_preserves_tool_pairing(messages: &[Message], boundary: usize) -> bool {
+    if boundary == 0 || boundary >= messages.len() {
+        return true;
+    }
+
+    let mut dropped_tool_use_ids = std::collections::HashSet::new();
+    for msg in &messages[..boundary] {
+        for block in &msg.content {
+            if let ContentBlock::ToolUse { id, .. } = block {
+                dropped_tool_use_ids.insert(id.as_str());
+            }
+        }
+    }
+    if dropped_tool_use_ids.is_empty() {
+        return true;
+    }
+
+    for msg in &messages[boundary..] {
+        for block in &msg.content {
+            if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                if dropped_tool_use_ids.contains(tool_use_id.as_str()) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+fn pairing_safe_compact_prefix_len(
+    messages: &[Message],
+    desired_drop_count: usize,
+    min_remaining: usize,
+) -> Option<usize> {
+    if desired_drop_count == 0 || messages.len() <= min_remaining {
+        return None;
+    }
+    let max_drop = messages.len().saturating_sub(min_remaining);
+    let desired = desired_drop_count.min(max_drop);
+
+    for boundary in desired..=max_drop {
+        if compact_prefix_preserves_tool_pairing(messages, boundary) {
+            return Some(boundary);
+        }
+    }
+
+    (1..desired)
+        .rev()
+        .find(|boundary| compact_prefix_preserves_tool_pairing(messages, *boundary))
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+struct ContextStats {
+    message_count: usize,
+    block_count: usize,
+    user_messages: usize,
+    assistant_messages: usize,
+    text_blocks: usize,
+    reasoning_blocks: usize,
+    tool_use_blocks: usize,
+    tool_result_blocks: usize,
+    tool_result_error_blocks: usize,
+    text_chars: usize,
+    reasoning_chars: usize,
+    tool_use_json_chars: usize,
+    tool_result_chars: usize,
+    largest_tool_result_chars: usize,
+    approx_tokens: usize,
+}
+
+fn collect_context_stats(messages: &[Message]) -> ContextStats {
+    let mut stats = ContextStats {
+        message_count: messages.len(),
+        approx_tokens: approximate_tokens(messages),
+        ..Default::default()
+    };
+    for msg in messages {
+        match msg.role {
+            MessageRole::User => stats.user_messages += 1,
+            MessageRole::Assistant => stats.assistant_messages += 1,
+        }
+        for block in &msg.content {
+            stats.block_count += 1;
+            match block {
+                ContentBlock::Text { text } => {
+                    stats.text_blocks += 1;
+                    stats.text_chars += text.chars().count();
+                }
+                ContentBlock::Reasoning { text } => {
+                    stats.reasoning_blocks += 1;
+                    stats.reasoning_chars += text.chars().count();
+                }
+                ContentBlock::ToolUse { input, .. } => {
+                    stats.tool_use_blocks += 1;
+                    stats.tool_use_json_chars += serde_json::to_string(input)
+                        .map(|s| s.chars().count())
+                        .unwrap_or(0);
+                }
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => {
+                    stats.tool_result_blocks += 1;
+                    if *is_error {
+                        stats.tool_result_error_blocks += 1;
+                    }
+                    let chars = content.chars().count();
+                    stats.tool_result_chars += chars;
+                    stats.largest_tool_result_chars = stats.largest_tool_result_chars.max(chars);
+                }
+            }
+        }
+    }
+    stats
 }
 
 #[derive(Debug, Clone)]
@@ -331,9 +1140,178 @@ impl CompactReport {
     }
 }
 
-/// 把最早 ~1/3 messages 折叠成一条 "earlier explored: ..." 摘要，整体压缩。
-///
-/// 设计考虑：
+fn compacted_tools_seen(messages: &[Message]) -> Vec<String> {
+    let mut tools_seen = Vec::new();
+    for msg in messages {
+        for block in &msg.content {
+            if let ContentBlock::ToolUse { name, .. } = block {
+                if !tools_seen.contains(name) {
+                    tools_seen.push(name.clone());
+                }
+            }
+        }
+    }
+    tools_seen
+}
+
+fn extract_working_memory_refs(messages: &[Message]) -> Vec<String> {
+    let mut refs = Vec::new();
+    for msg in messages {
+        for block in &msg.content {
+            let text = match block {
+                ContentBlock::Text { text } | ContentBlock::Reasoning { text } => text.as_str(),
+                ContentBlock::ToolResult { content, .. } => content.as_str(),
+                ContentBlock::ToolUse { input, .. } => {
+                    if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
+                        if !refs.iter().any(|r| r == path) {
+                            refs.push(path.to_string());
+                        }
+                    }
+                    if let Some(paths) = input.get("file_paths").and_then(|v| v.as_array()) {
+                        for path in paths.iter().filter_map(|v| v.as_str()) {
+                            if !refs.iter().any(|r| r == path) {
+                                refs.push(path.to_string());
+                            }
+                        }
+                    }
+                    continue;
+                }
+            };
+            for token in text.split(|c: char| {
+                c.is_whitespace() || matches!(c, ',' | ')' | '(' | '"' | '\'' | '`' | '[' | ']')
+            }) {
+                let cleaned = token.trim_end_matches(|c: char| matches!(c, ':' | ';' | '.'));
+                if cleaned.len() < 3 || cleaned.len() > 180 {
+                    continue;
+                }
+                let looks_like_ref = cleaned.contains(".miragenty/evidence/")
+                    || cleaned.contains('/')
+                    || cleaned.ends_with(".json")
+                    || cleaned.ends_with(".md")
+                    || cleaned.ends_with(".csv")
+                    || cleaned.ends_with(".txt")
+                    || cleaned.ends_with(".ipynb")
+                    || cleaned.ends_with(".py")
+                    || cleaned.ends_with(".sql");
+                if looks_like_ref && !refs.iter().any(|r| r == cleaned) {
+                    refs.push(cleaned.to_string());
+                }
+                if refs.len() >= 12 {
+                    return refs;
+                }
+            }
+        }
+    }
+    refs
+}
+
+fn extract_compact_observation_excerpts(messages: &[Message]) -> Vec<String> {
+    let mut excerpts = Vec::new();
+    for msg in messages {
+        for block in &msg.content {
+            let ContentBlock::ToolResult {
+                content, is_error, ..
+            } = block
+            else {
+                continue;
+            };
+            if *is_error || crate::agent::tool_result_policy::is_already_compacted(content) {
+                continue;
+            }
+            let chars = content.chars().count();
+            if !(120..=1200).contains(&chars) {
+                continue;
+            }
+            let trimmed = content.trim();
+            if trimmed.is_empty()
+                || trimmed.starts_with('{')
+                || trimmed.starts_with("total ")
+                || trimmed.contains("file_unchanged_since_last_read")
+            {
+                continue;
+            }
+            excerpts.push(char_safe_excerpt(trimmed, 900));
+            if excerpts.len() >= 2 {
+                return excerpts;
+            }
+        }
+    }
+    excerpts
+}
+
+fn render_compact_summary(
+    prefix: &str,
+    dropped_count: usize,
+    dropped: &[Message],
+) -> (String, Vec<String>) {
+    let tools_seen = compacted_tools_seen(dropped);
+    let refs = extract_working_memory_refs(dropped);
+    let observation_excerpts = extract_compact_observation_excerpts(dropped);
+    let mut summary = format!(
+        "{prefix} {dropped_count} earlier message(s) were compacted. Full raw history remains in the workspace timeline. Earlier tools: {}.",
+        if tools_seen.is_empty() {
+            "(none)".to_string()
+        } else {
+            tools_seen.join(", ")
+        }
+    );
+    if !observation_excerpts.is_empty() {
+        summary.push_str(" Key compacted observations: ");
+        summary.push_str(&observation_excerpts.join(" || "));
+        summary.push('.');
+    }
+    if !refs.is_empty() {
+        summary.push_str(" Key files/evidence already touched: ");
+        summary.push_str(&refs.join(", "));
+        summary.push('.');
+    }
+    summary.push_str(" Do not repeat broad discovery already done; continue from the latest messages and retrieve specific evidence only when needed.");
+    (summary, tools_seen)
+}
+
+fn should_working_memory_compact(messages: &[Message]) -> bool {
+    if messages.len() < WORKING_MEMORY_MESSAGE_THRESHOLD {
+        return false;
+    }
+    let stats = collect_context_stats(messages);
+    stats.approx_tokens >= WORKING_MEMORY_TOKEN_THRESHOLD
+        || stats.tool_use_blocks >= WORKING_MEMORY_TOOL_BLOCK_THRESHOLD
+        || stats.tool_result_blocks >= WORKING_MEMORY_TOOL_BLOCK_THRESHOLD
+}
+
+fn working_memory_compact(messages: &mut Vec<Message>) -> Option<CompactReport> {
+    if !should_working_memory_compact(messages) {
+        return None;
+    }
+    let before = approximate_tokens(messages);
+    let desired = messages
+        .len()
+        .saturating_sub(WORKING_MEMORY_MIN_REMAINING_MESSAGES);
+    let desired = desired.min(messages.len() / 2).max(messages.len() / 3);
+    let Some(drop_count) =
+        pairing_safe_compact_prefix_len(messages, desired, WORKING_MEMORY_MIN_REMAINING_MESSAGES)
+    else {
+        return None;
+    };
+    let dropped: Vec<Message> = messages.drain(0..drop_count).collect();
+    let (summary, tools_seen) = render_compact_summary("[working-memory]", drop_count, &dropped);
+    messages.insert(
+        0,
+        Message {
+            role: MessageRole::User,
+            content: vec![ContentBlock::Text { text: summary }],
+            cache_control: None,
+        },
+    );
+    let after = approximate_tokens(messages);
+    Some(CompactReport {
+        dropped_messages: drop_count,
+        tools_seen,
+        tokens_before: before,
+        tokens_after: after,
+    })
+}
+
 /// - 不动 system prompt（caller 把它放在 LlmRequest::system，不在 messages 里）
 /// - 不动最近 ⅔ messages —— 通常 LLM 当前正在看的上下文都在尾部，截尾就直接退化
 /// - 折叠出来的摘要插在最前面（user role）—— LLM 看到一段历史综述比直接断片更不会乱
@@ -344,7 +1322,9 @@ fn microcompact(messages: &mut Vec<Message>) -> Option<CompactReport> {
         return None;
     }
     let before = approximate_tokens(messages);
-    let drop_count = messages.len() / 3;
+    let Some(drop_count) = pairing_safe_compact_prefix_len(messages, messages.len() / 3, 2) else {
+        return None;
+    };
     let dropped: Vec<Message> = messages.drain(0..drop_count).collect();
 
     // 从被丢的 messages 里抽出工具名做 summary —— "你之前用了哪些工具" 比 "你之前讲了啥"
@@ -415,7 +1395,9 @@ pub(crate) fn reactive_compact_aggressive(messages: &mut Vec<Message>) -> Option
         return None;
     }
     let before = approximate_tokens(messages);
-    let drop_count = messages.len() / 2;
+    let Some(drop_count) = pairing_safe_compact_prefix_len(messages, messages.len() / 2, 2) else {
+        return None;
+    };
     let dropped: Vec<Message> = messages.drain(0..drop_count).collect();
 
     let mut tools_seen: Vec<String> = Vec::new();
@@ -461,6 +1443,38 @@ pub(crate) fn reactive_compact_aggressive(messages: &mut Vec<Message>) -> Option
     })
 }
 
+fn plan_contains_tool_markup(plan: &str) -> bool {
+    let lower = plan.to_ascii_lowercase();
+    lower.contains("<｜｜dsml｜｜tool_calls>")
+        || lower.contains("<tool_use")
+        || lower.contains("<tool_call")
+        || lower.contains("invoke name=\"")
+        || lower.contains("</invoke>")
+}
+
+fn shell_command_invokes_nested_agent(input: &serde_json::Value) -> bool {
+    let cmd = input
+        .get("cmd")
+        .or_else(|| input.get("command"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if cmd.trim().is_empty() {
+        return false;
+    }
+    let invokes_claude_cli = cmd.contains("claude -p")
+        || cmd.contains("claude --print")
+        || cmd.contains("claude-code")
+        || cmd.contains("npx claude")
+        || cmd.contains("bunx claude");
+    let invokes_generic_agent = cmd.contains("subagent") || cmd.contains("agent run");
+    invokes_claude_cli || invokes_generic_agent
+}
+
+fn nested_agent_feedback() -> String {
+    "[System] Do not spawn a nested coding agent or Claude CLI from shell_exec. Use the current agent's tools directly: read source files, inspect evidence, update artifacts if needed, and call task_complete when the task is ready.".to_string()
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 struct AgentEventPayload {
     agent_id: String,
@@ -473,12 +1487,21 @@ struct AgentEventPayload {
     meta: Option<serde_json::Value>,
 }
 
+#[async_trait::async_trait]
+pub trait CustomToolHandler: Send + Sync {
+    fn handles_tool(&self, name: &str) -> bool;
+
+    async fn execute_tool(&self, name: &str, input: &serde_json::Value)
+        -> crate::tools::ToolOutput;
+}
+
 /// AgentEngine 运行时配置（FR-09 / FR-11）。
 pub struct AgentRunOptions {
     pub model: String,
     pub max_steps: u32,
     pub timeout_secs: u64,
     pub guardrails: Vec<Guardrail>,
+    pub task_contract: Option<TaskContract>,
     pub guardrail_retry_budget: u32,
     /// 来自 task.produces_artifacts 解析后的 (local_name, type) 对，供 ArtifactsExist guardrail 使用。
     pub produces: Vec<(String, String)>,
@@ -523,6 +1546,9 @@ pub struct AgentRunOptions {
     /// `false` → 下一个 step 重新尝试 primary。当用户希望"只是临时切一下"时用，
     /// 但要意识到大概率立刻再次撞 overload。
     pub fallback_sticky: bool,
+    /// Benchmark-only extension point. Defaults empty so normal Miragenty and
+    /// existing benchmarks see the exact default coding tool list.
+    pub extra_tools: Vec<crate::llm::ToolDefinition>,
 }
 
 impl Default for AgentRunOptions {
@@ -532,6 +1558,7 @@ impl Default for AgentRunOptions {
             max_steps: DEFAULT_MAX_AGENT_STEPS,
             timeout_secs: DEFAULT_AGENT_TIMEOUT_SECS,
             guardrails: Vec::new(),
+            task_contract: None,
             guardrail_retry_budget: 3,
             produces: Vec::new(),
             expected_output: None,
@@ -546,6 +1573,7 @@ impl Default for AgentRunOptions {
             fallback_model: None,
             // P1-2: 启用 fallback 时默认 sticky=true（见字段文档）
             fallback_sticky: true,
+            extra_tools: Vec::new(),
         }
     }
 }
@@ -581,6 +1609,7 @@ pub struct AgentEngine {
     /// 可能持有 Send + Sync 资源（线程池 / DB 连接池等），Arc 让 engine 自身
     /// 不持有 phase 调用的可变借用。
     hook_registry: Arc<crate::agent::hooks::HookRegistry>,
+    custom_tool_handler: Option<Arc<dyn CustomToolHandler>>,
 }
 
 impl AgentEngine {
@@ -600,6 +1629,7 @@ impl AgentEngine {
             tool_summarizer: None,
             tool_summary_threshold_chars: TOOL_RESULT_BUDGET_CHARS,
             hook_registry: Arc::new(crate::agent::hooks::HookRegistry::new()),
+            custom_tool_handler: None,
         }
     }
 
@@ -625,6 +1655,11 @@ impl AgentEngine {
     /// 也避免在 multi-engine 场景（极少）误把 registry 同步给意料外的 agent。
     pub fn with_hooks(mut self, registry: crate::agent::hooks::HookRegistry) -> Self {
         self.hook_registry = Arc::new(registry);
+        self
+    }
+
+    pub fn with_custom_tool_handler(mut self, handler: Arc<dyn CustomToolHandler>) -> Self {
+        self.custom_tool_handler = Some(handler);
         self
     }
 
@@ -711,8 +1746,10 @@ impl AgentEngine {
             "agent_run start"
         );
 
-        let tools = coding_agent_tools_with_artifact_support();
+        let mut tools = coding_agent_tools_with_artifact_support();
+        tools.extend(opts.extra_tools.clone());
         let workspace_dir = self.tool_executor.workspace_display();
+        let contract_brief = render_task_contract_brief(opts.task_contract.as_ref());
         let guardrail_brief = render_guardrail_brief(&opts.guardrails);
         let produces_brief = render_produces_brief(&opts.produces);
         let expected_brief = opts
@@ -736,6 +1773,21 @@ impl AgentEngine {
             Some(&db_state),
         );
         let intel_block = intel.render_system_block();
+        let runtime_env_block =
+            runtime_env::build_profile(&self.workspace_root).render_system_block();
+
+        let delivery_contract = "\n\n## Delivery Contract\n\
+             - If the task asks for a direct final answer, exact text, a JSON block, or says not to write files, put that requested answer itself in task_complete.summary. Do not summarize that you produced it; task_complete.summary is the final response seen by graders/users.\n\
+             - If the task asks for a file, notebook, script, report, dataset, or generated output, persist the final answer in the requested artifact; do not rely on task_complete.summary as the only place where key answers exist.\n\
+             - For statically evaluated notebooks, scripts, reports, and data files, make final constants, conclusions, required fields, and generated content visible in the source artifact or saved output. If you use derived expressions, keep the final values auditable in the artifact as visible comments, assertions, literals, or saved outputs while preserving the derivation.\n\
+             - For generated artifacts, prefer small complete generators or incremental append chunks over one very large write_file payload. Escape nested quotes safely; if a generator fails near the step limit, overwrite it with a simpler complete generator instead of debugging it line-by-line.\n\
+             - For presentations or PPTX files, make checklist requirements machine-readable in slide text: use plain ASCII/standard numbering such as `1.`, `2.`, `3.` or `①②③`, not decorative symbol numerals or icon-only bullets. Validate the saved presentation by extracting slide text from the file, not just by inspecting your source script.\n\
+             - For long tasks, create required output skeletons early and update them after each major finding. Near the step or token limit, stop exploring and make the existing artifacts valid before completing.";
+
+        let evidence_contract = "\n\n## Evidence Contract\n\
+             - Large, medium, or repeated shell/read/search/list outputs may be returned as compact evidence refs instead of full text. The original output remains preserved in the referenced evidence path or agent events.\n\
+             - Do not repeat broad fetch/cat/list commands only to see the same full output again. Use the evidence path, a narrower grep pattern, read_file with offset/limit, or a targeted extraction command.\n\
+             - Treat [tool_result_ref] and [tool_result_repeat] as valid observations: use their source/hash/excerpt to decide the next focused retrieval step.";
 
         let system = format!(
             "You are a coding agent working in the directory: {workspace_dir}\n\n\
@@ -747,8 +1799,8 @@ impl AgentEngine {
              the `task_complete` tool with a concise summary. \
              Do NOT just write a textual summary — only `task_complete` ends the task.\n\
              - Before calling `task_complete`, publish every artifact that was planned for this \
-             task using `publish_artifact` (file_paths must point to files that already exist on disk).{guardrail_brief}\n\
-             - ALWAYS provide all required parameters when calling a tool.{intel_block}"
+             task using `publish_artifact` (file_paths must point to files that already exist on disk).{contract_brief}{guardrail_brief}\n\
+             - ALWAYS provide all required parameters when calling a tool.{runtime_env_block}{delivery_contract}{evidence_contract}{intel_block}"
         );
 
         let mut messages: Vec<Message> = Vec::new();
@@ -812,6 +1864,7 @@ impl AgentEngine {
         let mut current_max_output_tokens: u32 = opts.max_output_tokens;
         let mut escalated_once_this_step = false;
         let mut multi_turn_recovery_count: u32 = 0;
+        let mut transient_network_retries_this_step: u32 = 0;
         // Single-Agent Uplift P1-2: Cross-Model Fallback state。
         //
         // - `current_model`：本 agent 当前 LLM 请求用的模型名。fallback 触发后切到
@@ -824,6 +1877,17 @@ impl AgentEngine {
         let mut current_model: String = opts.model.clone();
         let mut switched_to_fallback_this_step = false;
         let mut fallback_switches_total: u32 = 0;
+        let required_output_files = required_file_outputs(opts);
+        let run_started_at = std::time::Instant::now();
+        let mut hinted_artifact_first = required_output_files.is_empty();
+        let mut hinted_timeout_finalization = false;
+        let mut guardrail_precheck_done = false;
+        let mut guardrail_repair_active = false;
+        let mut last_guardrail_repair_feedback: Option<String> = None;
+        let mut max_steps_guardrail_repair_extended = false;
+        let mut tool_result_context_state =
+            crate::agent::tool_result_policy::ToolResultContextState::default();
+        let mut invalid_tool_args_recovery_state = InvalidToolArgsRecoveryState::default();
         // Single-Agent Uplift P0-3: 等待 emit recovery_succeeded 的待办。
         //
         // 任意 recovery 分支（P0-1 reactive / idle retry / P1-3 escalate / multi-turn）
@@ -864,16 +1928,136 @@ impl AgentEngine {
             }
 
             if step >= opts.max_steps {
-                let reason = format!(
-                    "max_steps: {} steps exhausted without task_complete",
-                    opts.max_steps
+                if let Some(status) = self
+                    .try_auto_complete_on_step_exhaustion(
+                        agent_id,
+                        step,
+                        opts,
+                        &required_output_files,
+                        &mut messages,
+                    )
+                    .await?
+                {
+                    if status == AgentStatus::Running {
+                        if !max_steps_guardrail_repair_extended && opts.guardrail_retry_budget > 0 {
+                            self.emit_event_with_meta(
+                                agent_id,
+                                step,
+                                "system_hint",
+                                "Allowing one bounded repair turn after max-step auto-finalize guardrail feedback.",
+                                Some(serde_json::json!({
+                                    "kind": "max_steps_auto_finalize_repair_extension",
+                                    "previous_max_steps": opts.max_steps,
+                                })),
+                            );
+                            max_steps_guardrail_repair_extended = true;
+                            guardrail_repair_active = true;
+                            step = step.saturating_sub(1);
+                        } else {
+                            let reason = format!(
+                                "max_steps: {} steps exhausted after auto-finalize guardrail feedback",
+                                opts.max_steps
+                            );
+                            self.emit_event(agent_id, step, "error", &reason);
+                            self.emit_event(agent_id, step, "status_change", "failed");
+                            self.update_agent_status(agent_id, "failed");
+                            self.expire_agent_notes(agent_id);
+                            self.mark_task_failed_with_reason(agent_id, "failed", &reason);
+                            return Ok(AgentStatus::Failed);
+                        }
+                    } else {
+                        return Ok(status);
+                    }
+                }
+
+                if !max_steps_guardrail_repair_extended
+                    && opts.guardrail_retry_budget > 0
+                    && messages.iter().rev().any(|message| {
+                        message.content.iter().any(|block| {
+                            matches!(
+                                block,
+                                ContentBlock::Text { text }
+                                    if text.contains("[Guardrail Check Failed]")
+                                        || text.contains("Late guardrail precheck failed")
+                            )
+                        })
+                    })
+                {
+                    self.emit_event_with_meta(
+                        agent_id,
+                        step,
+                        "system_hint",
+                        "Allowing one bounded repair turn after max-step guardrail feedback.",
+                        Some(serde_json::json!({
+                            "kind": "max_steps_guardrail_repair_extension",
+                            "previous_max_steps": opts.max_steps,
+                        })),
+                    );
+                    max_steps_guardrail_repair_extended = true;
+                    step = step.saturating_sub(1);
+                } else {
+                    let reason = format!(
+                        "max_steps: {} steps exhausted without task_complete",
+                        opts.max_steps
+                    );
+                    self.emit_event(agent_id, step, "error", &reason);
+                    self.emit_event(agent_id, step, "status_change", "failed");
+                    self.update_agent_status(agent_id, "failed");
+                    self.expire_agent_notes(agent_id);
+                    self.mark_task_failed_with_reason(agent_id, "failed", &reason);
+                    return Ok(AgentStatus::Failed);
+                }
+            }
+
+            let (_, missing_required_files) =
+                required_files_status(&self.workspace_root, &required_output_files);
+            if !hinted_artifact_first
+                && step >= ARTIFACT_FIRST_HINT_STEP
+                && !missing_required_files.is_empty()
+            {
+                hinted_artifact_first = true;
+                let hint = artifact_first_hint(&missing_required_files, step);
+                messages.push(Message {
+                    role: MessageRole::User,
+                    content: vec![ContentBlock::Text { text: hint.clone() }],
+                    cache_control: None,
+                });
+                self.emit_event_with_meta(
+                    agent_id,
+                    step,
+                    "system_hint",
+                    &hint,
+                    Some(serde_json::json!({
+                        "kind": "artifact_first_hint",
+                        "missing_required_files": missing_required_files,
+                    })),
                 );
-                self.emit_event(agent_id, step, "error", &reason);
-                self.emit_event(agent_id, step, "status_change", "failed");
-                self.update_agent_status(agent_id, "failed");
-                self.expire_agent_notes(agent_id);
-                self.mark_task_failed_with_reason(agent_id, "failed", &reason);
-                return Ok(AgentStatus::Failed);
+            }
+
+            let elapsed_secs = run_started_at.elapsed().as_secs();
+            let timeout_secs = opts.timeout_secs.max(1);
+            let remaining_wall_secs = timeout_secs.saturating_sub(elapsed_secs);
+            let timeout_finalization_active =
+                (elapsed_secs as f64) >= (timeout_secs as f64 * FINALIZATION_TIMEOUT_FRACTION);
+            if timeout_finalization_active && !hinted_timeout_finalization {
+                hinted_timeout_finalization = true;
+                let hint = timeout_finalization_hint(remaining_wall_secs, &missing_required_files);
+                messages.push(Message {
+                    role: MessageRole::User,
+                    content: vec![ContentBlock::Text { text: hint.clone() }],
+                    cache_control: None,
+                });
+                self.emit_event_with_meta(
+                    agent_id,
+                    step,
+                    "system_hint",
+                    &hint,
+                    Some(serde_json::json!({
+                        "kind": "timeout_finalization_hint",
+                        "remaining_wall_secs": remaining_wall_secs,
+                        "missing_required_files": missing_required_files,
+                    })),
+                );
             }
 
             // 剩余步数 ≤ STEPS_REMAINING_HINT 时注入一条提示（一次性）
@@ -883,8 +2067,10 @@ impl AgentEngine {
             {
                 hinted_remaining_steps = true;
                 let hint = format!(
-                    "[System] You have only {} steps left. Wrap up your work and call \
-                     task_complete soon.",
+                    "[System] You have only {} steps left. Stop exploring now and finalize. \
+                     If the task requires output files, create or update best-effort valid artifacts \
+                     before calling task_complete; partial but well-formed artifacts are better than \
+                     timing out with no output. Then call task_complete soon.",
                     opts.max_steps - step
                 );
                 messages.push(Message {
@@ -893,6 +2079,27 @@ impl AgentEngine {
                     cache_control: None,
                 });
                 self.emit_event(agent_id, step, "system_hint", &hint);
+            }
+
+            if !guardrail_precheck_done
+                && opts.max_steps > GUARDRAIL_PRECHECK_REMAINING_STEPS
+                && opts.max_steps - step <= GUARDRAIL_PRECHECK_REMAINING_STEPS
+                && missing_required_files.is_empty()
+            {
+                guardrail_precheck_done = true;
+                if self
+                    .precheck_guardrails_for_repair(
+                        agent_id,
+                        step,
+                        opts,
+                        &required_output_files,
+                        &mut messages,
+                    )
+                    .await
+                {
+                    guardrail_repair_active = true;
+                    continue;
+                }
             }
 
             // Single-Agent Uplift P0-1: reactive compact retry 复用同 step 号。
@@ -916,6 +2123,7 @@ impl AgentEngine {
                 //   （注意：current_max_output_tokens 不重置，是单调上升的——升过一次
                 //    后下个 step 直接用大窗口）
                 attempted_reactive_compact_this_step = false;
+                transient_network_retries_this_step = 0;
                 escalated_once_this_step = false;
                 // P1-2: step 边界重置 fallback per-step flag。注意 current_model
                 // 不在此重置 —— sticky=true 时跨 step 保留。
@@ -950,7 +2158,10 @@ impl AgentEngine {
             // 任一动作都 emit 对应事件让用户知情，避免 LLM 行为突变无解释。
             self.apply_tool_result_budget_with_optional_summary(agent_id, step, &mut messages)
                 .await;
-            if approximate_tokens(&messages) > MICROCOMPACT_TOKEN_THRESHOLD {
+            let should_microcompact = approximate_tokens(&messages) > MICROCOMPACT_TOKEN_THRESHOLD;
+            let should_working_memory =
+                !should_microcompact && should_working_memory_compact(&messages);
+            if should_microcompact || should_working_memory {
                 // P2-1 Phase B: PreCompact hook 调用点。compact 即将丢弃部分历史，
                 // hook 可以把关键 context 持久化到 artifact / agent_notes 防丢失。
                 {
@@ -970,7 +2181,12 @@ impl AgentEngine {
                         .await
                     {
                         Ok(()) => {
-                            if let Some(report) = microcompact(&mut messages) {
+                            let compact_result = if should_working_memory {
+                                working_memory_compact(&mut messages)
+                            } else {
+                                microcompact(&mut messages)
+                            };
+                            if let Some(report) = compact_result {
                                 // P0-1 引入了 reactive compact 后，前端需要区分 proactive vs reactive
                                 // 两种来源。proactive (这里) = 主动按本地 token 估算触发；
                                 // reactive (`engine.rs` Llm 错误分支) = API 拒绝后兜底压缩。
@@ -979,7 +2195,11 @@ impl AgentEngine {
                                     obj.insert("kind".into(), serde_json::json!("proactive"));
                                     obj.insert(
                                         "trigger".into(),
-                                        serde_json::json!("token_threshold"),
+                                        serde_json::json!(if should_working_memory {
+                                            "working_memory"
+                                        } else {
+                                            "token_threshold"
+                                        }),
                                     );
                                 }
                                 self.emit_event_with_meta(
@@ -1084,7 +2304,30 @@ impl AgentEngine {
             }
 
             let call_summary = Self::describe_llm_call(step, &messages);
-            self.emit_event(agent_id, step, "llm_call", &call_summary);
+            let context_stats = collect_context_stats(&messages);
+            let context_stats_meta =
+                serde_json::to_value(&context_stats).unwrap_or_else(|_| serde_json::json!({}));
+            self.emit_event_with_meta(
+                agent_id,
+                step,
+                "llm_call",
+                &call_summary,
+                Some(serde_json::json!({ "context_stats": context_stats_meta.clone() })),
+            );
+            self.emit_event_with_meta(
+                agent_id,
+                step,
+                "context_stats",
+                &format!(
+                    "messages={} blocks={} approx_tokens={} tool_result_chars={} largest_tool_result_chars={}",
+                    context_stats.message_count,
+                    context_stats.block_count,
+                    context_stats.approx_tokens,
+                    context_stats.tool_result_chars,
+                    context_stats.largest_tool_result_chars,
+                ),
+                Some(context_stats_meta),
+            );
 
             let request = LlmRequest {
                 // P1-2: 用 current_model 而非 opts.model。fallback 切换后这里直接拿
@@ -1614,6 +2857,47 @@ impl AgentEngine {
                     skip_step_increment_for_reactive = true;
                     continue;
                 }
+                Err(StreamGuardError::Llm(msg))
+                    if llm_error_looks_transient_network(&msg)
+                        && transient_network_retries_this_step < opts.stream_network_retries =>
+                {
+                    transient_network_retries_this_step += 1;
+                    let delay = transient_network_retry_delay(
+                        transient_network_retries_this_step,
+                        opts.stream_initial_retry_delay_ms,
+                    );
+                    let notice = format!(
+                        "LLM request failed with a transient network error; retrying step {step} (attempt {}/{}) after {}ms.",
+                        transient_network_retries_this_step,
+                        opts.stream_network_retries,
+                        delay.as_millis()
+                    );
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        step,
+                        attempt = transient_network_retries_this_step,
+                        max_attempts = opts.stream_network_retries,
+                        retry_delay_ms = delay.as_millis() as u64,
+                        error = %msg,
+                        "transient LLM network error; retrying same step"
+                    );
+                    self.emit_event_with_meta(
+                        agent_id,
+                        step,
+                        "recovery_attempt",
+                        &notice,
+                        Some(serde_json::json!({
+                            "trigger": "transient_network_error",
+                            "attempt": transient_network_retries_this_step,
+                            "max_attempts": opts.stream_network_retries,
+                            "retry_delay_ms": delay.as_millis() as u64,
+                            "error_excerpt": msg.chars().take(240).collect::<String>(),
+                        })),
+                    );
+                    tokio::time::sleep(delay).await;
+                    skip_step_increment_for_reactive = true;
+                    continue;
+                }
                 Err(e) => return Err(anyhow::anyhow!(e.user_message_zh())),
             };
 
@@ -1978,8 +3262,9 @@ impl AgentEngine {
                         let nudge = format!(
                             "[System] You have used {accumulated} output tokens out of your {b} \
                              token budget ({pct_pct:.0}% — trigger: {reason_str}). \
-                             **Stop exploring** and call `task_complete` now with a summary of \
-                             your progress so far. If the task isn't fully done, summarise what's \
+                             **Stop exploring** and finalize now. If the task requires output files, \
+                             write best-effort valid artifacts using the evidence already collected, \
+                             then call `task_complete`. If the task isn't fully done, summarise what's \
                              done and what's not — do not start new work in this turn.",
                             pct_pct = pct * 100.0,
                         );
@@ -2042,6 +3327,8 @@ impl AgentEngine {
                     .unwrap_or("")
                     .to_string();
 
+                let summary_for_event =
+                    char_safe_excerpt(&summary, TASK_COMPLETE_EVENT_SUMMARY_CHARS);
                 self.emit_event_with_meta(
                     agent_id,
                     step,
@@ -2049,7 +3336,11 @@ impl AgentEngine {
                     &format!("task_complete({{\"summary\": ...}})"),
                     Some(serde_json::json!({
                         "tool": TASK_COMPLETE_TOOL,
-                        "input": { "summary": &summary },
+                        "input": {
+                            "summary": summary_for_event,
+                            "summary_chars": summary.chars().count(),
+                            "summary_truncated": summary.chars().count() > TASK_COMPLETE_EVENT_SUMMARY_CHARS,
+                        },
                     })),
                 );
 
@@ -2142,11 +3433,13 @@ impl AgentEngine {
                         return Ok(AgentStatus::Completed);
                     }
                     CompletionOutcome::Retry { feedback } => {
+                        let repair_feedback =
+                            guardrail_repair_instruction(&feedback, &required_output_files);
                         if retries_left == 0 {
                             let reason = format!(
                                 "guardrail: retry budget exhausted ({}); last_feedback={}",
                                 opts.guardrail_retry_budget,
-                                feedback.chars().take(160).collect::<String>()
+                                repair_feedback.chars().take(160).collect::<String>()
                             );
                             self.emit_event(agent_id, step, "error", &reason);
                             self.emit_event(agent_id, step, "status_change", "failed");
@@ -2156,30 +3449,32 @@ impl AgentEngine {
                             return Ok(AgentStatus::Failed);
                         }
                         retries_left -= 1;
+                        guardrail_repair_active = true;
+                        last_guardrail_repair_feedback = Some(repair_feedback.clone());
                         let mut tool_results: Vec<ContentBlock> = Vec::new();
                         // 把 task_complete 工具回执填回（避免破坏 OpenAI tool_use 配对）
                         for (id, name, _) in &tool_use_blocks {
                             if name == TASK_COMPLETE_TOOL {
                                 tool_results.push(ContentBlock::ToolResult {
                                     tool_use_id: id.clone(),
-                                    content: feedback.clone(),
+                                    content: repair_feedback.clone(),
                                     is_error: true,
                                 });
                             }
                         }
-                        // 其它工具调用仍然要按正常流程执行（不太常见，但为完整性）
-                        for (id, name, input) in &tool_use_blocks {
+                        // Once task_complete failed validation, make finalization terminal for this
+                        // model turn. Return paired tool results for sibling tool_use blocks without
+                        // executing them so special tools cannot bypass dispatch/approval paths.
+                        for (id, name, _) in &tool_use_blocks {
                             if name == TASK_COMPLETE_TOOL {
                                 continue;
                             }
-                            let output = self
-                                .tool_executor
-                                .execute_with_stream(name, input, &self.app_handle, agent_id)
-                                .await;
                             tool_results.push(ContentBlock::ToolResult {
                                 tool_use_id: id.clone(),
-                                content: output.content,
-                                is_error: output.is_error,
+                                content: format!(
+                                    "{repair_feedback}\nTool `{name}` was not run because task_complete failed contract validation in the same turn. Repair the validation failure, then call task_complete again."
+                                ),
+                                is_error: true,
                             });
                         }
                         messages.push(Message {
@@ -2193,18 +3488,14 @@ impl AgentEngine {
                 }
             }
 
-            // 没有 task_complete：处理"普通工具调用 / 无工具"两种情况
             let has_any_tool_use = !tool_use_blocks.is_empty();
             if !has_any_tool_use {
                 consecutive_no_tool += 1;
                 if consecutive_no_tool >= MAX_CONSECUTIVE_NO_TOOL {
-                    let hint = format!(
-                        "[System] You have produced {} replies without using any tool. \
-                         Either continue with a tool call or signal completion via the \
-                         `task_complete` tool. The task is NOT considered complete until \
-                         `task_complete` succeeds.",
-                        consecutive_no_tool
-                    );
+                    let last_response_had_visible_text =
+                        assistant_text_from_blocks(&response.content).is_some();
+                    let hint =
+                        no_tool_progress_hint(consecutive_no_tool, last_response_had_visible_text);
                     messages.push(Message {
                         role: MessageRole::User,
                         content: vec![ContentBlock::Text { text: hint.clone() }],
@@ -2216,11 +3507,268 @@ impl AgentEngine {
             }
             consecutive_no_tool = 0;
 
+            if has_any_tool_use {
+                if let Some((_, _, _)) = tool_use_blocks.iter().find(|(_, name, input)| {
+                    name == "shell_exec" && shell_command_invokes_nested_agent(input)
+                }) {
+                    let feedback = nested_agent_feedback();
+                    self.emit_event_with_meta(
+                        agent_id,
+                        step,
+                        "system_hint",
+                        &feedback,
+                        Some(serde_json::json!({
+                            "kind": "nested_agent_tool_block",
+                            "blocked_tool": "shell_exec",
+                            "blocked_tool_count": tool_use_blocks.len(),
+                        })),
+                    );
+                    let tool_results = tool_use_blocks
+                        .iter()
+                        .map(|(id, name, _)| ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: if name == "shell_exec" {
+                                feedback.clone()
+                            } else {
+                                format!(
+                                    "{feedback}\nTool `{name}` was not run because the same turn attempted to spawn a nested agent."
+                                )
+                            },
+                            is_error: true,
+                        })
+                        .collect();
+                    messages.push(Message {
+                        role: MessageRole::User,
+                        content: tool_results,
+                        cache_control: None,
+                    });
+                    consecutive_no_tool = 0;
+                    continue;
+                }
+            }
+
+            if has_any_tool_use && !timeout_finalization_active {
+                let remaining_steps = opts.max_steps.saturating_sub(step);
+                if opts.max_steps > ARTIFACT_CHECKPOINT_REMAINING_STEPS
+                    && remaining_steps <= ARTIFACT_CHECKPOINT_REMAINING_STEPS
+                {
+                    let missing_required_files = missing_required_files.clone();
+                    if !missing_required_files.is_empty() {
+                        let has_allowed_checkpoint_tool = tool_use_blocks.iter().any(|(_, name, input)| {
+                            artifact_checkpoint_allows_tool_for_remaining_steps(
+                                name,
+                                input,
+                                &missing_required_files,
+                                remaining_steps,
+                            )
+                        });
+                        if !has_allowed_checkpoint_tool {
+                            if let Some((_, blocked_name, _)) =
+                                tool_use_blocks.iter().find(|(_, name, input)| {
+                                    !artifact_checkpoint_allows_tool_for_remaining_steps(
+                                        name,
+                                        input,
+                                        &missing_required_files,
+                                        remaining_steps,
+                                    )
+                                })
+                            {
+                                let feedback = artifact_checkpoint_feedback(
+                                    blocked_name,
+                                    &missing_required_files,
+                                    remaining_steps,
+                                );
+                                self.emit_event_with_meta(
+                                    agent_id,
+                                    step,
+                                    "system_hint",
+                                    &feedback,
+                                    Some(serde_json::json!({
+                                        "kind": "artifact_checkpoint_tool_block",
+                                        "blocked_tool": blocked_name,
+                                        "remaining_steps": remaining_steps,
+                                        "missing_required_files": missing_required_files,
+                                        "blocked_tool_count": tool_use_blocks.len(),
+                                    })),
+                                );
+                                let tool_results = tool_use_blocks
+                                    .iter()
+                                    .map(|(id, name, _)| ContentBlock::ToolResult {
+                                        tool_use_id: id.clone(),
+                                        content: if name == blocked_name {
+                                            feedback.clone()
+                                        } else {
+                                            format!(
+                                                "{feedback}\nTool `{name}` was not run because required artifact checkpoint mode is active."
+                                            )
+                                        },
+                                        is_error: false,
+                                    })
+                                    .collect();
+                                messages.push(Message {
+                                    role: MessageRole::User,
+                                    content: tool_results,
+                                    cache_control: None,
+                                });
+                                consecutive_no_tool = 0;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if has_any_tool_use
+                && guardrail_repair_active
+                && opts
+                    .task_contract
+                    .as_ref()
+                    .map(|contract| contract.completion_policy.stop_exploration_during_repair)
+                    .unwrap_or(true)
+            {
+                if let Some((_, blocked_name, _)) = tool_use_blocks
+                    .iter()
+                    .find(|(_, name, input)| !finalization_allows_tool(name, input))
+                {
+                    let feedback = guardrail_repair_tool_block_feedback(
+                        blocked_name,
+                        last_guardrail_repair_feedback.as_deref(),
+                    );
+                    self.emit_event_with_meta(
+                        agent_id,
+                        step,
+                        "system_hint",
+                        &feedback,
+                        Some(serde_json::json!({
+                            "kind": "guardrail_repair_tool_block",
+                            "blocked_tool": blocked_name,
+                            "blocked_tool_count": tool_use_blocks.len(),
+                        })),
+                    );
+                    let tool_results = tool_use_blocks
+                        .iter()
+                        .map(|(id, name, _)| ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: if name == blocked_name {
+                                feedback.clone()
+                            } else {
+                                format!(
+                                    "{feedback}\nTool `{name}` was not run because late guardrail repair mode is active."
+                                )
+                            },
+                            is_error: false,
+                        })
+                        .collect();
+                    messages.push(Message {
+                        role: MessageRole::User,
+                        content: tool_results,
+                        cache_control: None,
+                    });
+                    consecutive_no_tool = 0;
+                    continue;
+                }
+            }
+
+            if has_any_tool_use && timeout_finalization_active {
+                let missing_required_files = missing_required_files.clone();
+                let remaining_wall_secs = opts
+                    .timeout_secs
+                    .max(1)
+                    .saturating_sub(run_started_at.elapsed().as_secs());
+                if let Some((_, blocked_name, _)) = tool_use_blocks
+                    .iter()
+                    .find(|(_, name, input)| !finalization_allows_tool(name, input))
+                {
+                    let feedback = finalization_tool_block_feedback(
+                        blocked_name,
+                        remaining_wall_secs,
+                        &missing_required_files,
+                    );
+                    self.emit_event_with_meta(
+                        agent_id,
+                        step,
+                        "system_hint",
+                        &feedback,
+                        Some(serde_json::json!({
+                            "kind": "timeout_finalization_tool_block",
+                            "blocked_tool": blocked_name,
+                            "remaining_wall_secs": remaining_wall_secs,
+                            "missing_required_files": missing_required_files,
+                            "blocked_tool_count": tool_use_blocks.len(),
+                        })),
+                    );
+                    let tool_results = tool_use_blocks
+                        .iter()
+                        .map(|(id, name, _)| ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: if name == blocked_name {
+                                feedback.clone()
+                            } else {
+                                format!(
+                                    "{feedback}\nTool `{name}` was not run because timeout finalization mode is active."
+                                )
+                            },
+                            is_error: false,
+                        })
+                        .collect();
+                    messages.push(Message {
+                        role: MessageRole::User,
+                        content: tool_results,
+                        cache_control: None,
+                    });
+                    consecutive_no_tool = 0;
+                    continue;
+                }
+            }
+
+            if has_any_tool_use {
+                let remaining_steps = opts.max_steps.saturating_sub(step);
+                if let Some((_, blocked_name, _)) = tool_use_blocks
+                    .iter()
+                    .find(|(_, name, _)| !long_task_policy_allows_tool(name, remaining_steps))
+                {
+                    let feedback = long_task_policy_feedback(blocked_name, remaining_steps);
+                    self.emit_event_with_meta(
+                        agent_id,
+                        step,
+                        "system_hint",
+                        &feedback,
+                        Some(serde_json::json!({
+                            "kind": "long_task_finalization_tool_block",
+                            "blocked_tool": blocked_name,
+                            "remaining_steps": remaining_steps,
+                            "blocked_tool_count": tool_use_blocks.len(),
+                        })),
+                    );
+                    let tool_results = tool_use_blocks
+                        .iter()
+                        .map(|(id, name, _)| ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: if name == blocked_name {
+                                feedback.clone()
+                            } else {
+                                format!(
+                                    "{feedback}\nTool `{name}` was not run because finalization mode is active."
+                                )
+                            },
+                            is_error: false,
+                        })
+                        .collect();
+                    messages.push(Message {
+                        role: MessageRole::User,
+                        content: tool_results,
+                        cache_control: None,
+                    });
+                    consecutive_no_tool = 0;
+                    continue;
+                }
+            }
+
             // L3 循环检测：连续 N 步只调用只读工具（read/search/list）→ 注入"开始动手"提示，
             // 帮 LLM 跳出"光读不写"的死循环。一次性，避免重复打扰。
             let all_read_only = tool_use_blocks
                 .iter()
-                .all(|(_, name, _)| is_read_only_tool(name));
+                .all(|(_, name, input)| tool_is_read_only_loop_exploration(name, input));
             if all_read_only {
                 consecutive_read_only += 1;
             } else {
@@ -2248,6 +3796,142 @@ impl AgentEngine {
                 } else {
                     None
                 };
+
+            if has_any_tool_use
+                && !missing_required_files.is_empty()
+                && consecutive_read_only >= ARTIFACT_FIRST_HINT_STEP
+            {
+                if let Some((_, blocked_name, _)) = tool_use_blocks
+                    .iter()
+                    .find(|(_, name, input)| tool_is_read_only_loop_exploration(name, input))
+                {
+                    let feedback = read_only_loop_block_feedback(blocked_name, &missing_required_files);
+                    self.emit_event_with_meta(
+                        agent_id,
+                        step,
+                        "system_hint",
+                        &feedback,
+                        Some(serde_json::json!({
+                            "kind": "artifact_missing_read_only_loop_tool_block",
+                            "blocked_tool": blocked_name,
+                            "consecutive_read_only": consecutive_read_only,
+                            "missing_required_files": missing_required_files,
+                            "blocked_tool_count": tool_use_blocks.len(),
+                        })),
+                    );
+                    let tool_results = tool_use_blocks
+                        .iter()
+                        .map(|(id, name, _)| ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: if name == blocked_name {
+                                feedback.clone()
+                            } else {
+                                format!(
+                                    "{feedback}\nTool `{name}` was not run because required artifacts are still missing and artifact-first recovery mode is active."
+                                )
+                            },
+                            is_error: false,
+                        })
+                        .collect();
+                    messages.push(Message {
+                        role: MessageRole::User,
+                        content: tool_results,
+                        cache_control: None,
+                    });
+                    consecutive_no_tool = 0;
+                    continue;
+                }
+            }
+
+            if has_any_tool_use && consecutive_read_only >= READ_ONLY_LOOP_THRESHOLD {
+                let missing_required_files = missing_required_files.clone();
+                if missing_required_files.is_empty()
+                    && required_output_files.is_empty()
+                    && has_direct_response_contract(opts)
+                {
+                    if let Some((_, blocked_name, _)) = tool_use_blocks
+                        .iter()
+                        .find(|(_, name, input)| tool_is_read_only_loop_exploration(name, input))
+                    {
+                        let feedback = direct_output_loop_block_feedback(blocked_name);
+                        self.emit_event_with_meta(
+                            agent_id,
+                            step,
+                            "system_hint",
+                            &feedback,
+                            Some(serde_json::json!({
+                                "kind": "direct_output_read_loop_tool_block",
+                                "blocked_tool": blocked_name,
+                                "consecutive_read_only": consecutive_read_only,
+                                "blocked_tool_count": tool_use_blocks.len(),
+                            })),
+                        );
+                        let tool_results = tool_use_blocks
+                            .iter()
+                            .map(|(id, name, _)| ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: if name == blocked_name {
+                                    feedback.clone()
+                                } else {
+                                    format!(
+                                        "{feedback}\nTool `{name}` was not run because direct-response finalization mode is active."
+                                    )
+                                },
+                                is_error: false,
+                            })
+                            .collect();
+                        messages.push(Message {
+                            role: MessageRole::User,
+                            content: tool_results,
+                            cache_control: None,
+                        });
+                        consecutive_no_tool = 0;
+                        continue;
+                    }
+                } else if !missing_required_files.is_empty() {
+                    if let Some((_, blocked_name, _)) = tool_use_blocks
+                        .iter()
+                        .find(|(_, name, input)| !read_only_loop_allows_tool(name, input))
+                    {
+                        let feedback =
+                            read_only_loop_block_feedback(blocked_name, &missing_required_files);
+                        self.emit_event_with_meta(
+                            agent_id,
+                            step,
+                            "system_hint",
+                            &feedback,
+                            Some(serde_json::json!({
+                                "kind": "read_only_loop_tool_block",
+                                "blocked_tool": blocked_name,
+                                "consecutive_read_only": consecutive_read_only,
+                                "missing_required_files": missing_required_files,
+                                "blocked_tool_count": tool_use_blocks.len(),
+                            })),
+                        );
+                        let tool_results = tool_use_blocks
+                            .iter()
+                            .map(|(id, name, _)| ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: if name == blocked_name {
+                                    feedback.clone()
+                                } else {
+                                    format!(
+                                        "{feedback}\nTool `{name}` was not run because read-only loop recovery mode is active."
+                                    )
+                                },
+                                is_error: false,
+                            })
+                            .collect();
+                        messages.push(Message {
+                            role: MessageRole::User,
+                            content: tool_results,
+                            cache_control: None,
+                        });
+                        consecutive_no_tool = 0;
+                        continue;
+                    }
+                }
+            }
 
             // Single-Agent Uplift Phase 2.1: 并发安全的工具批量并行执行。
             //
@@ -2311,7 +3995,7 @@ impl AgentEngine {
                         let (id, name, input) = blk;
                         Some(async move {
                             let started_at = std::time::Instant::now();
-                            let output = self.dispatch_tool(agent_id, name, input).await;
+                            let output = self.dispatch_tool(agent_id, step, id, name, input).await;
                             let duration_ms = started_at.elapsed().as_millis() as u64;
                             (i, id.clone(), name.clone(), output, duration_ms)
                         })
@@ -2328,7 +4012,7 @@ impl AgentEngine {
                     } else {
                         "tool_result"
                     };
-                    let result_meta = serde_json::json!({
+                    let mut result_meta = serde_json::json!({
                         "tool": name,
                         "tool_use_id": id,
                         "is_error": output.is_error,
@@ -2336,6 +4020,9 @@ impl AgentEngine {
                         "size_chars": output.content.chars().count(),
                         "concurrent": true,
                     });
+                    if let Some(extra_meta) = output.meta.clone() {
+                        result_meta["output"] = extra_meta;
+                    }
                     self.emit_event_with_meta(
                         agent_id,
                         step,
@@ -2354,14 +4041,14 @@ impl AgentEngine {
                 }
                 let (id, name, input) = blk;
                 let started_at = std::time::Instant::now();
-                let output = self.dispatch_tool(agent_id, name, input).await;
+                let output = self.dispatch_tool(agent_id, step, id, name, input).await;
                 let duration_ms = started_at.elapsed().as_millis() as u64;
                 let event_kind = if output.is_error {
                     "error"
                 } else {
                     "tool_result"
                 };
-                let result_meta = serde_json::json!({
+                let mut result_meta = serde_json::json!({
                     "tool": name,
                     "tool_use_id": id,
                     "is_error": output.is_error,
@@ -2369,6 +4056,9 @@ impl AgentEngine {
                     "size_chars": output.content.chars().count(),
                     "concurrent": false,
                 });
+                if let Some(extra_meta) = output.meta.clone() {
+                    result_meta["output"] = extra_meta;
+                }
                 self.emit_event_with_meta(
                     agent_id,
                     step,
@@ -2381,13 +4071,96 @@ impl AgentEngine {
 
             // 3) 按原顺序拼 tool_results 到 follow-up builder。Anthropic 要求 ToolResult
             //    与 ToolUse 同 turn 严格按 tool_use_id 配对——顺序错了 API 会 400。
+            let pending_invalid_args_hint = invalid_tool_args_recovery_state.observe_tool_batch(
+                &tool_use_blocks,
+                &tool_outputs,
+                &missing_required_files,
+            );
+            if let Some(hint) = pending_invalid_args_hint.as_ref() {
+                self.emit_event_with_meta(
+                    agent_id,
+                    step,
+                    "system_hint",
+                    hint,
+                    Some(serde_json::json!({
+                        "kind": "invalid_tool_args_recovery",
+                        "tool": "write_file",
+                        "malformed_write_file_count": invalid_tool_args_recovery_state.malformed_write_file_count,
+                        "missing_required_files": missing_required_files,
+                    })),
+                );
+            }
             let mut followup = ToolFollowupBuilder::with_capacity(tool_use_blocks.len());
-            for ((id, _name, _input), output_opt) in
-                tool_use_blocks.iter().zip(tool_outputs.into_iter())
+            let rendered_tool_results = {
+                let context_inputs = tool_use_blocks
+                    .iter()
+                    .zip(tool_outputs.iter())
+                    .map(|((id, name, input), output_opt)| {
+                        let output = output_opt
+                            .as_ref()
+                            .expect("dispatch_tool 必须为每个 tool_use_block 填回一个 ToolOutput");
+                        crate::agent::tool_result_policy::ToolResultContextInput {
+                            step,
+                            tool_use_id: id,
+                            tool_name: name,
+                            input,
+                            output,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                crate::agent::tool_result_policy::ToolResultContextPolicy::apply_batch(
+                    &mut tool_result_context_state,
+                    &context_inputs,
+                )
+            };
+
+            for (((id, _, _), output_opt), rendered) in tool_use_blocks
+                .iter()
+                .zip(tool_outputs.into_iter())
+                .zip(rendered_tool_results.into_iter())
             {
                 let output = output_opt
                     .expect("dispatch_tool 必须为每个 tool_use_block 填回一个 ToolOutput");
-                followup.push_tool_result(id.clone(), output.content, output.is_error);
+                if let Some(report) = rendered.report {
+                    if report.mode != crate::agent::tool_result_policy::ContextRenderMode::Inline
+                        || report.per_message_budget_replaced
+                    {
+                        let context_policy_meta = serde_json::json!({
+                            "mode": report.mode.as_str(),
+                            "original_chars": report.original_chars,
+                            "context_chars": report.context_chars,
+                            "saved_chars": report.saved_chars,
+                            "fingerprint": report.content_fingerprint,
+                            "source_fingerprint": report.source_fingerprint,
+                            "repeat_of": report.repeat_of,
+                            "evidence_id": report.evidence_path,
+                            "persisted_path": report.persisted_path,
+                            "per_message_budget_replaced": report.per_message_budget_replaced,
+                        });
+                        self.emit_event_with_meta(
+                            agent_id,
+                            step,
+                            "tool_result_policy",
+                            &format!(
+                                "Rendered {} tool_result as {}: {} chars → {} chars",
+                                report.tool_name,
+                                report.mode.as_str(),
+                                report.original_chars,
+                                report.context_chars
+                            ),
+                            Some(serde_json::json!({
+                                "tool": report.tool_name,
+                                "tool_use_id": report.tool_use_id,
+                                "from_chars": report.original_chars,
+                                "to_chars": report.context_chars,
+                                "saved_chars": report.saved_chars,
+                                "reason": report.reason,
+                                "context_policy": context_policy_meta,
+                            })),
+                        );
+                    }
+                }
+                followup.push_tool_result(id.clone(), rendered.content, output.is_error);
             }
 
             // max_tokens-hit hint（仅当本步有 tool_calls 时才暂存到此）：
@@ -2406,6 +4179,12 @@ impl AgentEngine {
             // L3 read-only-loop hint：必须叠在同一条 follow-up message 里，
             // 不能拆成独立的 user text message——见 [`ToolFollowupBuilder`] 协议说明。
             if let Some(hint) = pending_read_only_hint {
+                followup.append_hint(hint);
+            }
+
+            // Malformed tool-argument recovery also has to be appended to the same follow-up
+            // message, because the assistant turn already contains tool_use blocks.
+            if let Some(hint) = pending_invalid_args_hint {
                 followup.append_hint(hint);
             }
 
@@ -2517,7 +4296,44 @@ impl AgentEngine {
         step: u32,
         messages: &mut [Message],
     ) {
+        let compacted_tool_use_inputs = compact_large_tool_use_inputs(messages);
+        if compacted_tool_use_inputs > 0 {
+            self.emit_event_with_meta(
+                agent_id,
+                step,
+                "compact",
+                &format!(
+                    "Compacted {compacted_tool_use_inputs} completed tool_use input(s) to keep context lean."
+                ),
+                Some(serde_json::json!({
+                    "kind": "tool_use_input",
+                    "compacted_tool_use_inputs": compacted_tool_use_inputs,
+                })),
+            );
+        }
+
+        let policy_reports = crate::agent::tool_result_policy::apply_policy_to_messages(messages);
+        for report in policy_reports {
+            self.emit_event_with_meta(
+                agent_id,
+                step,
+                "tool_result_policy",
+                &format!(
+                    "Compacted {} tool_result: {} chars → {} chars",
+                    report.tool_name, report.original_chars, report.compacted_chars
+                ),
+                Some(serde_json::json!({
+                    "tool": report.tool_name,
+                    "tool_use_id": report.tool_use_id,
+                    "from_chars": report.original_chars,
+                    "to_chars": report.compacted_chars,
+                    "reason": report.reason,
+                })),
+            );
+        }
+
         if let Some(summarizer) = &self.tool_summarizer {
+            let tool_lookup = crate::agent::tool_result_policy::tool_lookup_from_messages(messages);
             // 收集需要摘要的 (msg_idx, block_idx, tool_name, content) 清单。
             // 仅对 chars > threshold 的 content 走小模型，避免大量小 result 拖慢主循环。
             let mut targets: Vec<(usize, usize, String, String)> = Vec::new();
@@ -2529,17 +4345,17 @@ impl AgentEngine {
                         ..
                     } = block
                     {
-                        if content.starts_with(TRUNCATED_SENTINEL_PREFIX)
-                            || content.starts_with("[tool_summary]")
-                        {
+                        if crate::agent::tool_result_policy::is_already_compacted(content) {
                             continue;
                         }
                         if content.chars().count() <= self.tool_summary_threshold_chars {
                             continue;
                         }
-                        // tool_use_id 现在用作显示用——找回 tool 名要在主循环里查 tool_use 块，
-                        // 这里图省事直接用 id 当 tool 名占位（够 summarizer system prompt 提示用）。
-                        targets.push((mi, bi, tool_use_id.clone(), content.clone()));
+                        let tool_name = tool_lookup
+                            .get(tool_use_id)
+                            .map(|(name, _)| name.clone())
+                            .unwrap_or_else(|| tool_use_id.clone());
+                        targets.push((mi, bi, tool_name, content.clone()));
                     }
                 }
             }
@@ -2630,6 +4446,8 @@ impl AgentEngine {
     async fn dispatch_tool(
         &self,
         agent_id: &str,
+        step: u32,
+        tool_use_id: &str,
         name: &str,
         input: &serde_json::Value,
     ) -> crate::tools::ToolOutput {
@@ -2649,7 +4467,7 @@ impl AgentEngine {
         );
 
         let result = self
-            .dispatch_tool_inner(agent_id, name, input, dispatch_started)
+            .dispatch_tool_inner(agent_id, step, tool_use_id, name, input, dispatch_started)
             .await;
 
         tracing::info!(
@@ -2668,6 +4486,8 @@ impl AgentEngine {
     async fn dispatch_tool_inner(
         &self,
         agent_id: &str,
+        step: u32,
+        tool_use_id: &str,
         name: &str,
         input: &serde_json::Value,
         _started: std::time::Instant,
@@ -2685,12 +4505,19 @@ impl AgentEngine {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 let raw_excerpt = char_safe_excerpt(raw, 400);
+                let retry_guidance = if name == "write_file" {
+                    "Do not retry the same large write_file payload. On the next turn choose one of these recovery paths: (1) write a minimal complete, executable artifact generator in small append chunks under ~2KB each; (2) if only a small fix is needed, append exactly one small chunk; or (3) run an already-written local generator with shell_exec. Prefer a complete but simpler artifact over a large polished script that may truncate again."
+                } else if matches!(name, "edit_file" | "shell_exec") {
+                    "Do not retry the same large payload. Use a shorter command/patch, split large writes into small write_file append chunks under ~2KB, or create a minimal complete artifact first and refine only if steps remain."
+                } else {
+                    "Retry the call with all required parameters spelled out explicitly."
+                };
                 let msg = format!(
                     "tool_use for `{name}` arrived without valid arguments ({err}). \
                      Raw arguments string from the model: {:?}. \
                      Likely cause: the previous response hit max_tokens before the JSON args \
-                     finished, or the arguments were emitted as an empty string. \
-                     Retry the call with all required parameters spelled out explicitly. \
+                     finished, the arguments were too large, or the arguments were emitted as an empty string. \
+                     {retry_guidance} \
                      If you don't actually need to call this tool, skip it and continue.",
                     raw_excerpt,
                 );
@@ -2702,6 +4529,7 @@ impl AgentEngine {
                     })
                     .to_string(),
                     is_error: true,
+                    meta: None,
                 };
             }
         }
@@ -2756,10 +4584,27 @@ impl AgentEngine {
             }
         }
 
+        if let Some(handler) = self.custom_tool_handler.as_ref() {
+            if handler.handles_tool(name) {
+                return handler.execute_tool(name, input).await;
+            }
+        }
+
         // shell_exec 走带 stream 的入口，把 stdout/stderr emit 给前端 Workspace。
         // 其它工具透传到普通 execute，行为不变。
         self.tool_executor
-            .execute_with_stream(name, input, &self.app_handle, agent_id)
+            .execute_with_stream_context(
+                name,
+                input,
+                &self.app_handle,
+                agent_id,
+                Some(crate::tools::ToolExecutionContext {
+                    agent_id: agent_id.to_string(),
+                    step,
+                    tool_use_id: tool_use_id.to_string(),
+                    tool_name: name.to_string(),
+                }),
+            )
             .await
     }
 
@@ -2800,6 +4645,7 @@ impl AgentEngine {
                     })
                     .to_string(),
                     is_error: true,
+                    meta: None,
                 };
             }
         };
@@ -2818,6 +4664,7 @@ impl AgentEngine {
                     })
                     .to_string(),
                     is_error: true,
+                    meta: None,
                 };
             }
         }
@@ -2857,6 +4704,7 @@ impl AgentEngine {
                 })
                 .to_string(),
                 is_error: true,
+                meta: None,
             };
         }
 
@@ -2903,6 +4751,7 @@ impl AgentEngine {
         ToolOutput {
             content: summary,
             is_error: false,
+            meta: None,
         }
     }
 
@@ -2928,9 +4777,24 @@ impl AgentEngine {
                     })
                     .to_string(),
                     is_error: true,
+                    meta: None,
                 };
             }
         };
+        if plan_contains_tool_markup(&plan) {
+            return ToolOutput {
+                content: serde_json::json!({
+                    "error": "plan_contains_tool_call_markup",
+                    "message": "enter_plan_mode only records a plan; it does not execute tools. Remove embedded tool-call markup from the plan, then call the real write/read/shell tools in later steps. If the plan says to create required files early, the next tool call should actually write those files."
+                })
+                .to_string(),
+                is_error: true,
+                meta: Some(serde_json::json!({
+                    "plan_contains_tool_call_markup": true,
+                    "requires_actual_tool_call_next": true,
+                })),
+            };
+        }
         let step = self.read_agent_step(agent_id);
         // 用 system_hint kind 复用前端 SystemHintLine 渲染。meta 里带 plan_mode flag
         // 让未来如果想拆出独立面板时可以前端查找。
@@ -2950,6 +4814,7 @@ impl AgentEngine {
                 plan.lines().count()
             ),
             is_error: false,
+            meta: None,
         }
     }
 
@@ -3007,6 +4872,7 @@ impl AgentEngine {
                     })
                     .to_string(),
                     is_error: true,
+                    meta: None,
                 };
             }
         };
@@ -3018,6 +4884,7 @@ impl AgentEngine {
                 })
                 .to_string(),
                 is_error: true,
+                meta: None,
             };
         }
         for q in &parsed.questions {
@@ -3032,6 +4899,7 @@ impl AgentEngine {
                     })
                     .to_string(),
                     is_error: true,
+                    meta: None,
                 };
             }
         }
@@ -3143,6 +5011,7 @@ impl AgentEngine {
         ToolOutput {
             content: payload.to_string(),
             is_error: false,
+            meta: None,
         }
     }
 
@@ -3181,6 +5050,7 @@ impl AgentEngine {
                     })
                     .to_string(),
                     is_error: true,
+                    meta: None,
                 };
             }
         };
@@ -3236,6 +5106,7 @@ impl AgentEngine {
                         artifact.file_paths.len()
                     ),
                     is_error: false,
+                    meta: None,
                 }
             }
             Ok(None) => ToolOutput {
@@ -3245,6 +5116,7 @@ impl AgentEngine {
                     parsed.file_paths.len()
                 ),
                 is_error: false,
+                meta: None,
             },
             Err(e) => ToolOutput {
                 content: serde_json::json!({
@@ -3253,6 +5125,7 @@ impl AgentEngine {
                 })
                 .to_string(),
                 is_error: true,
+                meta: None,
             },
         }
     }
@@ -3281,7 +5154,13 @@ impl AgentEngine {
         };
 
         let has_task = task_id_opt.is_some();
-        let has_explicit_guardrails = !opts.guardrails.is_empty() || !opts.produces.is_empty();
+        let has_explicit_contract = opts
+            .task_contract
+            .as_ref()
+            .map(|contract| !contract.is_empty())
+            .unwrap_or(false);
+        let has_explicit_guardrails =
+            !opts.guardrails.is_empty() || !opts.produces.is_empty() || has_explicit_contract;
         let task_id = match task_id_opt {
             Some(t) => t,
             None if has_explicit_guardrails => {
@@ -3345,12 +5224,42 @@ impl AgentEngine {
             opts.guardrails.clone()
         };
 
+        if let Some(contract) = opts
+            .task_contract
+            .as_ref()
+            .filter(|contract| !contract.is_empty())
+        {
+            let contract_ctx = ContractContext {
+                repo_root: &self.workspace_root,
+                completion_summary: Some(summary),
+            };
+            let result = task_contract::validate_task_contract(contract, &contract_ctx);
+            let serialized = serde_json::to_string(&result.reports).unwrap_or_default();
+            let reports_meta = serde_json::to_value(&result.reports).ok();
+            self.emit_event_with_meta(
+                agent_id,
+                step,
+                if result.all_passed {
+                    "contract_pass"
+                } else {
+                    "contract_fail"
+                },
+                &serialized,
+                reports_meta,
+            );
+            if !result.all_passed {
+                return CompletionOutcome::Retry {
+                    feedback: result.format_failure_for_agent(),
+                };
+            }
+        }
+
         if guardrails.is_empty() {
             self.emit_event(
                 agent_id,
                 step,
                 "guardrail_summary",
-                "no guardrails configured; accepting task_complete",
+                "no legacy guardrails configured after task contract validation; accepting task_complete",
             );
             return CompletionOutcome::Completed;
         }
@@ -3392,6 +5301,208 @@ impl AgentEngine {
     /// 在 engine 层把失败原因写入 `tasks.last_error` + `agents.error_message`，让前端 DAG /
     /// TaskDetailPanel 能直接 hover 看为什么红了。`reason` 推荐带分类前缀
     /// （`timeout:` / `max_steps:` / `guardrail:` / `cancelled:` / `llm_error:`）。
+    async fn precheck_guardrails_for_repair(
+        &self,
+        agent_id: &str,
+        step: u32,
+        opts: &AgentRunOptions,
+        required_output_files: &[String],
+        messages: &mut Vec<Message>,
+    ) -> bool {
+        let summary = format!(
+            "Late guardrail precheck before finalization. Required output artifact(s): {}.",
+            required_output_files.join(", ")
+        );
+        match self
+            .evaluate_completion(agent_id, step, &summary, opts)
+            .await
+        {
+            CompletionOutcome::Completed => {
+                self.emit_event_with_meta(
+                    agent_id,
+                    step,
+                    "system_hint",
+                    "Late guardrail precheck passed; continue finalizing and call task_complete.",
+                    Some(serde_json::json!({
+                        "kind": "guardrail_precheck_pass",
+                        "required_output_files": required_output_files,
+                    })),
+                );
+                false
+            }
+            CompletionOutcome::Retry { feedback } => {
+                let feedback = feedback.replace(
+                    "You called task_complete, but the following guardrail checks did NOT pass.",
+                    "The current required artifacts do not yet pass the completion guardrails.",
+                );
+                let repair_feedback =
+                    guardrail_repair_instruction(&feedback, required_output_files);
+                let hint = format!(
+                    "[System] Late guardrail precheck failed while there is still time to repair.\n\n{repair_feedback}"
+                );
+                messages.push(Message {
+                    role: MessageRole::User,
+                    content: vec![ContentBlock::Text { text: hint.clone() }],
+                    cache_control: None,
+                });
+                self.emit_event_with_meta(
+                    agent_id,
+                    step,
+                    "system_hint",
+                    &hint,
+                    Some(serde_json::json!({
+                        "kind": "guardrail_precheck_retry",
+                        "required_output_files": required_output_files,
+                    })),
+                );
+                true
+            }
+        }
+    }
+
+    async fn try_auto_complete_on_step_exhaustion(
+        &self,
+        agent_id: &str,
+        step: u32,
+        opts: &AgentRunOptions,
+        required_output_files: &[String],
+        messages: &mut Vec<Message>,
+    ) -> Result<Option<AgentStatus>> {
+        self.try_auto_complete_required_outputs_ready(
+            agent_id,
+            step,
+            opts,
+            required_output_files,
+            messages,
+            "max_steps_auto_finalize",
+            "Reached the step limit after creating the required output artifact(s). Auto-finalizing because required artifacts are present and guardrails will decide completion.",
+        )
+        .await
+    }
+
+    async fn try_auto_complete_required_outputs_ready(
+        &self,
+        agent_id: &str,
+        step: u32,
+        opts: &AgentRunOptions,
+        required_output_files: &[String],
+        messages: &mut Vec<Message>,
+        event_kind: &str,
+        summary_prefix: &str,
+    ) -> Result<Option<AgentStatus>> {
+        if required_output_files.is_empty() {
+            return Ok(None);
+        }
+        let (_, missing_required_files) =
+            required_files_status(&self.workspace_root, required_output_files);
+        if !missing_required_files.is_empty() {
+            return Ok(None);
+        }
+
+        let summary = format!(
+            "{summary_prefix} Required output artifact(s): {}.",
+            required_output_files.join(", ")
+        );
+        self.emit_event_with_meta(
+            agent_id,
+            step,
+            "system_hint",
+            &summary,
+            Some(serde_json::json!({
+                "kind": event_kind,
+                "required_output_files": required_output_files,
+            })),
+        );
+
+        let hook_ctx = self.build_hook_context(
+            agent_id,
+            step,
+            crate::agent::hooks::HookPhase::Stop,
+            messages,
+            None,
+            Some(summary.clone()),
+        );
+        match self
+            .dispatch_hook_phase(agent_id, step, hook_ctx, messages)
+            .await
+        {
+            Ok(()) => {}
+            Err(HookFatal::Terminal(reason)) => {
+                let msg = format!("Stop hook terminated auto-finalization: {reason}");
+                self.mark_task_failed_with_reason(agent_id, "failed", &msg);
+                self.emit_event(agent_id, step, "status_change", "failed");
+                self.update_agent_status(agent_id, "failed");
+                return Ok(Some(AgentStatus::Failed));
+            }
+            Err(HookFatal::StepAborted(_)) => return Ok(None),
+        }
+
+        match self
+            .evaluate_completion(agent_id, step, &summary, opts)
+            .await
+        {
+            CompletionOutcome::Completed => {
+                self.emit_event(agent_id, step, "message", &summary);
+                self.persist_completion_summary(agent_id, &summary);
+                let hook_ctx = self.build_hook_context(
+                    agent_id,
+                    step,
+                    crate::agent::hooks::HookPhase::TaskCompleted,
+                    messages,
+                    None,
+                    Some(summary.clone()),
+                );
+                match self
+                    .dispatch_hook_phase(agent_id, step, hook_ctx, messages)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(HookFatal::Terminal(reason)) => {
+                        let msg = format!(
+                            "TaskCompleted hook terminated auto-finalization after summary persisted: {reason}"
+                        );
+                        self.mark_task_failed_with_reason(agent_id, "failed", &msg);
+                        self.emit_event(agent_id, step, "status_change", "failed");
+                        self.update_agent_status(agent_id, "failed");
+                        return Ok(Some(AgentStatus::Failed));
+                    }
+                    Err(HookFatal::StepAborted(_)) => {
+                        let msg = "TaskCompleted hook requested non-terminal step abort during auto-finalization; treating as failed to avoid completed-but-not-finalized state".to_string();
+                        self.mark_task_failed_with_reason(agent_id, "failed", &msg);
+                        self.emit_event(agent_id, step, "status_change", "failed");
+                        self.update_agent_status(agent_id, "failed");
+                        return Ok(Some(AgentStatus::Failed));
+                    }
+                }
+                self.emit_event(agent_id, step, "status_change", "completed");
+                self.update_agent_status(agent_id, "completed");
+                self.expire_agent_notes(agent_id);
+                Ok(Some(AgentStatus::Completed))
+            }
+            CompletionOutcome::Retry { feedback } => {
+                let repair_feedback =
+                    guardrail_repair_instruction(&feedback, required_output_files);
+                self.emit_event_with_meta(
+                    agent_id,
+                    step,
+                    "guardrail_fail",
+                    &repair_feedback,
+                    Some(serde_json::json!({
+                        "kind": "max_steps_auto_finalize_guardrail_retry",
+                    })),
+                );
+                messages.push(Message {
+                    role: MessageRole::User,
+                    content: vec![ContentBlock::Text {
+                        text: repair_feedback,
+                    }],
+                    cache_control: None,
+                });
+                Ok(Some(AgentStatus::Running))
+            }
+        }
+    }
+
     fn mark_task_failed_with_reason(&self, agent_id: &str, status: &str, reason: &str) {
         let db = self.app_handle.state::<Database>();
         let aid = agent_id.to_string();
@@ -3882,6 +5993,90 @@ enum CompletionOutcome {
     Retry { feedback: String },
 }
 
+fn render_task_contract_brief(contract: Option<&TaskContract>) -> String {
+    let Some(contract) = contract.filter(|contract| !contract.is_empty()) else {
+        return String::new();
+    };
+    let mut lines = Vec::new();
+    lines.push("\n- Active task contract validation is enabled; task_complete will be accepted only after the declared final response and artifact contract passes.".to_string());
+    if let Some(final_response) = &contract.final_response {
+        if final_response.required {
+            let mut parts = vec!["final response required".to_string()];
+            match final_response.format {
+                task_contract::FinalResponseFormat::Json => parts.push("valid JSON".to_string()),
+                task_contract::FinalResponseFormat::Text => parts.push("text".to_string()),
+                task_contract::FinalResponseFormat::Any => {}
+            }
+            if final_response.fenced {
+                parts.push("fenced code block".to_string());
+            }
+            if !final_response.required_json_keys.is_empty() {
+                parts.push(format!(
+                    "keys: {}",
+                    final_response.required_json_keys.join(", ")
+                ));
+            }
+            lines.push(format!(
+                "  - Final response contract: {}.",
+                parts.join("; ")
+            ));
+        }
+    }
+    if !contract.artifacts.is_empty() {
+        lines.push(format!(
+            "  - Required artifact contract(s): {}. Create these artifacts early, keep them non-empty and parseable, replace placeholders, then validate before task_complete.",
+            contract.required_artifact_paths().join(", ")
+        ));
+        let text_length_constraints = contract
+            .artifacts
+            .iter()
+            .filter_map(|artifact| {
+                let mut parts = Vec::new();
+                if let Some(min) = artifact.min_text_chars {
+                    parts.push(format!("at least {min} chars"));
+                }
+                if let Some(max) = artifact.max_non_ws_chars {
+                    parts.push(format!("at most {max} non-whitespace chars"));
+                }
+                (!parts.is_empty()).then(|| format!("{} ({})", artifact.path, parts.join(", ")))
+            })
+            .collect::<Vec<_>>();
+        if !text_length_constraints.is_empty() {
+            lines.push(format!(
+                "  - Text length contract(s): {}. Keep generated text artifacts within these bounds before task_complete.",
+                text_length_constraints.join("; ")
+            ));
+        }
+        let notebook_paths = contract
+            .artifacts
+            .iter()
+            .filter(|artifact| {
+                artifact.kind == task_contract::ArtifactKind::Notebook
+                    || artifact.path.ends_with(".ipynb")
+            })
+            .map(|artifact| artifact.path.as_str())
+            .collect::<Vec<_>>();
+        if !notebook_paths.is_empty() {
+            let static_paths = contract
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact.require_static_visible_derived_values)
+                .map(|artifact| artifact.path.as_str())
+                .collect::<Vec<_>>();
+            if !static_paths.is_empty() {
+                lines.push(format!(
+                    "  - Notebook static visibility contract: for {}, if a code cell computes final values from variables, keep the derivation and also make the final computed constants visibly present in notebook source comments, assertions, literals, or saved outputs.",
+                    static_paths.join(", ")
+                ));
+            }
+        }
+    }
+    if contract.source_grounding.is_some() {
+        lines.push("  - Source grounding contract: preserve required quoted/source marker substrings verbatim in the final response when requested.".to_string());
+    }
+    lines.join("\n")
+}
+
 fn render_guardrail_brief(guardrails: &[Guardrail]) -> String {
     if guardrails.is_empty() {
         return String::new();
@@ -3903,6 +6098,35 @@ fn render_produces_brief(produces: &[(String, String)]) -> String {
     format!("\n\n## Required Artifacts\n{}", lines.join("\n"))
 }
 
+#[cfg(test)]
+mod transient_network_retry_tests {
+    use super::{llm_error_looks_transient_network, transient_network_retry_delay};
+
+    #[test]
+    fn detects_transient_request_errors() {
+        assert!(llm_error_looks_transient_network(
+            "error sending request for url (https://api.example/v1/chat/completions)"
+        ));
+        assert!(llm_error_looks_transient_network(
+            "connection reset by peer"
+        ));
+        assert!(llm_error_looks_transient_network(
+            "dns error: failed to lookup address"
+        ));
+        assert!(!llm_error_looks_transient_network(
+            "context length exceeded"
+        ));
+        assert!(!llm_error_looks_transient_network("invalid API key"));
+    }
+
+    #[test]
+    fn transient_retry_delay_is_bounded_exponential() {
+        assert_eq!(transient_network_retry_delay(1, 500).as_millis(), 500);
+        assert_eq!(transient_network_retry_delay(2, 500).as_millis(), 1000);
+        assert_eq!(transient_network_retry_delay(99, 500).as_millis(), 16000);
+        assert_eq!(transient_network_retry_delay(1, 0).as_millis(), 250);
+    }
+}
 #[cfg(test)]
 mod char_safe_excerpt_tests {
     use super::char_safe_excerpt;
@@ -4070,6 +6294,70 @@ mod context_compaction_tests {
         assert_eq!(first, second, "幂等：第二次应保持不变");
     }
 
+    #[test]
+    fn compacts_only_old_completed_tool_use_inputs() {
+        let huge = "print('x')\n".repeat(600);
+        let recent = "print('recent')\n".repeat(600);
+        let mut messages = vec![
+            Message {
+                role: MessageRole::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "old_done".to_string(),
+                    name: "write_file".to_string(),
+                    input: serde_json::json!({"path":"big.py","content": huge}),
+                }],
+                cache_control: None,
+            },
+            user_with_tool_result("old_done", "ok"),
+        ];
+        for i in 0..TOOL_USE_INPUT_RECENT_MESSAGE_WINDOW {
+            messages.push(user_msg(&format!("recent context {i}")));
+        }
+        messages.push(Message {
+            role: MessageRole::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "recent_done".to_string(),
+                name: "write_file".to_string(),
+                input: serde_json::json!({"path":"recent.py","content": recent}),
+            }],
+            cache_control: None,
+        });
+        messages.push(user_with_tool_result("recent_done", "ok"));
+        messages.push(Message {
+            role: MessageRole::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "pending".to_string(),
+                name: "write_file".to_string(),
+                input: serde_json::json!({"path":"pending.py","content": "x".repeat(5000)}),
+            }],
+            cache_control: None,
+        });
+
+        let compacted = compact_large_tool_use_inputs(&mut messages);
+        assert_eq!(compacted, 1);
+        let ContentBlock::ToolUse { input, .. } = &messages[0].content[0] else {
+            panic!("expected tool use");
+        };
+        assert_eq!(input["__tool_use_input_compacted__"], true);
+        assert_eq!(input["__non_executable_history_stub__"], true);
+        assert_eq!(input["original_path"], "big.py");
+        assert!(input.get("path").is_none());
+        assert!(input.get("excerpt").is_none());
+        assert!(input.get("command_excerpt").is_none());
+        assert!(input.get("__tool_use_input_excerpt__").is_some());
+        assert!(serde_json::to_string(input).unwrap().len() < 1400);
+        let ContentBlock::ToolUse { input, .. } = &messages[messages.len() - 3].content[0] else {
+            panic!("expected recent tool use");
+        };
+        assert!(input.get("__tool_use_input_compacted__").is_none());
+        assert!(input.get("content").is_some());
+        let ContentBlock::ToolUse { input, .. } = &messages[messages.len() - 1].content[0] else {
+            panic!("expected pending tool use");
+        };
+        assert!(input.get("__tool_use_input_compacted__").is_none());
+        assert!(input.get("content").is_some());
+    }
+
     /// messages 太少时 microcompact 不动手——避免短任务上下文丢失。
     #[test]
     fn microcompact_noop_for_short_history() {
@@ -4106,6 +6394,60 @@ mod context_compaction_tests {
         // tokens 下降（用近似估算）
         let after_tokens = approximate_tokens(&messages);
         assert!(after_tokens < before_tokens, "压缩后 tokens 必须下降");
+    }
+
+    #[test]
+    fn microcompact_does_not_orphan_tool_result() {
+        let mut messages: Vec<Message> = vec![
+            user_msg(&"warmup ".repeat(20)),
+            assistant_with_tool_use("read_file", "tu_boundary"),
+            user_with_tool_result("tu_boundary", &"result ".repeat(20)),
+        ];
+        for i in 0..5 {
+            messages.push(user_msg(&format!("later user msg {i} ").repeat(20)));
+        }
+
+        let report =
+            microcompact(&mut messages).expect("should compact with pairing-safe boundary");
+        assert_eq!(report.dropped_messages, 3);
+        assert!(messages.iter().all(|msg| {
+            !msg.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tu_boundary"
+                )
+            })
+        }));
+    }
+
+    #[test]
+    fn reactive_compact_does_not_orphan_tool_result() {
+        let mut messages: Vec<Message> = vec![
+            user_msg(&"warmup ".repeat(20)),
+            assistant_with_tool_use("read_file", "tu_boundary"),
+            user_with_tool_result("tu_boundary", &"result ".repeat(20)),
+            user_msg(&"later ".repeat(20)),
+        ];
+
+        let report = reactive_compact_aggressive(&mut messages)
+            .expect("should compact with pairing-safe boundary");
+        assert_eq!(report.dropped_messages, 1);
+        assert!(messages.iter().any(|msg| {
+            msg.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::ToolUse { id, .. } if id == "tu_boundary"
+                )
+            })
+        }));
+        assert!(messages.iter().any(|msg| {
+            msg.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tu_boundary"
+                )
+            })
+        }));
     }
 
     // ---- Single-Agent Uplift P0-1: reactive compact ----
@@ -4170,6 +6512,492 @@ mod context_compaction_tests {
         }
         // 总数 = 原数 - drop + 1（summary）
         assert_eq!(messages.len(), before_count - report.dropped_messages + 1);
+    }
+
+    #[test]
+    fn working_memory_compact_triggers_before_microcompact_and_keeps_refs() {
+        let mut messages: Vec<Message> = Vec::new();
+        messages.push(user_msg(
+            "Create report.md and inspect .miragenty/evidence/a/step-0001/t/stdout.txt",
+        ));
+        for i in 0..14 {
+            messages.push(assistant_with_tool_use("read_file", &format!("wm_tu_{i}")));
+            let content = if i == 0 {
+                "     1|Meeting notes:\n     2|The deployment report captured 7 service checks in the release checklist.\n     3|The smoke-test workflow can finish in 1-2 steps through scripted validation."
+                    .to_string()
+            } else {
+                format!(
+                    "read src/file_{i}.rs and report_{i}.md with useful facts {}",
+                    "x".repeat(200)
+                )
+            };
+            messages.push(user_with_tool_result(&format!("wm_tu_{i}"), &content));
+        }
+        assert!(approximate_tokens(&messages) < MICROCOMPACT_TOKEN_THRESHOLD);
+        assert!(should_working_memory_compact(&messages));
+        let report =
+            working_memory_compact(&mut messages).expect("working memory compact should run");
+        assert!(report.dropped_messages > 0);
+        if let ContentBlock::Text { text } = &messages[0].content[0] {
+            assert!(text.starts_with("[working-memory]"));
+            assert!(text.contains("read_file"));
+            assert!(text.contains(".miragenty/evidence/a/step-0001/t/stdout.txt"));
+            assert!(text.contains("report.md"));
+            assert!(text.contains("Key compacted observations"));
+            assert!(text.contains("7 service checks"));
+            assert!(text.contains("1-2 steps through scripted validation"));
+        } else {
+            panic!("working memory summary must be text");
+        }
+    }
+
+    #[test]
+    fn guardrail_precheck_starts_before_final_tool_window() {
+        assert!(GUARDRAIL_PRECHECK_REMAINING_STEPS > STEPS_REMAINING_HINT);
+        assert!(ARTIFACT_CHECKPOINT_REMAINING_STEPS > STEPS_REMAINING_HINT);
+    }
+
+    #[test]
+    fn long_task_policy_blocks_planning_only_near_end() {
+        assert!(long_task_policy_allows_tool(
+            "todo_write",
+            LONG_TASK_FINALIZATION_STEPS + 1
+        ));
+        assert!(!long_task_policy_allows_tool(
+            "todo_write",
+            LONG_TASK_FINALIZATION_STEPS
+        ));
+        assert!(!long_task_policy_allows_tool("enter_plan_mode", 1));
+        assert!(long_task_policy_allows_tool("write_file", 1));
+        assert!(long_task_policy_allows_tool("task_complete", 0));
+        let feedback = long_task_policy_feedback("todo_write", 3);
+        assert!(feedback.contains("finalization phase"));
+        assert!(feedback.contains("task_complete"));
+    }
+
+    #[test]
+    fn read_only_loop_blocks_only_more_reading() {
+        assert!(!read_only_loop_allows_tool(
+            "read_file",
+            &serde_json::json!({})
+        ));
+        assert!(!read_only_loop_allows_tool("grep", &serde_json::json!({})));
+        assert!(!read_only_loop_allows_tool("glob", &serde_json::json!({})));
+        assert!(!read_only_loop_allows_tool(
+            "list_files",
+            &serde_json::json!({})
+        ));
+        assert!(!read_only_loop_allows_tool(
+            "shell_exec",
+            &serde_json::json!({"command": "find . -name requirements.txt | head -20"})
+        ));
+        assert!(!read_only_loop_allows_tool(
+            "shell_exec",
+            &serde_json::json!({"command": "curl -s https://example.com | head -20"})
+        ));
+        assert!(tool_is_read_only_loop_exploration(
+            "shell_exec",
+            &serde_json::json!({"command": "curl -s https://example.com | head -20"})
+        ));
+        assert!(read_only_loop_allows_tool(
+            "write_file",
+            &serde_json::json!({})
+        ));
+        assert!(read_only_loop_allows_tool(
+            "shell_exec",
+            &serde_json::json!({"command": "python3 create_ppt.py"})
+        ));
+        assert!(!read_only_loop_allows_tool(
+            "shell_exec",
+            &serde_json::json!({"command": "curl https://example.com/paper"})
+        ));
+        assert!(read_only_loop_allows_tool(
+            "shell_exec",
+            &serde_json::json!({"command": "curl -L https://example.com/figure.png -o figure.png"})
+        ));
+        assert!(read_only_loop_allows_tool(
+            "shell_exec",
+            &serde_json::json!({"command": "wget https://example.com/data.csv -O data.csv"})
+        ));
+        let feedback = read_only_loop_block_feedback(
+            "read_file",
+            &["presentation.pptx".into(), "presentation_notes.md".into()],
+        );
+        assert!(feedback.contains("read/search loop"));
+        assert!(feedback.contains("presentation.pptx"));
+    }
+
+    #[test]
+    fn direct_output_loop_feedback_requires_task_complete() {
+        assert!(has_direct_response_guardrail(&[
+            Guardrail::SummaryMatches {
+                mode: crate::agent::guardrail::SummaryMatchMode::JsonCodeBlock,
+            },
+            Guardrail::SummaryJsonValid {
+                require_non_empty: true,
+            },
+        ]));
+        assert!(!has_direct_response_guardrail(&[
+            Guardrail::FilesNonEmpty {
+                globs: vec!["report.md".into()],
+            }
+        ]));
+        let feedback = direct_output_loop_block_feedback("grep");
+        assert!(feedback.contains("direct-response task"));
+        assert!(feedback.contains("task_complete.summary"));
+        assert!(feedback.contains("Do not write files"));
+    }
+
+    #[test]
+    fn required_file_outputs_collects_file_guardrails() {
+        let opts = AgentRunOptions {
+            guardrails: vec![
+                Guardrail::FilesNonEmpty {
+                    globs: vec!["report.json".into()],
+                },
+                Guardrail::FilesJsonValid {
+                    globs: vec!["report.json".into(), "notes/*.json".into()],
+                    require_non_empty: true,
+                },
+                Guardrail::SummaryNonEmpty,
+            ],
+            ..AgentRunOptions::default()
+        };
+        assert_eq!(
+            required_file_outputs(&opts),
+            vec!["notes/*.json".to_string(), "report.json".to_string()]
+        );
+    }
+
+    #[test]
+    fn required_files_status_tracks_missing_empty_and_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("present.json"), "{\"ok\":true}").unwrap();
+        std::fs::write(tmp.path().join("empty.json"), "").unwrap();
+        let globs = vec![
+            "present.json".to_string(),
+            "empty.json".to_string(),
+            "missing.json".to_string(),
+        ];
+        let (present, missing) = required_files_status(tmp.path(), &globs);
+        assert_eq!(present, vec!["present.json".to_string()]);
+        assert_eq!(
+            missing,
+            vec!["empty.json".to_string(), "missing.json".to_string()]
+        );
+    }
+
+    #[test]
+    fn required_files_status_treats_placeholder_json_as_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("skeleton.json"),
+            r#"{
+              "base_model": "",
+              "hardware_env": "",
+              "critical_libs": [],
+              "is_feasible_on_8xa100_80gb": false,
+              "reason": ""
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("ready.json"),
+            r#"{
+              "base_model": "Qwen2.5-32B",
+              "hardware_env": "8xA100 80GB",
+              "critical_libs": ["verl", "vllm", "torch"],
+              "is_feasible_on_8xa100_80gb": true,
+              "reason": "Model and optimizer state fit with tensor parallelism."
+            }"#,
+        )
+        .unwrap();
+
+        let globs = vec!["skeleton.json".to_string(), "ready.json".to_string()];
+        let (present, missing) = required_files_status(tmp.path(), &globs);
+        assert_eq!(present, vec!["ready.json".to_string()]);
+        assert_eq!(missing, vec!["skeleton.json".to_string()]);
+    }
+
+    #[test]
+    fn artifact_checkpoint_allows_delivery_and_artifact_shell_only() {
+        for name in [
+            "write_file",
+            "edit_file",
+            "notebook_edit",
+            "publish_artifact",
+            "task_complete",
+        ] {
+            assert!(artifact_checkpoint_allows_tool(
+                name,
+                &serde_json::json!({})
+            ));
+        }
+
+        assert!(artifact_checkpoint_allows_tool(
+            "shell_exec",
+            &serde_json::json!({"command": "python3 create_ppt.py && test -s presentation.pptx"})
+        ));
+        assert!(artifact_checkpoint_allows_tool(
+            "shell_exec",
+            &serde_json::json!({"command": "node render.js > report.json"})
+        ));
+        assert!(artifact_checkpoint_allows_tool(
+            "shell_exec",
+            &serde_json::json!({"command": "python3 create_ppt.py"})
+        ));
+        assert!(artifact_checkpoint_allows_tool(
+            "shell_exec",
+            &serde_json::json!({"command": "chmod +x create_pptx.py && ./create_pptx.py"})
+        ));
+        assert!(artifact_checkpoint_allows_tool(
+            "shell_exec",
+            &serde_json::json!({"command": "python3 - <<'PY'\nfrom pptx import Presentation\nprs = Presentation()\nprs.save('presentation.pptx')\nPY"})
+        ));
+        assert!(artifact_checkpoint_allows_tool(
+            "shell_exec",
+            &serde_json::json!({"command": "cat > build_pptx.py <<'PY'\nfrom pptx import Presentation\nprs = Presentation()\nprs.save('presentation.pptx')\nPY"})
+        ));
+        assert!(artifact_checkpoint_allows_tool(
+            "shell_exec",
+            &serde_json::json!({"command": "python3 - <<'PY'\nfrom pathlib import Path\nPath('generate_artifacts.py').write_text('print(1)')\nPY"})
+        ));
+
+        for name in [
+            "read_file",
+            "grep",
+            "search_files",
+            "glob",
+            "list_files",
+            "todo_write",
+            "enter_plan_mode",
+        ] {
+            assert!(!artifact_checkpoint_allows_tool(
+                name,
+                &serde_json::json!({})
+            ));
+        }
+        assert!(!artifact_checkpoint_allows_tool(
+            "shell_exec",
+            &serde_json::json!({"command": "curl https://example.com/paper"})
+        ));
+        assert!(!artifact_checkpoint_allows_tool(
+            "shell_exec",
+            &serde_json::json!({"command": "python3 -c \"lines=open('create_pptx.py').readlines(); print(lines[160])\""})
+        ));
+        assert!(!artifact_checkpoint_allows_tool(
+            "shell_exec",
+            &serde_json::json!({"command": "grep -n Method paper.txt"})
+        ));
+    }
+
+    #[test]
+    fn urgent_artifact_checkpoint_focuses_on_missing_artifacts() {
+        let missing = vec![
+            "presentation.pptx".to_string(),
+            "presentation_notes.md".to_string(),
+        ];
+        assert!(artifact_checkpoint_allows_tool_for_remaining_steps(
+            "write_file",
+            &serde_json::json!({"path":"presentation_notes.md","content":"notes"}),
+            &missing,
+            1,
+        ));
+        assert!(artifact_checkpoint_allows_tool_for_remaining_steps(
+            "write_file",
+            &serde_json::json!({"path":"build_pptx.py","content":"script"}),
+            &missing,
+            1,
+        ));
+        assert!(artifact_checkpoint_allows_tool_for_remaining_steps(
+            "shell_exec",
+            &serde_json::json!({"command":"python3 - <<'PY'\nfrom pathlib import Path\nPath('presentation.pptx').write_bytes(b'pptx')\nPath('presentation_notes.md').write_text('notes')\nPY"}),
+            &missing,
+            1,
+        ));
+        assert!(!artifact_checkpoint_allows_tool_for_remaining_steps(
+            "read_file",
+            &serde_json::json!({"path":"presentation.pptx"}),
+            &missing,
+            1,
+        ));
+        assert!(artifact_checkpoint_allows_tool_for_remaining_steps(
+            "shell_exec",
+            &serde_json::json!({"command":"python3 inspect_ppt.py presentation.pptx"}),
+            &missing,
+            1,
+        ));
+        assert!(artifact_checkpoint_allows_tool_for_remaining_steps(
+            "shell_exec",
+            &serde_json::json!({"command":"python3 -c \"open('presentation.pptx','wb').write(b'x')\""}),
+            &missing,
+            1,
+        ));
+        assert!(!artifact_checkpoint_allows_tool_for_remaining_steps(
+            "shell_exec",
+            &serde_json::json!({"command":"python3 inspect_ppt.py presentation.pptx"}),
+            &missing,
+            4,
+        ));
+    }
+    #[test]
+    fn artifact_checkpoint_feedback_names_missing_files() {
+        let feedback = artifact_checkpoint_feedback(
+            "read_file",
+            &["presentation.pptx".into(), "presentation_notes.md".into()],
+            12,
+        );
+        assert!(feedback.contains("read_file"));
+        assert!(feedback.contains("12 step"));
+        assert!(feedback.contains("presentation.pptx"));
+        assert!(feedback.contains("presentation_notes.md"));
+        assert!(feedback.contains("Create or repair") || feedback.contains("Create the missing"));
+        assert!(feedback.contains("do not patch or inspect helper scripts"));
+    }
+    #[test]
+    fn timeout_finalization_allows_only_delivery_tools() {
+        let empty = serde_json::json!({});
+        assert!(finalization_allows_tool("write_file", &empty));
+        assert!(finalization_allows_tool("edit_file", &empty));
+        assert!(finalization_allows_tool("notebook_edit", &empty));
+        assert!(finalization_allows_tool("publish_artifact", &empty));
+        assert!(finalization_allows_tool("task_complete", &empty));
+        assert!(!finalization_allows_tool("read_file", &empty));
+        assert!(!finalization_allows_tool("grep", &empty));
+        assert!(!finalization_allows_tool(
+            "shell_exec",
+            &serde_json::json!({"command": "python3 -c \"from PIL import Image; print('PIL available')\""})
+        ));
+        assert!(finalization_allows_tool(
+            "shell_exec",
+            &serde_json::json!({"command": "python3 create_ppt.py && test -s presentation.pptx"})
+        ));
+    }
+
+    #[test]
+    fn malformed_write_file_recovery_escalates_and_resets_after_delivery() {
+        let malformed_input = serde_json::json!({
+            crate::llm::ARG_PARSE_ERROR_KEY: "invalid JSON: EOF while parsing a string",
+            crate::llm::ARG_RAW_KEY: r#"{"path":"gen.py","content":"unterminated"#,
+        });
+        assert!(tool_input_has_arg_parse_error(&malformed_input));
+
+        let malformed_block = (
+            "tu_bad".to_string(),
+            "write_file".to_string(),
+            malformed_input,
+        );
+        let malformed_output = Some(crate::tools::ToolOutput {
+            content: serde_json::json!({"error":"missing_or_invalid_arguments"}).to_string(),
+            is_error: true,
+            meta: None,
+        });
+        let mut state = InvalidToolArgsRecoveryState::default();
+        let first = state
+            .observe_tool_batch(
+                &[malformed_block.clone()],
+                &[malformed_output.clone()],
+                &["presentation.pptx".into()],
+            )
+            .expect("first malformed write should hint");
+        assert!(first.contains("Do not retry a large write_file payload"));
+        assert_eq!(state.malformed_write_file_count, 1);
+
+        let second = state
+            .observe_tool_batch(
+                &[malformed_block.clone()],
+                &[malformed_output.clone()],
+                &["presentation.pptx".into()],
+            )
+            .expect("second malformed write should escalate");
+        assert!(second.contains("Recovery Escalation"));
+        assert!(second.contains("malformed 2 times"));
+        assert!(second.contains("shell command or heredoc"));
+
+        let partial_block = (
+            "tu_partial".to_string(),
+            "write_file".to_string(),
+            serde_json::json!({"path":"gen_ppt.py","append":true,"content":"partial"}),
+        );
+        let partial_output = Some(crate::tools::ToolOutput {
+            content: "Appended 7 bytes".to_string(),
+            is_error: false,
+            meta: None,
+        });
+        assert!(state
+            .observe_tool_batch(
+                &[partial_block],
+                &[partial_output],
+                &["presentation.pptx".into()]
+            )
+            .is_none());
+        assert_eq!(state.malformed_write_file_count, 2);
+
+        let third = state
+            .observe_tool_batch(
+                &[malformed_block.clone()],
+                &[malformed_output.clone()],
+                &["presentation.pptx".into()],
+            )
+            .expect("malformed write after partial delivery should keep escalating");
+        assert!(third.contains("malformed 3 times"));
+
+        let valid_block = (
+            "tu_ok".to_string(),
+            "shell_exec".to_string(),
+            serde_json::json!({"command":"python3 create_ppt.py && test -s presentation.pptx"}),
+        );
+        let valid_output = Some(crate::tools::ToolOutput {
+            content: "ok".to_string(),
+            is_error: false,
+            meta: None,
+        });
+        assert!(state
+            .observe_tool_batch(&[valid_block], &[valid_output], &[])
+            .is_none());
+        assert_eq!(state.malformed_write_file_count, 0);
+    }
+
+    #[test]
+    fn no_tool_progress_hint_handles_hidden_reasoning_only() {
+        let visible = no_tool_progress_hint(2, true);
+        assert!(visible.contains("task_complete"));
+        assert!(visible.contains("2 replies"));
+
+        let hidden_only = no_tool_progress_hint(2, false);
+        assert!(hidden_only.contains("no visible answer"));
+        assert!(hidden_only.contains("hidden reasoning only"));
+    }
+
+    #[test]
+    fn guardrail_repair_instruction_preserves_exact_feedback_and_guides_length_rewrite() {
+        let feedback = "[Guardrail Check Failed]\n- command_passes ✗ FAILED: analysis_report.md length must be 600-1200 non-whitespace chars, got 1962\n- command_passes ✗ FAILED: missing required header: # 风险与建议\n- command_passes ✗ FAILED: final response facts should preserve exact source marker(s): service-level objective";
+        let instruction = guardrail_repair_instruction(
+            feedback,
+            &["analysis_report.md".to_string(), "summary.json".to_string()],
+        );
+        assert!(instruction.contains("[System][Guardrail Repair]"));
+        assert!(instruction.contains("analysis_report.md, summary.json"));
+        assert!(instruction.contains("Length/shape repair"));
+        assert!(instruction.contains("condense each section"));
+        assert!(instruction.contains("Header repair"));
+        assert!(instruction.contains("Source-marker repair"));
+        assert!(instruction.contains("preserve all source marker substrings"));
+        assert!(instruction.contains("fix only the latest missing marker"));
+        assert!(instruction.contains(feedback));
+    }
+
+    #[test]
+    fn shell_nested_agent_detection_blocks_recursive_cli() {
+        assert!(shell_command_invokes_nested_agent(&serde_json::json!({
+            "command": "claude -p 'extract facts'"
+        })));
+        assert!(shell_command_invokes_nested_agent(&serde_json::json!({
+            "command": "npx claude --print 'delegate'"
+        })));
+        assert!(!shell_command_invokes_nested_agent(&serde_json::json!({
+            "command": "python3 scripts/extract.py"
+        })));
     }
 
     /// reactive_compact_aggressive 比 microcompact 更激进：drop 一半而非 1/3。

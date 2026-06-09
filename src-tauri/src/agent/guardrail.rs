@@ -15,6 +15,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::time::Duration;
 
@@ -32,6 +33,16 @@ pub enum Guardrail {
     FilesNonEmpty {
         globs: Vec<String>,
     },
+    SummaryNonEmpty,
+    SummaryJsonValid {
+        #[serde(default)]
+        require_non_empty: bool,
+    },
+    FilesJsonValid {
+        globs: Vec<String>,
+        #[serde(default)]
+        require_non_empty: bool,
+    },
     SummaryMatches {
         mode: SummaryMatchMode,
     },
@@ -42,7 +53,6 @@ pub enum Guardrail {
     },
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SummaryMatchMode {
@@ -50,7 +60,6 @@ pub enum SummaryMatchMode {
     TextCodeBlock,
     ExactOk,
 }
-
 
 fn default_cmd_timeout() -> u32 {
     60
@@ -62,6 +71,9 @@ impl Guardrail {
             Self::ArtifactsExist => "artifacts_exist",
             Self::CommandPasses { .. } => "command_passes",
             Self::FilesNonEmpty { .. } => "files_non_empty",
+            Self::SummaryNonEmpty => "summary_non_empty",
+            Self::SummaryJsonValid { .. } => "summary_json_valid",
+            Self::FilesJsonValid { .. } => "files_json_valid",
             Self::SummaryMatches { .. } => "summary_matches",
             Self::LlmJudge { .. } => "llm_judge",
         }
@@ -165,6 +177,14 @@ async fn run_single(
             working_dir,
         } => check_command_passes(cmd, *timeout_sec, working_dir.as_deref(), ctx).await,
         Guardrail::FilesNonEmpty { globs } => check_files_non_empty(globs, ctx),
+        Guardrail::SummaryNonEmpty => check_summary_non_empty(ctx),
+        Guardrail::SummaryJsonValid { require_non_empty } => {
+            check_summary_json_valid(*require_non_empty, ctx)
+        }
+        Guardrail::FilesJsonValid {
+            globs,
+            require_non_empty,
+        } => check_files_json_valid(globs, *require_non_empty, ctx),
         Guardrail::SummaryMatches { mode } => check_summary_matches(mode, ctx),
         Guardrail::LlmJudge { criteria, model } => {
             check_llm_judge(criteria, model.as_deref(), ctx).await
@@ -276,6 +296,13 @@ struct LlmJudgeVerdict {
 }
 
 fn parse_judge_response(text: &str) -> Result<LlmJudgeVerdict> {
+    let json_slice = extract_json_value_slice(text)?;
+    let v: LlmJudgeVerdict = serde_json::from_str(json_slice)
+        .with_context(|| format!("invalid JSON: {}", truncate(json_slice, 400)))?;
+    Ok(v)
+}
+
+fn extract_json_value_slice(text: &str) -> Result<&str> {
     let trimmed = text.trim();
     let body = if trimmed.starts_with("```") {
         let after_first_nl = trimmed
@@ -287,19 +314,36 @@ fn parse_judge_response(text: &str) -> Result<LlmJudgeVerdict> {
     } else {
         trimmed
     };
-    let start = body
-        .find('{')
-        .ok_or_else(|| anyhow!("no '{{' in response"))?;
+    let object_start = body.find('{');
+    let array_start = body.find('[');
+    let (start, end_char) = match (object_start, array_start) {
+        (Some(o), Some(a)) if a < o => (a, ']'),
+        (Some(o), _) => (o, '}'),
+        (None, Some(a)) => (a, ']'),
+        (None, None) => {
+            if body == "null" || body.starts_with('"') {
+                return Ok(body);
+            }
+            anyhow::bail!("no JSON object, array, string, or null in response")
+        }
+    };
     let end = body
-        .rfind('}')
-        .ok_or_else(|| anyhow!("no '}}' in response"))?;
+        .rfind(end_char)
+        .ok_or_else(|| anyhow!("no closing `{end_char}` in response"))?;
     if end < start {
-        anyhow::bail!("malformed JSON braces");
+        anyhow::bail!("malformed JSON delimiters");
     }
-    let json_slice = &body[start..=end];
-    let v: LlmJudgeVerdict = serde_json::from_str(json_slice)
-        .with_context(|| format!("invalid JSON: {}", truncate(json_slice, 400)))?;
-    Ok(v)
+    Ok(&body[start..=end])
+}
+
+fn json_value_is_empty(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => true,
+        serde_json::Value::String(s) => s.trim().is_empty(),
+        serde_json::Value::Array(a) => a.is_empty(),
+        serde_json::Value::Object(o) => o.is_empty(),
+        _ => false,
+    }
 }
 
 // ---- ArtifactsExist ----
@@ -371,6 +415,10 @@ async fn check_command_passes(
         .arg("-c")
         .arg(cmd)
         .current_dir(&cwd)
+        .env(
+            "MIRAGENTY_TASK_COMPLETE_SUMMARY",
+            ctx.completion_summary.as_deref().unwrap_or(""),
+        )
         .output();
     let timeout_dur = Duration::from_secs(timeout_sec.max(1) as u64);
     let output = tokio::time::timeout(timeout_dur, fut)
@@ -383,11 +431,30 @@ async fn check_command_passes(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     Err(anyhow!(
-        "command failed (exit {:?}) `{cmd}`\n[stdout]\n{}\n[stderr]\n{}",
+        "command failed (exit {:?}); command_len={} command_hash16={}\n[stdout_tail]\n{}\n[stderr_tail]\n{}",
         output.status.code(),
-        truncate(&stdout, 2000),
-        truncate(&stderr, 2000)
+        cmd.chars().count(),
+        hash16(cmd),
+        truncate_tail(&stdout, 1200),
+        truncate_tail(&stderr, 1200)
     ))
+}
+
+fn hash16(s: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn truncate_tail(s: &str, n: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= n {
+        s.to_string()
+    } else {
+        let mut out = format!("…[omitted {} chars]\n", char_count - n);
+        out.extend(s.chars().skip(char_count - n));
+        out
+    }
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -413,12 +480,12 @@ fn check_files_non_empty(globs: &[String], ctx: &GuardrailContext<'_>) -> Result
         let mut any_match = false;
         for entry in glob::glob(&pattern_str).map_err(|e| anyhow!("invalid glob `{g}`: {e}"))? {
             let path = entry.map_err(|e| anyhow!("glob iter err for `{g}`: {e}"))?;
-            any_match = true;
             let metadata =
                 fs::metadata(&path).with_context(|| format!("stat `{}` failed", path.display()))?;
             if !metadata.is_file() {
                 continue;
             }
+            any_match = true;
             if metadata.len() == 0 {
                 return Err(anyhow!("file `{}` is empty", path.display()));
             }
@@ -430,14 +497,76 @@ fn check_files_non_empty(globs: &[String], ctx: &GuardrailContext<'_>) -> Result
     Ok(())
 }
 
+fn check_summary_non_empty(ctx: &GuardrailContext<'_>) -> Result<()> {
+    let summary = ctx.completion_summary.as_deref().unwrap_or("").trim();
+    if summary.is_empty() {
+        anyhow::bail!("task_complete.summary is empty; provide the actual final answer or artifact summary, not a blank completion")
+    }
+    Ok(())
+}
+
+fn check_summary_json_valid(require_non_empty: bool, ctx: &GuardrailContext<'_>) -> Result<()> {
+    let summary = ctx.completion_summary.as_deref().unwrap_or("").trim();
+    if summary.is_empty() {
+        anyhow::bail!("task_complete.summary is empty but valid JSON was required")
+    }
+    let json_slice = extract_json_value_slice(summary)
+        .with_context(|| "task_complete.summary must contain the requested JSON value")?;
+    let value: serde_json::Value = serde_json::from_str(json_slice).with_context(|| {
+        format!(
+            "task_complete.summary contains invalid JSON: {}",
+            truncate(json_slice, 400)
+        )
+    })?;
+    if require_non_empty && json_value_is_empty(&value) {
+        anyhow::bail!("task_complete.summary JSON is structurally empty; fill it with the real required fields or values before completing")
+    }
+    Ok(())
+}
+
+fn check_files_json_valid(
+    globs: &[String],
+    require_non_empty: bool,
+    ctx: &GuardrailContext<'_>,
+) -> Result<()> {
+    use std::fs;
+    if globs.is_empty() {
+        return Ok(());
+    }
+    for g in globs {
+        let pattern = ctx.repo_root.join(g);
+        let pattern_str = pattern.to_string_lossy().to_string();
+        let mut any_match = false;
+        for entry in glob::glob(&pattern_str).map_err(|e| anyhow!("invalid glob `{g}`: {e}"))? {
+            let path = entry.map_err(|e| anyhow!("glob iter err for `{g}`: {e}"))?;
+            let metadata =
+                fs::metadata(&path).with_context(|| format!("stat `{}` failed", path.display()))?;
+            if !metadata.is_file() {
+                continue;
+            }
+            any_match = true;
+            if metadata.len() == 0 {
+                anyhow::bail!("JSON file `{}` is empty", path.display());
+            }
+            let text = fs::read_to_string(&path)
+                .with_context(|| format!("read JSON file `{}` failed", path.display()))?;
+            let value: serde_json::Value = serde_json::from_str(&text)
+                .with_context(|| format!("file `{}` is not valid JSON", path.display()))?;
+            if require_non_empty && json_value_is_empty(&value) {
+                anyhow::bail!("JSON file `{}` is structurally empty; fill it with the required data before completing", path.display());
+            }
+        }
+        if !any_match {
+            return Err(anyhow!("no files match JSON glob `{g}`"));
+        }
+    }
+    Ok(())
+}
+
 // ---- SummaryMatches ----
 
 fn check_summary_matches(mode: &SummaryMatchMode, ctx: &GuardrailContext<'_>) -> Result<()> {
-    let summary = ctx
-        .completion_summary
-        .as_deref()
-        .unwrap_or("")
-        .trim();
+    let summary = ctx.completion_summary.as_deref().unwrap_or("").trim();
     match mode {
         SummaryMatchMode::JsonCodeBlock => {
             if !summary.contains("```json") || !summary.contains("```") {
@@ -496,16 +625,22 @@ mod tests {
             {"type":"artifacts_exist"},
             {"type":"command_passes","cmd":"echo hi","timeout_sec":5},
             {"type":"files_non_empty","globs":["src/**/*.rs"]},
+            {"type":"summary_non_empty"},
+            {"type":"summary_json_valid","require_non_empty":true},
+            {"type":"files_json_valid","globs":["*.json"],"require_non_empty":true},
             {"type":"summary_matches","mode":"json_code_block"},
             {"type":"llm_judge","criteria":"is the code idiomatic?"}
         ]"#;
         let g = parse_guardrails(json);
-        assert_eq!(g.len(), 5);
+        assert_eq!(g.len(), 8);
         assert_eq!(g[0].name(), "artifacts_exist");
         assert_eq!(g[1].name(), "command_passes");
         assert_eq!(g[2].name(), "files_non_empty");
-        assert_eq!(g[3].name(), "summary_matches");
-        assert_eq!(g[4].name(), "llm_judge");
+        assert_eq!(g[3].name(), "summary_non_empty");
+        assert_eq!(g[4].name(), "summary_json_valid");
+        assert_eq!(g[5].name(), "files_json_valid");
+        assert_eq!(g[6].name(), "summary_matches");
+        assert_eq!(g[7].name(), "llm_judge");
     }
 
     #[tokio::test]
@@ -559,6 +694,119 @@ mod tests {
         .await;
         assert!(r.all_passed);
     }
+    #[tokio::test]
+    async fn summary_json_valid_rejects_empty_json() {
+        let (db, mid, tid) = setup_db_with_mission_task();
+        let dir = TempDir::new().unwrap();
+        let ctx = GuardrailContext {
+            task_id: &tid,
+            mission_id: &mid,
+            repo_root: dir.path(),
+            expected_output: None,
+            produces: vec![],
+            task_description: None,
+            completion_summary: Some("```json\n{}\n```".to_string()),
+            llm: None,
+            default_model: None,
+        };
+        let r = run_guardrails(
+            &[Guardrail::SummaryJsonValid {
+                require_non_empty: true,
+            }],
+            &ctx,
+            &db,
+        )
+        .await;
+        assert!(!r.all_passed);
+        assert!(r.reports[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("structurally empty"));
+    }
+
+    #[tokio::test]
+    async fn summary_json_valid_accepts_fenced_json() {
+        let (db, mid, tid) = setup_db_with_mission_task();
+        let dir = TempDir::new().unwrap();
+        let ctx = GuardrailContext {
+            task_id: &tid,
+            mission_id: &mid,
+            repo_root: dir.path(),
+            expected_output: None,
+            produces: vec![],
+            task_description: None,
+            completion_summary: Some("```json\n{\"ok\":true}\n```".to_string()),
+            llm: None,
+            default_model: None,
+        };
+        let r = run_guardrails(
+            &[Guardrail::SummaryJsonValid {
+                require_non_empty: true,
+            }],
+            &ctx,
+            &db,
+        )
+        .await;
+        assert!(r.all_passed, "{:?}", r.reports);
+    }
+
+    #[tokio::test]
+    async fn files_json_valid_rejects_empty_object() {
+        let (db, mid, tid) = setup_db_with_mission_task();
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("report.json"), "{}").unwrap();
+        let ctx = GuardrailContext {
+            task_id: &tid,
+            mission_id: &mid,
+            repo_root: dir.path(),
+            expected_output: None,
+            produces: vec![],
+            task_description: None,
+            completion_summary: None,
+            llm: None,
+            default_model: None,
+        };
+        let r = run_guardrails(
+            &[Guardrail::FilesJsonValid {
+                globs: vec!["report.json".to_string()],
+                require_non_empty: true,
+            }],
+            &ctx,
+            &db,
+        )
+        .await;
+        assert!(!r.all_passed);
+    }
+
+    #[tokio::test]
+    async fn files_json_valid_accepts_non_empty_json() {
+        let (db, mid, tid) = setup_db_with_mission_task();
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("report.json"), "{\"answer\": 42}").unwrap();
+        let ctx = GuardrailContext {
+            task_id: &tid,
+            mission_id: &mid,
+            repo_root: dir.path(),
+            expected_output: None,
+            produces: vec![],
+            task_description: None,
+            completion_summary: None,
+            llm: None,
+            default_model: None,
+        };
+        let r = run_guardrails(
+            &[Guardrail::FilesJsonValid {
+                globs: vec!["report.json".to_string()],
+                require_non_empty: true,
+            }],
+            &ctx,
+            &db,
+        )
+        .await;
+        assert!(r.all_passed, "{:?}", r.reports);
+    }
+
     #[tokio::test]
     async fn artifacts_exist_passes_when_no_produces_declared() {
         let (db, mid, tid) = setup_db_with_mission_task();
@@ -717,6 +965,39 @@ mod tests {
         assert!(!r.all_passed);
         let err = r.reports[0].error.as_ref().unwrap();
         assert!(err.contains("exit"));
+        assert!(err.contains("command_len="));
+        assert!(err.contains("command_hash16="));
+        assert!(!err.contains("`exit 2`"));
+    }
+
+    #[tokio::test]
+    async fn command_passes_omits_long_command_body_on_failure() {
+        let (db, mid, tid) = setup_db_with_mission_task();
+        let dir = TempDir::new().unwrap();
+        let long_marker = "UNIQUE_LONG_GUARDRAIL_COMMAND_MARKER".repeat(80);
+        let g = Guardrail::CommandPasses {
+            cmd: format!("echo {long_marker} >&2; exit 9"),
+            timeout_sec: 5,
+            working_dir: None,
+        };
+        let ctx = GuardrailContext {
+            task_id: &tid,
+            mission_id: &mid,
+            repo_root: dir.path(),
+            expected_output: None,
+            produces: vec![],
+            task_description: None,
+            completion_summary: None,
+            llm: None,
+            default_model: None,
+        };
+        let r = run_guardrails(&[g], &ctx, &db).await;
+        assert!(!r.all_passed);
+        let err = r.reports[0].error.as_ref().unwrap();
+        assert!(err.contains("command_len="));
+        assert!(err.contains("command_hash16="));
+        assert!(err.contains("[stderr_tail]"));
+        assert!(!err.contains(&long_marker));
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use async_trait::async_trait;
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde_json::json;
 use tokio::sync::mpsc;
 
@@ -17,6 +17,8 @@ pub struct OpenAICompatProvider {
 }
 
 const DEFAULT_STREAM_IDLE_SECS: u64 = 60;
+const REQUEST_RETRY_ATTEMPTS: usize = 3;
+const REQUEST_RETRY_BASE_DELAY_MS: u64 = 500;
 
 /// Sentinel key 标记"LLM 这次 tool_use 的 arguments 解析失败 / 为空"。
 /// AgentEngine::dispatch_tool 入口看到 input 含该 key 时直接返回结构化错误，
@@ -270,6 +272,117 @@ impl OpenAICompatProvider {
         body
     }
 
+    fn proxy_env_present() -> bool {
+        [
+            "ALL_PROXY",
+            "all_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+        ]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some())
+    }
+
+    fn retry_delay(attempt_idx: usize) -> std::time::Duration {
+        std::time::Duration::from_millis(REQUEST_RETRY_BASE_DELAY_MS * (1 << attempt_idx))
+    }
+
+    fn should_retry_status(status: StatusCode) -> bool {
+        status == StatusCode::TOO_MANY_REQUESTS
+            || status == StatusCode::REQUEST_TIMEOUT
+            || status.is_server_error()
+    }
+
+    fn is_retryable_reqwest_error(err: &reqwest::Error) -> bool {
+        // Chat completions are non-idempotent POSTs. Without provider-side
+        // idempotency keys, retry only clear pre-request connection failures;
+        // do not retry timeout/body/request errors that may have already sent bytes.
+        err.is_connect()
+    }
+
+    async fn send_request_with_retries(
+        &self,
+        endpoint: &str,
+        body: &serde_json::Value,
+        stream: bool,
+        model: &str,
+    ) -> Result<reqwest::Response> {
+        let proxy_env_present = Self::proxy_env_present();
+        for attempt in 0..REQUEST_RETRY_ATTEMPTS {
+            let resp = self
+                .client
+                .post(endpoint)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(body)
+                .send()
+                .await;
+
+            match resp {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() {
+                        return Ok(resp);
+                    }
+
+                    let should_retry =
+                        Self::should_retry_status(status) && attempt + 1 < REQUEST_RETRY_ATTEMPTS;
+                    if should_retry {
+                        let delay = Self::retry_delay(attempt);
+                        tracing::warn!(
+                            provider = "openai_compat",
+                            model = %model,
+                            stream,
+                            attempt = attempt + 1,
+                            max_attempts = REQUEST_RETRY_ATTEMPTS,
+                            http_status = %status,
+                            proxy_env_present,
+                            retry_delay_ms = delay.as_millis() as u64,
+                            "OpenAI compat transient HTTP status; retrying request"
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Ok(resp);
+                }
+                Err(err) => {
+                    let should_retry = Self::is_retryable_reqwest_error(&err)
+                        && attempt + 1 < REQUEST_RETRY_ATTEMPTS;
+                    if should_retry {
+                        let delay = Self::retry_delay(attempt);
+                        tracing::warn!(
+                            provider = "openai_compat",
+                            model = %model,
+                            stream,
+                            attempt = attempt + 1,
+                            max_attempts = REQUEST_RETRY_ATTEMPTS,
+                            proxy_env_present,
+                            retry_delay_ms = delay.as_millis() as u64,
+                            error = %err,
+                            "OpenAI compat request failed; retrying request"
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    tracing::error!(
+                        provider = "openai_compat",
+                        model = %model,
+                        stream,
+                        attempt = attempt + 1,
+                        max_attempts = REQUEST_RETRY_ATTEMPTS,
+                        proxy_env_present,
+                        error = %err,
+                        "OpenAI compat request failed after retries"
+                    );
+                    return Err(err.into());
+                }
+            }
+        }
+        unreachable!("request retry loop always returns")
+    }
+
     fn parse_response(&self, data: &serde_json::Value) -> Result<LlmResponse> {
         let choice = &data["choices"][0];
         let message = &choice["message"];
@@ -352,17 +465,8 @@ impl LlmProvider for OpenAICompatProvider {
         );
 
         let resp = self
-            .client
-            .post(&self.endpoint())
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::error!("OpenAI compat request failed: {e}");
-                e
-            })?;
+            .send_request_with_retries(&self.endpoint(), &body, false, &request.model)
+            .await?;
 
         let status = resp.status();
         tracing::debug!("OpenAI compat response status: {status}");
@@ -404,12 +508,7 @@ impl LlmProvider for OpenAICompatProvider {
         );
 
         let resp = self
-            .client
-            .post(&endpoint)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
+            .send_request_with_retries(&endpoint, &body, true, &request.model)
             .await?;
 
         let connect_ms = stream_started.elapsed().as_millis() as u64;
@@ -795,9 +894,46 @@ impl LlmProvider for OpenAICompatProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn provider() -> OpenAICompatProvider {
         OpenAICompatProvider::new("k".into(), "https://example.com".into())
+    }
+
+    #[test]
+    fn proxy_env_detection_checks_standard_proxy_vars() {
+        let _guard = env_lock().lock().unwrap();
+        let keys = [
+            "ALL_PROXY",
+            "all_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+        ];
+        let previous = keys
+            .iter()
+            .map(|key| (*key, std::env::var_os(key)))
+            .collect::<Vec<_>>();
+        for key in keys {
+            std::env::remove_var(key);
+        }
+        assert!(!OpenAICompatProvider::proxy_env_present());
+        std::env::set_var("ALL_PROXY", "http://127.0.0.1:7890");
+        assert!(OpenAICompatProvider::proxy_env_present());
+        std::env::remove_var("ALL_PROXY");
+        for (key, value) in previous {
+            if let Some(value) = value {
+                std::env::set_var(key, value);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
     }
 
     /// Bug: DeepSeek-R1 / V4 / QwQ 等推理模型上一轮的 reasoning_content

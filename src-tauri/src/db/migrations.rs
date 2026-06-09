@@ -1062,6 +1062,103 @@ const MIGRATIONS: &[(&str, &str)] = &[
             ON benchmark_grader_artifacts(result_id, created_at DESC);
         "#,
     ),
+    (
+        "036_benchmark_context_policy_metrics",
+        r#"
+        ALTER TABLE benchmark_metric_snapshots ADD COLUMN context_saved_chars INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE benchmark_metric_snapshots ADD COLUMN tool_result_ref_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE benchmark_metric_snapshots ADD COLUMN tool_result_repeat_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE benchmark_metric_snapshots ADD COLUMN evidence_read_ref_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE benchmark_metric_snapshots ADD COLUMN shell_content_command_count INTEGER NOT NULL DEFAULT 0;
+        "#,
+    ),
+    (
+        "037_tool_result_policy_event_kind",
+        r#"
+        PRAGMA foreign_keys=OFF;
+
+        CREATE TABLE agent_events_new (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+            step INTEGER NOT NULL DEFAULT 0,
+            kind TEXT NOT NULL
+                CHECK (kind IN (
+                    'llm_call', 'tool_use', 'tool_result', 'checkpoint',
+                    'error', 'message', 'status_change', 'review',
+                    'system_hint', 'guardrail_pass', 'guardrail_fail',
+                    'guardrail_summary', 'note_applied',
+                    'tool_progress', 'tool_summary', 'compact', 'todo_update',
+                    'recovery_attempt', 'recovery_succeeded',
+                    'hook_executed', 'hook_inject', 'hook_prevented',
+                    'tool_result_policy'
+                )),
+            content TEXT NOT NULL DEFAULT '',
+            meta TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        INSERT INTO agent_events_new (id, agent_id, step, kind, content, meta, created_at)
+            SELECT id, agent_id, step, kind, content, meta, created_at FROM agent_events;
+
+        DROP TABLE agent_events;
+        ALTER TABLE agent_events_new RENAME TO agent_events;
+
+        CREATE INDEX IF NOT EXISTS idx_agent_events_agent ON agent_events(agent_id, created_at);
+
+        PRAGMA foreign_keys=ON;
+        "#,
+    ),
+    (
+        "038_benchmark_tool_result_budget_metrics",
+        r#"
+        ALTER TABLE benchmark_metric_snapshots ADD COLUMN persisted_tool_result_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE benchmark_metric_snapshots ADD COLUMN per_message_budget_replacement_count INTEGER NOT NULL DEFAULT 0;
+        "#,
+    ),
+    (
+        "039_benchmark_contract_validation_metrics",
+        r#"
+        ALTER TABLE benchmark_metric_snapshots ADD COLUMN contract_validation_attempt_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE benchmark_metric_snapshots ADD COLUMN contract_violation_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE benchmark_metric_snapshots ADD COLUMN contract_repair_retry_count INTEGER NOT NULL DEFAULT 0;
+        "#,
+    ),
+    (
+        "040_contract_validation_event_kinds",
+        r#"
+        PRAGMA foreign_keys=OFF;
+
+        CREATE TABLE agent_events_new (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+            step INTEGER NOT NULL DEFAULT 0,
+            kind TEXT NOT NULL
+                CHECK (kind IN (
+                    'llm_call', 'tool_use', 'tool_result', 'checkpoint',
+                    'error', 'message', 'status_change', 'review',
+                    'system_hint', 'guardrail_pass', 'guardrail_fail',
+                    'guardrail_summary', 'note_applied',
+                    'tool_progress', 'tool_summary', 'compact', 'todo_update',
+                    'recovery_attempt', 'recovery_succeeded',
+                    'hook_executed', 'hook_inject', 'hook_prevented',
+                    'tool_result_policy', 'contract_pass', 'contract_fail'
+                )),
+            content TEXT NOT NULL DEFAULT '',
+            meta TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        INSERT INTO agent_events_new (id, agent_id, step, kind, content, meta, created_at)
+            SELECT id, agent_id, step, kind, content, meta, created_at FROM agent_events;
+
+        DROP TABLE agent_events;
+        ALTER TABLE agent_events_new RENAME TO agent_events;
+
+        CREATE INDEX IF NOT EXISTS idx_agent_events_agent ON agent_events(agent_id, created_at);
+
+        PRAGMA foreign_keys=ON;
+        "#,
+    ),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

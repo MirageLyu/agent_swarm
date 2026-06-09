@@ -5,6 +5,7 @@ description = "Miragenty - AI Agent Swarm Commander"
 authors = ["miragelyu"]
 license = "GPL-3.0-only"
 edition = "2021"
+default-run = "miragenty"
 
 [lib]
 name = "miragenty_lib"
@@ -36,6 +37,7 @@ async-trait = "0.1"
 dirs = "6"
 tokio-util = "0.7.18"
 glob = "0.3"
+libc = "0.2"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

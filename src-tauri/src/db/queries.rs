@@ -2294,6 +2294,16 @@ pub struct BenchmarkMetricSnapshotRow {
     pub guardrail_retry_count: i64,
     pub recovery_attempt_count: i64,
     pub read_only_loop_hint_count: i64,
+    pub context_saved_chars: i64,
+    pub tool_result_ref_count: i64,
+    pub tool_result_repeat_count: i64,
+    pub evidence_read_ref_count: i64,
+    pub shell_content_command_count: i64,
+    pub persisted_tool_result_count: i64,
+    pub per_message_budget_replacement_count: i64,
+    pub contract_validation_attempt_count: i64,
+    pub contract_violation_count: i64,
+    pub contract_repair_retry_count: i64,
     pub raw_json: String,
     pub created_at: String,
 }
@@ -2494,8 +2504,18 @@ fn map_benchmark_metric_row(
         guardrail_retry_count: row.get(23)?,
         recovery_attempt_count: row.get(24)?,
         read_only_loop_hint_count: row.get(25)?,
-        raw_json: row.get(26)?,
-        created_at: row.get(27)?,
+        context_saved_chars: row.get(26)?,
+        tool_result_ref_count: row.get(27)?,
+        tool_result_repeat_count: row.get(28)?,
+        evidence_read_ref_count: row.get(29)?,
+        shell_content_command_count: row.get(30)?,
+        persisted_tool_result_count: row.get(31)?,
+        per_message_budget_replacement_count: row.get(32)?,
+        contract_validation_attempt_count: row.get(33)?,
+        contract_violation_count: row.get(34)?,
+        contract_repair_retry_count: row.get(35)?,
+        raw_json: row.get(36)?,
+        created_at: row.get(37)?,
     })
 }
 
@@ -2519,7 +2539,7 @@ const BENCHMARK_SUITE_COLUMNS: &str = "id, name, description, source_kind, sourc
 const BENCHMARK_CASE_COLUMNS: &str = "id, suite_id, task_id, task_type, source_suite, target_tool_or_capability, prompt, assets_json, expected_outputs_json, grader_json, expected_output, raw_json, case_hash, created_at";
 const BENCHMARK_RUN_COLUMNS: &str = "id, suite_id, name, status, agent_kind, provider, model, base_url_hash, agent_config_json, git_commit, git_dirty, benchmark_source_path, case_ids_json, timeout_seconds, max_steps, token_budget, cost_budget_usd, workspace_root, metadata_json, started_at, completed_at, created_at, updated_at";
 const BENCHMARK_RESULT_COLUMNS: &str = "id, run_id, case_id, agent_id, workspace_path, status, success, grading_status, final_response, artifact_refs_json, error_message, started_at, completed_at, created_at, updated_at";
-const BENCHMARK_METRIC_COLUMNS: &str = "id, run_id, result_id, scope, input_tokens, output_tokens, total_tokens, cost_usd, llm_request_count, tool_call_count, tool_result_count, tool_error_count, tool_call_count_by_name_json, runtime_ms, successful_case_count, graded_case_count, total_case_count, all_cases_tsr, graded_cases_tsr, token_per_success, tool_calls_per_success, requests_per_success, tool_error_rate, guardrail_retry_count, recovery_attempt_count, read_only_loop_hint_count, raw_json, created_at";
+const BENCHMARK_METRIC_COLUMNS: &str = "id, run_id, result_id, scope, input_tokens, output_tokens, total_tokens, cost_usd, llm_request_count, tool_call_count, tool_result_count, tool_error_count, tool_call_count_by_name_json, runtime_ms, successful_case_count, graded_case_count, total_case_count, all_cases_tsr, graded_cases_tsr, token_per_success, tool_calls_per_success, requests_per_success, tool_error_rate, guardrail_retry_count, recovery_attempt_count, read_only_loop_hint_count, context_saved_chars, tool_result_ref_count, tool_result_repeat_count, evidence_read_ref_count, shell_content_command_count, persisted_tool_result_count, per_message_budget_replacement_count, contract_validation_attempt_count, contract_violation_count, contract_repair_retry_count, raw_json, created_at";
 const BENCHMARK_GRADER_ARTIFACT_COLUMNS: &str = "id, result_id, grader_kind, command_json, exit_code, stdout_json, stderr, duration_ms, created_at";
 
 pub fn list_benchmark_suites(conn: &Connection) -> Result<Vec<BenchmarkSuiteRow>> {
@@ -2811,9 +2831,14 @@ pub fn insert_benchmark_metric_snapshot(
              tool_call_count_by_name_json, runtime_ms, successful_case_count, graded_case_count,
              total_case_count, all_cases_tsr, graded_cases_tsr, token_per_success,
              tool_calls_per_success, requests_per_success, tool_error_rate, guardrail_retry_count,
-             recovery_attempt_count, read_only_loop_hint_count, raw_json)
+             recovery_attempt_count, read_only_loop_hint_count, context_saved_chars,
+             tool_result_ref_count, tool_result_repeat_count, evidence_read_ref_count,
+             shell_content_command_count, persisted_tool_result_count,
+             per_message_budget_replacement_count, contract_validation_attempt_count,
+             contract_violation_count, contract_repair_retry_count, raw_json)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                 ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
+                 ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32,
+                 ?33, ?34, ?35, ?36, ?37)",
         params![
             id,
             run_id,
@@ -2841,6 +2866,16 @@ pub fn insert_benchmark_metric_snapshot(
             metrics.guardrail_retry_count,
             metrics.recovery_attempt_count,
             metrics.read_only_loop_hint_count,
+            metrics.context_saved_chars,
+            metrics.tool_result_ref_count,
+            metrics.tool_result_repeat_count,
+            metrics.evidence_read_ref_count,
+            metrics.shell_content_command_count,
+            metrics.persisted_tool_result_count,
+            metrics.per_message_budget_replacement_count,
+            metrics.contract_validation_attempt_count,
+            metrics.contract_violation_count,
+            metrics.contract_repair_retry_count,
             serde_json::to_string(raw_json)?,
         ],
     )?;

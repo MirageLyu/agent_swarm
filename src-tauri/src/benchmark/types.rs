@@ -91,6 +91,13 @@ impl BenchmarkGraderSpec {
             path: path.into(),
         }
     }
+
+    pub fn sop_bench() -> Self {
+        Self {
+            kind: crate::benchmark::sop_bench::SOP_GRADER_KIND.to_string(),
+            path: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,7 +149,7 @@ pub struct BenchmarkResult {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct BenchmarkMetrics {
     pub input_tokens: i64,
     pub output_tokens: i64,
@@ -166,6 +173,16 @@ pub struct BenchmarkMetrics {
     pub guardrail_retry_count: i64,
     pub recovery_attempt_count: i64,
     pub read_only_loop_hint_count: i64,
+    pub context_saved_chars: i64,
+    pub tool_result_ref_count: i64,
+    pub tool_result_repeat_count: i64,
+    pub evidence_read_ref_count: i64,
+    pub shell_content_command_count: i64,
+    pub persisted_tool_result_count: i64,
+    pub per_message_budget_replacement_count: i64,
+    pub contract_validation_attempt_count: i64,
+    pub contract_violation_count: i64,
+    pub contract_repair_retry_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

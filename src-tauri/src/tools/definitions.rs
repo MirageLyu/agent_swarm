@@ -66,13 +66,15 @@ fn builtin_tools_legacy() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "shell_exec".to_string(),
-            description: "Execute a shell command (sh -c). Killed by a watchdog when it goes \
+            description: "Execute a shell command (sh -c) in the agent's non-interactive environment, not an interactive login shell. Killed by a watchdog when it goes \
                           silent for too long or runs past the wall-clock cap. Default thresholds \
                           are 60s idle / 5min wall — set `expect_long_running: true` for known \
                           long commands like `npm install`, `pnpm install`, `cargo build`, \
                           `cargo test` (raises to 120s idle / 30min wall), or pass \
                           `timeout_seconds` / `idle_timeout_seconds` for an explicit command-level cap. \
-                          The subprocess inherits the agent environment, including proxy variables like ALL_PROXY."
+                          The subprocess inherits the agent environment, including proxy variables like ALL_PROXY. \
+                          Failures include structured capability feedback (missing command, permission, timeout, or option mismatch) so you can adapt to the observed environment. \
+                          Do not use this to spawn another coding agent; use the current tool set directly."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -284,7 +286,8 @@ pub fn enter_plan_mode_tool_definition() -> ToolDefinition {
                       changes). Writing the plan down lets the user/guardrail catch \
                       mis-direction early instead of waiting for 30 wasted steps. \
                       Skip this for trivial single-file edits — overhead would slow the \
-                      feedback loop. After calling this, proceed with the implementation; \
+                      feedback loop. This tool only records markdown; do not embed tool-call markup \
+                      or expect it to create files. After calling this, proceed with the implementation; \
                       use `todo_write` to track step-by-step progress."
             .to_string(),
         input_schema: json!({
@@ -357,18 +360,14 @@ pub fn task_complete_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: TASK_COMPLETE_TOOL.to_string(),
         description:
-            "Signal that the task is complete. Provide a concise summary (1-3 sentences) of \
-             what was done. The system will then run automated guardrail checks; if any check \
-             fails, you will receive feedback and must continue working. Call this exactly once, \
-             AFTER all required artifacts have been published via publish_artifact and after all \
-             changes are saved to disk."
+            "Signal that the task is complete. The `summary` is the final response that will be shown to the user and used by automated graders. If the task requested exact text, a JSON block, XML/tagged output, or another direct-answer format, put that exact final answer in `summary` and do not describe what you did. If the task requested saved artifacts/files instead, provide a concise completion note after all required artifacts have been published via publish_artifact and saved to disk. The system will run automated guardrail checks; if any check fails, you will receive feedback and must continue working."
                 .to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "summary": {
                     "type": "string",
-                    "description": "Concise summary of what this task accomplished."
+                    "description": "Final response to return to the user/grader. For direct-answer tasks, this must be the exact requested answer/format (for example a JSON code block), not a prose summary. For artifact/file tasks, use a concise completion note."
                 }
             },
             "required": ["summary"]
