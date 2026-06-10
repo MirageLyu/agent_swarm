@@ -2348,6 +2348,7 @@ mod preflight_session_projection_tests {
                     mode: m["mode"].as_str().map(|s| s.to_string()),
                     failed: m["failed"].as_bool(),
                     error: m["error"].as_str().map(|s| s.to_string()),
+                    reasoning: m["reasoning"].as_str().map(|s| s.to_string()),
                 })
             })
             .collect()
