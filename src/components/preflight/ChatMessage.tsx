@@ -1,8 +1,17 @@
 import Markdown from "react-markdown";
 import { useTranslation } from "react-i18next";
+import type { Components } from "react-markdown";
 import type { PreflightMode } from "../../ipc/commands";
 import { ReasoningPanel } from "./ReasoningPanel";
 import styles from "./ChatMessage.module.css";
+
+const markdownComponents: Components = {
+  table: ({ children, ...props }) => (
+    <div className={styles.tableWrapper}>
+      <table {...props}>{children}</table>
+    </div>
+  ),
+};
 
 interface ChatMessageProps {
   role: "user" | "assistant";
@@ -35,7 +44,7 @@ export function ChatMessage({ role, content, mode, reasoning }: ChatMessageProps
         {isUser ? content : (
           <div className={styles.markdown}>
             {reasoning && <ReasoningPanel reasoning={reasoning} />}
-            <Markdown>{content}</Markdown>
+            <Markdown components={markdownComponents}>{content}</Markdown>
           </div>
         )}
       </div>

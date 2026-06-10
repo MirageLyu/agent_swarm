@@ -1,12 +1,21 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import Markdown from "react-markdown";
 import { useTranslation } from "react-i18next";
+import type { Components } from "react-markdown";
 import type { PreflightMode, PreflightChoice, PreflightMessageInfo } from "../../ipc/commands";
 import { PreflightModeSwitch } from "./PreflightModeSwitch";
 import { ChatMessage } from "./ChatMessage";
 import { ChoiceButtons } from "./ChoiceButtons";
 import { ReasoningPanel } from "./ReasoningPanel";
 import styles from "./PreflightChat.module.css";
+
+const streamingMarkdownComponents: Components = {
+  table: ({ children, ...props }) => (
+    <div className={styles.tableWrapper}>
+      <table {...props}>{children}</table>
+    </div>
+  ),
+};
 
 interface PreflightChatProps {
   messages: PreflightMessageInfo[];
@@ -159,7 +168,7 @@ export function PreflightChat({
               )}
               {streamingText && (
                 <>
-                  <Markdown>{streamingText}</Markdown>
+                  <Markdown components={streamingMarkdownComponents}>{streamingText}</Markdown>
                   <span className={styles.streamEllipsis} />
                 </>
               )}

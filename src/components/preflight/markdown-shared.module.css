@@ -1,0 +1,30 @@
+.tableWrapper {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin: 6px 0;
+}
+
+.tableWrapper table {
+  border-collapse: collapse;
+  width: max-content;
+  min-width: 100%;
+  font-size: 0.85em;
+}
+
+.tableWrapper th {
+  border: 1px solid #e5e7eb;
+  padding: 5px 8px;
+  background: #f9fafb;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.tableWrapper td {
+  border: 1px solid #f3f4f6;
+  padding: 4px 8px;
+}
+
+.tableWrapper tr:nth-child(even) td {
+  background: #fafafa;
+}
