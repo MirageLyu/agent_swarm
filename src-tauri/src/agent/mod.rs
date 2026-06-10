@@ -18,6 +18,7 @@ pub mod planner_fetch;
 pub mod planner_merge_inject;
 pub mod planner_state;
 pub mod planner_tools;
+pub mod preflight_perf;
 pub mod recovery_log;
 mod registry;
 pub mod report_generator;
