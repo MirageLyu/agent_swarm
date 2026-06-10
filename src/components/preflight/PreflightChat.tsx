@@ -39,6 +39,7 @@ export function PreflightChat({
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // TODO: render reasoning in collapsible panel (Task 4)
   void streamingReasoning;
 
   const scrollToBottom = useCallback(() => {
