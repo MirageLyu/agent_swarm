@@ -176,6 +176,7 @@ export function PreflightView() {
       } else if (kind === "error") {
         setStreaming(false);
         setStreamingText("");
+        setStreamingReasoning("");
         setInitialLoading(false);
         setError(content);
         finishUiTurn(null);
