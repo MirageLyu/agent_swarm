@@ -705,6 +705,25 @@ async fn preflight_with_continuation(
             })
             .unwrap_or_default();
 
+        // Model tiering: use flash for early rounds (1-2) to avoid reasoning latency,
+        // switch to pro for round 3+ when complex reasoning is needed.
+        let effective_model = if belief_state_snapshot.round <= 2 {
+            let flash_model = model.replace("-pro", "-flash");
+            if flash_model != *model {
+                tracing::info!(
+                    round = belief_state_snapshot.round,
+                    original_model = model,
+                    effective_model = %flash_model,
+                    "model tiering: using flash for early round"
+                );
+                flash_model
+            } else {
+                model.to_string()
+            }
+        } else {
+            model.to_string()
+        };
+
         // FM-10.5: Full Compaction check (only on first iteration of each round)
         if iteration == 0 {
             // 关键修复：之前这里查了 `compacted_at IS NOT NULL` 拿到一个 bool，但调用
@@ -902,7 +921,7 @@ async fn preflight_with_continuation(
 
         let (response, usage, llm_timing) = match planner::preflight_chat(
             provider.clone(),
-            model,
+            &effective_model,
             mode,
             history.clone(),
             session_id,
