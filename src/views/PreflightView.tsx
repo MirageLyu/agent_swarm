@@ -9,6 +9,7 @@ import type {
   PreflightMode,
   PreflightChoice,
   ConversationPhase,
+  PreflightPerfSummary,
 } from "../ipc/commands";
 import { onPreflightStream, type PreflightStreamPayload } from "../ipc/events";
 import { useUiStore } from "../stores/ui-store";
@@ -18,6 +19,14 @@ import { PreflightChat } from "../components/preflight/PreflightChat";
 import { ContractPanel } from "../components/preflight/ContractPanel";
 import { PreflightStatusBar } from "../components/preflight/PreflightStatusBar";
 import { useRetryableFlow } from "../hooks/useRetryableFlow";
+import {
+  finishPreflightUiTurn,
+  formatPreflightPerfLog,
+  markPreflightFirstVisible,
+  startPreflightUiTurn,
+  type PreflightTurnSource,
+  type PreflightUiTurnState,
+} from "../utils/preflight-perf";
 import styles from "./PreflightView.module.css";
 
 export function PreflightView() {
@@ -32,6 +41,7 @@ export function PreflightView() {
   const [mode, setMode] = useState<PreflightMode>("scenario_walk");
   const [streaming, setStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState("");
+  const [streamingReasoning, setStreamingReasoning] = useState("");
   const [contract, setContract] = useState<ContractInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [initialLoading, setInitialLoading] = useState(true);
@@ -41,6 +51,26 @@ export function PreflightView() {
 
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
+
+  const uiTurnRef = useRef<PreflightUiTurnState | null>(null);
+
+  const startUiTurn = useCallback((source: PreflightTurnSource) => {
+    uiTurnRef.current = startPreflightUiTurn(source);
+  }, []);
+
+  const markFirstVisible = useCallback(() => {
+    if (!uiTurnRef.current) return;
+    uiTurnRef.current = markPreflightFirstVisible(uiTurnRef.current);
+  }, []);
+
+  const finishUiTurn = useCallback((backendPerf: PreflightPerfSummary | null) => {
+    if (!uiTurnRef.current) return;
+    const summary = finishPreflightUiTurn(uiTurnRef.current, backendPerf);
+    uiTurnRef.current = null;
+    if (import.meta.env.DEV) {
+      console.info("[preflight ui perf]", formatPreflightPerfLog(summary));
+    }
+  }, []);
 
   // Load existing session + contract on mount
   useEffect(() => {
@@ -69,16 +99,28 @@ export function PreflightView() {
 
       const { kind, content } = payload.chunk;
       if (kind === "start") {
+        if (!uiTurnRef.current) {
+          startUiTurn("initial");
+        }
         setStreaming(true);
         setStreamingText("");
         setStatusText("");
         setInitialLoading(false);
       } else if (kind === "text_delta") {
+        markFirstVisible();
         setStreamingText((prev) => prev + content);
+        setStatusText("");
+        setInitialLoading(false);
+      } else if (kind === "reasoning_delta") {
+        markFirstVisible();
+        setStreamingReasoning((prev) => prev + content);
         setStatusText("");
         setInitialLoading(false);
       } else if (kind === "status") {
         setStatusText(content);
+        if (content.trim()) {
+          markFirstVisible();
+        }
       } else if (kind === "contract_item_added") {
         try {
           const item = JSON.parse(content) as ContractItemInfo;
@@ -97,10 +139,13 @@ export function PreflightView() {
       } else if (kind === "done") {
         setStreaming(false);
         setStreamingText("");
+        setStreamingReasoning("");
         setStatusText("");
         setInitialLoading(false);
         try {
           const parsed = JSON.parse(content);
+          const backendPerf = (parsed.perf ?? null) as PreflightPerfSummary | null;
+          finishUiTurn(backendPerf);
           setMessages((prev) => [
             ...prev,
             {
@@ -108,6 +153,7 @@ export function PreflightView() {
               content: parsed.text,
               choices: parsed.choices ?? [],
               mode: parsed.mode ?? undefined,
+              reasoning: parsed.reasoning ?? undefined,
             },
           ]);
           if (parsed.convergence_score !== undefined) {
@@ -132,6 +178,7 @@ export function PreflightView() {
         setStreamingText("");
         setInitialLoading(false);
         setError(content);
+        finishUiTurn(null);
         // 后端 Fix A：错误退出前已经把 failed 标记写进 stored_msgs。
         // 这里同步刷新一下 messages，让最后一条 user 气泡立刻出现"重试"按钮，
         // 不依赖用户切换页面再回来才看到。
@@ -144,12 +191,13 @@ export function PreflightView() {
     });
 
     return () => { unsub.then((fn) => fn()); };
-  }, [missionId]);
+  }, [missionId, startUiTurn, markFirstVisible, finishUiTurn]);
 
   const handleSend = useCallback(
-    (text: string) => {
+    (text: string, source: PreflightTurnSource = "free_input") => {
       if (!sessionId || !missionId) return;
 
+      startUiTurn(source);
       setError(null);
       // optimistic insert：立刻显示用户消息（带 mode 让 ChatMessage 一致渲染）；
       // 后端 send_preflight_message 会以同样字段持久化，刷新后不漂移。
@@ -168,7 +216,7 @@ export function PreflightView() {
           setStreaming(false);
         });
     },
-    [sessionId, missionId, mode],
+    [sessionId, missionId, mode, startUiTurn],
   );
 
   // 重试最后一条失败的输入：复用 stored_msgs，无需前端重发文本，
@@ -176,6 +224,7 @@ export function PreflightView() {
   // failed 标记并重投同一条消息给 LLM。
   const handleRetry = useCallback(() => {
     if (!sessionId || !missionId) return;
+    startUiTurn("retry");
     setError(null);
     setStreaming(true);
     setStreamingText("");
@@ -197,7 +246,7 @@ export function PreflightView() {
         setError(formatBackendError(e));
         setStreaming(false);
       });
-  }, [sessionId, missionId, mode]);
+  }, [sessionId, missionId, mode, startUiTurn]);
 
   const MODE_LABELS = useMemo<Record<PreflightMode, string>>(
     () => ({
@@ -220,6 +269,7 @@ export function PreflightView() {
   const handleModeChange = useCallback((newMode: PreflightMode) => {
     if (newMode === mode || !sessionId || !missionId) return;
 
+    startUiTurn("mode_switch");
     setMode(newMode);
 
     // Insert visual divider as a system message
@@ -244,14 +294,14 @@ export function PreflightView() {
         setError(formatBackendError(e));
         setStreaming(false);
       });
-  }, [mode, sessionId, missionId, MODE_LABELS, MODE_OPENERS, t]);
+  }, [mode, sessionId, missionId, MODE_LABELS, MODE_OPENERS, t, startUiTurn]);
 
   const handleChoiceSelect = useCallback(
     (choice: PreflightChoice) => {
       if (!missionId) return;
 
       // Send choice label as user message
-      handleSend(choice.label);
+      handleSend(choice.label, "choice");
 
       // Auto-add contract item if the choice has impact
       if (choice.contract_impact) {
@@ -383,6 +433,7 @@ export function PreflightView() {
           mode={mode}
           streaming={streaming}
           streamingText={streamingText}
+          streamingReasoning={streamingReasoning}
           statusText={statusText}
           initialLoading={initialLoading}
           onSend={handleSend}

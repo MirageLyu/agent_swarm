@@ -522,6 +522,24 @@ export interface PreflightMessageInfo {
   failed?: boolean;
   /** 失败时的可读错误（已经过 friendlify_error 处理）。 */
   error?: string;
+  /** Reasoning / thinking content from the model (shown in collapsible panel). */
+  reasoning?: string;
+}
+
+export interface PreflightPerfSummary {
+  backend_prepare_ms?: number;
+  llm_first_activity_ms?: number;
+  llm_ttft_ms?: number;
+  llm_total_ms: number;
+  tool_processing_ms: number;
+  continuation_count: number;
+  turn_total_ms: number;
+  tool_names: string[];
+  compaction_triggered: boolean;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
 }
 
 export interface PreflightSessionInfo {

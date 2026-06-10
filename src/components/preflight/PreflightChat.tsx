@@ -12,6 +12,7 @@ interface PreflightChatProps {
   mode: PreflightMode;
   streaming: boolean;
   streamingText: string;
+  streamingReasoning?: string;
   statusText?: string;
   initialLoading?: boolean;
   onSend: (text: string) => void;
@@ -26,6 +27,7 @@ export function PreflightChat({
   mode,
   streaming,
   streamingText,
+  streamingReasoning,
   statusText,
   initialLoading,
   onSend,
@@ -36,6 +38,8 @@ export function PreflightChat({
   const { t } = useTranslation("preflight");
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  void streamingReasoning;
 
   const scrollToBottom = useCallback(() => {
     requestAnimationFrame(() => {
