@@ -47,7 +47,7 @@ export function PreflightChat({
     });
   }, []);
 
-  useEffect(scrollToBottom, [messages, streamingText, scrollToBottom]);
+  useEffect(scrollToBottom, [messages, streamingText, streamingReasoning, scrollToBottom]);
 
   // Track when streaming reasoning starts for the timer
   useEffect(() => {
