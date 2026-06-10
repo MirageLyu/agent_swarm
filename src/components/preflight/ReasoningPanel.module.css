@@ -1,0 +1,56 @@
+.panel {
+  margin-bottom: 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  overflow: hidden;
+  font-size: 0.85em;
+}
+
+.summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: #f0f4ff;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: #2563eb;
+}
+
+.summary::-webkit-details-marker {
+  display: none;
+}
+
+.chevron {
+  font-size: 10px;
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+}
+
+details[open] .chevron {
+  transform: rotate(90deg);
+}
+
+.label {
+  flex: 1;
+}
+
+.timer {
+  font-weight: 400;
+  color: #93c5fd;
+  font-size: 11px;
+}
+
+.body {
+  padding: 8px 10px;
+  font-size: 0.9em;
+  line-height: 1.55;
+  color: #6b7280;
+  border-left: 2px solid #d1d5db;
+  margin-left: 10px;
+  font-style: italic;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
