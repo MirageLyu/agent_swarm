@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::agent::belief_state::{self, PreflightBeliefState, SlotStatus};
 use crate::agent::planner::{self, Alternative, DecisionEntry, PreflightAction, PreflightChoice};
+use crate::agent::preflight_perf::{elapsed_ms_since, PreflightPerfSummary, PreflightTurnTiming};
 use crate::commands::mission::{build_provider, PlanMissionResponse, TaskInfo};
 use crate::llm::{ContentBlock, Message, MessageRole, TokenUsage};
 
@@ -90,6 +91,9 @@ pub struct PreflightMessageInfo {
     /// 失败时的可读错误（已经过 friendlify_error 处理）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// LLM 推理内容，前端用于展示可折叠的推理面板。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 // ---------- helpers ----------
@@ -548,6 +552,8 @@ fn build_assistant_stored_msg(
     // reconstruct_history 重建时插回成 ContentBlock::Reasoning。
     if !response.reasoning.is_empty() {
         msg["reasoning_content"] = json!(response.reasoning);
+        // reasoning: for frontend display in collapsible panel
+        msg["reasoning"] = json!(response.reasoning);
     }
 
     if !response.tool_calls.is_empty() {
@@ -568,6 +574,32 @@ fn build_assistant_stored_msg(
     msg
 }
 
+fn build_done_payload(
+    response: &planner::PreflightResponse,
+    belief_state: &PreflightBeliefState,
+    mode: &str,
+    perf: Option<&PreflightPerfSummary>,
+) -> serde_json::Value {
+    let mut done_payload = json!({
+        "text": response.text,
+        "choices": response.choices,
+        "convergence_score": belief_state.convergence_score,
+        "phase": belief_state.phase.label(),
+        "mode": mode,
+    });
+
+    // Include reasoning so frontend can render the collapsible panel
+    if !response.reasoning.is_empty() {
+        done_payload["reasoning"] = json!(response.reasoning);
+    }
+
+    if let Some(perf) = perf {
+        done_payload["perf"] = serde_json::to_value(perf).unwrap_or_else(|_| json!({}));
+    }
+
+    done_payload
+}
+
 /// Emit the "done" event with belief_state info.
 fn emit_done_with_belief_state(
     app: &tauri::AppHandle,
@@ -575,14 +607,9 @@ fn emit_done_with_belief_state(
     response: &planner::PreflightResponse,
     belief_state: &PreflightBeliefState,
     mode: &str,
+    perf: Option<&PreflightPerfSummary>,
 ) {
-    let done_payload = json!({
-        "text": response.text,
-        "choices": response.choices,
-        "convergence_score": belief_state.convergence_score,
-        "phase": belief_state.phase.label(),
-        "mode": mode,
-    });
+    let done_payload = build_done_payload(response, belief_state, mode, perf);
     planner::emit_preflight_event_pub(app, session_id, "done", &done_payload.to_string());
 }
 
@@ -606,6 +633,7 @@ async fn preflight_with_continuation(
     app: &tauri::AppHandle,
 ) {
     let mut combined_text = String::new();
+    let mut turn_timing = PreflightTurnTiming::new();
 
     // Load model capabilities for dynamic prompt assembly
     let db = app.state::<crate::db::Database>();
@@ -733,6 +761,7 @@ async fn preflight_with_continuation(
             }
 
             if needs_compact {
+                turn_timing.mark_compaction_triggered();
                 tracing::info!(
                     round = belief_state_snapshot.round,
                     "triggering full compaction"
@@ -868,6 +897,9 @@ async fn preflight_with_continuation(
             }
         }
 
+        planner::emit_preflight_event_pub(app, session_id, "status", "正在等待模型响应…");
+        turn_timing.mark_llm_request_start();
+
         let (response, usage, llm_timing) = match planner::preflight_chat(
             provider.clone(),
             model,
@@ -915,11 +947,29 @@ async fn preflight_with_continuation(
                     Ok::<(), anyhow::Error>(())
                 });
 
+                let perf_summary = turn_timing.summary();
+                tracing::info!(
+                    session_id = %session_id,
+                    mission_id = %mission_id,
+                    mode = %mode,
+                    iteration,
+                    backend_prepare_ms = ?perf_summary.backend_prepare_ms,
+                    llm_first_activity_ms = ?perf_summary.llm_first_activity_ms,
+                    llm_ttft_ms = ?perf_summary.llm_ttft_ms,
+                    llm_total_ms = perf_summary.llm_total_ms,
+                    tool_processing_ms = perf_summary.tool_processing_ms,
+                    continuation_count = perf_summary.continuation_count,
+                    turn_total_ms = perf_summary.turn_total_ms,
+                    compaction_triggered = perf_summary.compaction_triggered,
+                    status = "error",
+                    "preflight round perf"
+                );
+
                 planner::emit_preflight_event_pub(app, session_id, "error", &user_msg);
                 return;
             }
         };
-        let _ = &llm_timing;
+        turn_timing.record_llm_call(llm_timing, usage.clone());
 
         // Accumulate text across continuation rounds
         if !response.text.trim().is_empty() {
@@ -938,8 +988,22 @@ async fn preflight_with_continuation(
 
         // FM-15 v2.2 (S2 / FR-PF-01): 先消化 ReadOnlyExplorer 的 list_directory / read_file
         // 工具调用，把 tool_result 拼到主流程的 tool_result_msgs 里，否则 LLM 收不到回执。
+        let tool_processing_started = std::time::Instant::now();
+        let mut executed_tool_names: Vec<String> = response
+            .tool_calls
+            .iter()
+            .map(|tc| tc.name.clone())
+            .collect();
+
         let mut explorer_tool_results: Vec<serde_json::Value> = Vec::new();
         if let Some(ref ex) = explorer {
+            let has_explorer_calls = response
+                .tool_calls
+                .iter()
+                .any(|tc| matches!(tc.name.as_str(), "list_directory" | "read_file"));
+            if has_explorer_calls {
+                planner::emit_preflight_event_pub(app, session_id, "status", "正在读取仓库信息…");
+            }
             for tc in &response.tool_calls {
                 if matches!(tc.name.as_str(), "list_directory" | "read_file") {
                     let output = ex
@@ -961,6 +1025,9 @@ async fn preflight_with_continuation(
         }
 
         // Process tool_call side effects + save token usage
+        if !actions.is_empty() {
+            planner::emit_preflight_event_pub(app, session_id, "status", "正在整理刚刚确认的内容…");
+        }
         let process_result = db.with_conn(|conn| {
             let mut belief_state = load_belief_state(conn, session_id);
             if iteration == 0 {
@@ -994,6 +1061,13 @@ async fn preflight_with_continuation(
                 return;
             }
         };
+
+        executed_tool_names.sort();
+        executed_tool_names.dedup();
+        turn_timing.record_tool_processing(
+            elapsed_ms_since(tool_processing_started),
+            executed_tool_names,
+        );
 
         // Store assistant message + tool results in conversation history
         let assistant_msg = build_assistant_stored_msg(&response, mode);
@@ -1055,6 +1129,7 @@ async fn preflight_with_continuation(
                 "preflight continuing with tool_results"
             );
 
+            turn_timing.record_continuation();
             planner::emit_preflight_event_pub(app, session_id, "status", "正在准备下一个问题…");
             continue;
         }
@@ -1068,6 +1143,7 @@ async fn preflight_with_continuation(
             Ok::<(), anyhow::Error>(())
         });
 
+        let perf_summary = turn_timing.summary();
         let final_response = planner::PreflightResponse {
             text: combined_text,
             choices: response.choices,
@@ -1075,7 +1151,14 @@ async fn preflight_with_continuation(
             fallback_used: response.fallback_used.clone(),
             reasoning: response.reasoning.clone(),
         };
-        emit_done_with_belief_state(app, session_id, &final_response, &belief_state, mode);
+        emit_done_with_belief_state(
+            app,
+            session_id,
+            &final_response,
+            &belief_state,
+            mode,
+            Some(&perf_summary),
+        );
 
         let tool_names: Vec<&str> = response
             .tool_calls
@@ -1090,6 +1173,18 @@ async fn preflight_with_continuation(
             fallback_used = %response.fallback_used,
             convergence_score = belief_state.convergence_score,
             phase = %belief_state.phase.label(),
+            backend_prepare_ms = ?perf_summary.backend_prepare_ms,
+            llm_first_activity_ms = ?perf_summary.llm_first_activity_ms,
+            llm_ttft_ms = ?perf_summary.llm_ttft_ms,
+            llm_total_ms = perf_summary.llm_total_ms,
+            tool_processing_ms = perf_summary.tool_processing_ms,
+            continuation_count = perf_summary.continuation_count,
+            turn_total_ms = perf_summary.turn_total_ms,
+            input_tokens_total = perf_summary.input_tokens,
+            output_tokens_total = perf_summary.output_tokens,
+            cache_read_input_tokens_total = perf_summary.cache_read_input_tokens,
+            cache_creation_input_tokens_total = perf_summary.cache_creation_input_tokens,
+            compaction_triggered = perf_summary.compaction_triggered,
             "preflight round completed"
         );
         return;
@@ -1110,6 +1205,7 @@ async fn preflight_with_continuation(
     let belief_state = db
         .with_conn(|conn| Ok::<_, anyhow::Error>(load_belief_state(conn, session_id)))
         .unwrap_or_default();
+    let perf_summary = turn_timing.summary();
     let final_response = planner::PreflightResponse {
         text: combined_text,
         choices: vec![],
@@ -1117,7 +1213,14 @@ async fn preflight_with_continuation(
         fallback_used: "none".into(),
         reasoning: String::new(),
     };
-    emit_done_with_belief_state(app, session_id, &final_response, &belief_state, mode);
+    emit_done_with_belief_state(
+        app,
+        session_id,
+        &final_response,
+        &belief_state,
+        mode,
+        Some(&perf_summary),
+    );
 }
 
 // ---------- commands ----------
@@ -1622,6 +1725,7 @@ pub fn get_preflight_session(
                             mode: m["mode"].as_str().map(|s| s.to_string()),
                             failed: m["failed"].as_bool(),
                             error: m["error"].as_str().map(|s| s.to_string()),
+                            reasoning: m["reasoning"].as_str().map(|s| s.to_string()),
                         })
                     })
                     .collect();
@@ -2006,6 +2110,65 @@ pub async fn sign_contract(
 // FM-15 v2.2 (S2 / FR-PF-02): `stream_planner_call_for_contract` 已删除。
 // 旧 sign_contract 的单次 LLM 调用被 PlannerEngine 替代；text_delta 透传由 PlannerEngine
 // 内部走 `planner-stream` 事件实现，前端 `PlannerStreamPanel` 不变。
+
+#[cfg(test)]
+mod preflight_perf_payload_tests {
+    use super::*;
+    use crate::agent::belief_state::PreflightBeliefState;
+
+    fn sample_response() -> planner::PreflightResponse {
+        planner::PreflightResponse {
+            text: "下一步请选择默认登录方式。".into(),
+            choices: vec![],
+            tool_calls: vec![],
+            fallback_used: "none".into(),
+            reasoning: String::new(),
+        }
+    }
+
+    #[test]
+    fn done_payload_omits_perf_when_unavailable() {
+        let belief_state = PreflightBeliefState::new();
+        let payload = build_done_payload(&sample_response(), &belief_state, "scenario_walk", None);
+
+        assert_eq!(payload["text"], "下一步请选择默认登录方式。");
+        assert_eq!(payload["mode"], "scenario_walk");
+        assert!(payload.get("perf").is_none());
+    }
+
+    #[test]
+    fn done_payload_includes_perf_when_available() {
+        let belief_state = PreflightBeliefState::new();
+        let perf = PreflightPerfSummary {
+            backend_prepare_ms: Some(12),
+            llm_first_activity_ms: Some(100),
+            llm_ttft_ms: Some(150),
+            llm_total_ms: 900,
+            tool_processing_ms: 33,
+            continuation_count: 1,
+            turn_total_ms: 1200,
+            tool_names: vec!["add_contract_item".into(), "present_choices".into()],
+            compaction_triggered: false,
+            input_tokens: 500,
+            output_tokens: 80,
+            cache_read_input_tokens: 200,
+            cache_creation_input_tokens: 0,
+        };
+
+        let payload = build_done_payload(
+            &sample_response(),
+            &belief_state,
+            "scenario_walk",
+            Some(&perf),
+        );
+
+        assert_eq!(payload["perf"]["backend_prepare_ms"], 12);
+        assert_eq!(payload["perf"]["llm_ttft_ms"], 150);
+        assert_eq!(payload["perf"]["continuation_count"], 1);
+        assert_eq!(payload["perf"]["tool_names"][0], "add_contract_item");
+        assert_eq!(payload["perf"]["input_tokens"], 500);
+    }
+}
 
 #[cfg(test)]
 mod reasoning_round_trip_tests {
