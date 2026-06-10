@@ -18,7 +18,7 @@ export function ReasoningPanel({
     if (!isStreaming || !streamingStartTime) return;
     const interval = setInterval(() => {
       setElapsed(Date.now() - streamingStartTime);
-    }, 100);
+    }, 500);
     return () => clearInterval(interval);
   }, [isStreaming, streamingStartTime]);
 
@@ -26,9 +26,9 @@ export function ReasoningPanel({
   const elapsedSec = (elapsed / 1000).toFixed(1);
 
   return (
-    <details className={styles.panel} open={isStreaming}>
+    <details className={styles.panel} open={isStreaming ? true : undefined}>
       <summary className={styles.summary}>
-        <span className={styles.chevron}>▶</span>
+        <span className={styles.chevron} aria-hidden="true">▶</span>
         <span className={styles.label}>{label}</span>
         {isStreaming && (
           <span className={styles.timer}>&middot; {elapsedSec}s</span>
