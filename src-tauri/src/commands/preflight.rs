@@ -2133,6 +2133,7 @@ mod preflight_perf_payload_tests {
 
         assert_eq!(payload["text"], "下一步请选择默认登录方式。");
         assert_eq!(payload["mode"], "scenario_walk");
+        assert!(payload.get("reasoning").is_none() || payload["reasoning"].as_str() == Some(""));
         assert!(payload.get("perf").is_none());
     }
 
@@ -2167,6 +2168,14 @@ mod preflight_perf_payload_tests {
         assert_eq!(payload["perf"]["continuation_count"], 1);
         assert_eq!(payload["perf"]["tool_names"][0], "add_contract_item");
         assert_eq!(payload["perf"]["input_tokens"], 500);
+    }
+
+    #[test]
+    fn done_payload_includes_reasoning_when_present() {
+        let mut resp = sample_response();
+        resp.reasoning = "Let me analyze the requirements.".into();
+        let payload = build_done_payload(&resp, &PreflightBeliefState::new(), "scenario_walk", None);
+        assert_eq!(payload["reasoning"], "Let me analyze the requirements.");
     }
 }
 
@@ -2505,6 +2514,23 @@ mod preflight_session_projection_tests {
         assert!(
             target.is_some(),
             "首次失败时唯一的 system_seed 必须能被识别为重试目标，否则用户卡死"
+        );
+    }
+
+    #[test]
+    fn reasoning_projected_to_visible() {
+        let stored = vec![json!({
+            "role": "assistant",
+            "content": "Let me think...",
+            "choices": [],
+            "mode": "scenario_walk",
+            "reasoning": "User wants a CLI tool. Let me ask about platform."
+        })];
+        let visible = project_to_visible(&stored);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(
+            visible[0].reasoning.as_deref(),
+            Some("User wants a CLI tool. Let me ask about platform.")
         );
     }
 }
