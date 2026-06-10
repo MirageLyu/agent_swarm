@@ -1,12 +1,14 @@
 import Markdown from "react-markdown";
 import { useTranslation } from "react-i18next";
 import type { PreflightMode } from "../../ipc/commands";
+import { ReasoningPanel } from "./ReasoningPanel";
 import styles from "./ChatMessage.module.css";
 
 interface ChatMessageProps {
   role: "user" | "assistant";
   content: string;
   mode?: PreflightMode;
+  reasoning?: string;
 }
 
 const MODE_STYLE: Record<string, string> = {
@@ -15,7 +17,7 @@ const MODE_STYLE: Record<string, string> = {
   risk_highlighter: styles.modeRisk,
 };
 
-export function ChatMessage({ role, content, mode }: ChatMessageProps) {
+export function ChatMessage({ role, content, mode, reasoning }: ChatMessageProps) {
   const { t } = useTranslation("preflight");
   const isUser = role === "user";
   const modeClass = !isUser && mode ? (MODE_STYLE[mode] ?? "") : "";
@@ -32,6 +34,7 @@ export function ChatMessage({ role, content, mode }: ChatMessageProps) {
       <div className={styles.bubble}>
         {isUser ? content : (
           <div className={styles.markdown}>
+            {reasoning && <ReasoningPanel reasoning={reasoning} />}
             <Markdown>{content}</Markdown>
           </div>
         )}

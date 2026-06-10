@@ -5,6 +5,7 @@ import type { PreflightMode, PreflightChoice, PreflightMessageInfo } from "../..
 import { PreflightModeSwitch } from "./PreflightModeSwitch";
 import { ChatMessage } from "./ChatMessage";
 import { ChoiceButtons } from "./ChoiceButtons";
+import { ReasoningPanel } from "./ReasoningPanel";
 import styles from "./PreflightChat.module.css";
 
 interface PreflightChatProps {
@@ -38,9 +39,7 @@ export function PreflightChat({
   const { t } = useTranslation("preflight");
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
-
-  // TODO: render reasoning in collapsible panel (Task 4)
-  void streamingReasoning;
+  const streamingStartRef = useRef<number | null>(null);
 
   const scrollToBottom = useCallback(() => {
     requestAnimationFrame(() => {
@@ -49,6 +48,16 @@ export function PreflightChat({
   }, []);
 
   useEffect(scrollToBottom, [messages, streamingText, scrollToBottom]);
+
+  // Track when streaming reasoning starts for the timer
+  useEffect(() => {
+    if (streamingReasoning && !streamingStartRef.current) {
+      streamingStartRef.current = Date.now();
+    }
+    if (!streamingReasoning) {
+      streamingStartRef.current = null;
+    }
+  }, [streamingReasoning]);
 
   const handleSend = useCallback(() => {
     const text = input.trim();
@@ -67,7 +76,7 @@ export function PreflightChat({
     [handleSend],
   );
 
-  const showTypingIndicator = (streaming && !streamingText) || initialLoading;
+  const showTypingIndicator = (streaming && !streamingText && !streamingReasoning) || initialLoading;
   const typingLabel = statusText || t("thinking");
 
   return (
@@ -107,6 +116,7 @@ export function PreflightChat({
                   role={msg.role as "user" | "assistant"}
                   content={msg.content}
                   mode={msg.mode}
+                  reasoning={msg.reasoning}
                 />
               )}
               {msg.role === "assistant" && msg.choices.length > 0 && (
@@ -136,12 +146,23 @@ export function PreflightChat({
           );
         })}
 
-        {streaming && streamingText && (
+        {streaming && (streamingText || streamingReasoning) && (
           <div className={styles.streamingText}>
             <div className={styles.streamingLabel}>{t("agentLabel")}</div>
             <div className={styles.streamingBubble}>
-              <Markdown>{streamingText}</Markdown>
-              <span className={styles.streamEllipsis} />
+              {streamingReasoning && (
+                <ReasoningPanel
+                  reasoning={streamingReasoning}
+                  isStreaming
+                  streamingStartTime={streamingStartRef.current ?? undefined}
+                />
+              )}
+              {streamingText && (
+                <>
+                  <Markdown>{streamingText}</Markdown>
+                  <span className={styles.streamEllipsis} />
+                </>
+              )}
             </div>
           </div>
         )}
