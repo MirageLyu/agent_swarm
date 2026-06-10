@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use crate::agent::belief_state::{
     default_slot_definitions, ConversationPhase, PreflightBeliefState, SlotStatus,
 };
+use crate::agent::preflight_perf::{elapsed_ms_since, PreflightLlmTiming};
 use crate::llm::{
     stream_chat_with_idle_guard, CacheControl, ContentBlock, LlmProvider, LlmRequest, Message,
     MessageRole, ModelCapabilities, StreamChunk, StreamChunkKind, TokenUsage, ToolDefinition,
@@ -1558,7 +1559,7 @@ pub async fn preflight_chat(
     rejected_alternatives: &[(String, u32, String)],
     caps: &ModelCapabilities,
     extra_tools: &[ToolDefinition],
-) -> Result<(PreflightResponse, TokenUsage), PlannerError> {
+) -> Result<(PreflightResponse, TokenUsage, PreflightLlmTiming), PlannerError> {
     let system_prompt = build_preflight_system_prompt(
         mode,
         contract_items,
@@ -1614,15 +1615,46 @@ pub async fn preflight_chat(
     let full_text_buf: Arc<tokio::sync::Mutex<String>> =
         Arc::new(tokio::sync::Mutex::new(String::new()));
     let full_text_for_fwd = full_text_buf.clone();
+    let stream_started_at = std::time::Instant::now();
+    let first_activity_ms: Arc<tokio::sync::Mutex<Option<u64>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+    let ttft_ms: Arc<tokio::sync::Mutex<Option<u64>>> = Arc::new(tokio::sync::Mutex::new(None));
+    let first_chunk_kind: Arc<tokio::sync::Mutex<Option<String>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+    let first_activity_for_fwd = first_activity_ms.clone();
+    let ttft_for_fwd = ttft_ms.clone();
+    let first_kind_for_fwd = first_chunk_kind.clone();
 
     let forwarder = tokio::spawn(async move {
         while let Some(chunk) = rx.recv().await {
             match chunk.kind {
                 StreamChunkKind::TextDelta => {
+                    let elapsed_ms = elapsed_ms_since(stream_started_at);
+                    {
+                        let mut first_activity = first_activity_for_fwd.lock().await;
+                        if first_activity.is_none() {
+                            *first_activity = Some(elapsed_ms);
+                            *first_kind_for_fwd.lock().await = Some("text_delta".to_string());
+                        }
+                    }
+                    {
+                        let mut ttft = ttft_for_fwd.lock().await;
+                        if ttft.is_none() {
+                            *ttft = Some(elapsed_ms);
+                        }
+                    }
                     full_text_for_fwd.lock().await.push_str(&chunk.content);
                     emit_preflight_event(&app_clone, &sid, "text_delta", &chunk.content);
                 }
                 StreamChunkKind::ReasoningDelta => {
+                    let elapsed_ms = elapsed_ms_since(stream_started_at);
+                    {
+                        let mut first_activity = first_activity_for_fwd.lock().await;
+                        if first_activity.is_none() {
+                            *first_activity = Some(elapsed_ms);
+                            *first_kind_for_fwd.lock().await = Some("reasoning_delta".to_string());
+                        }
+                    }
                     emit_preflight_event(&app_clone, &sid, "reasoning_delta", &chunk.content);
                 }
                 StreamChunkKind::MessageStop => {}
@@ -1640,6 +1672,12 @@ pub async fn preflight_chat(
     .await
     .map_err(|e| PlannerError::LlmError(e.user_message_zh()))?;
     let _ = forwarder.await;
+    let llm_timing = PreflightLlmTiming {
+        first_activity_ms: *first_activity_ms.lock().await,
+        ttft_ms: *ttft_ms.lock().await,
+        total_ms: elapsed_ms_since(stream_started_at),
+        first_chunk_kind: first_chunk_kind.lock().await.clone(),
+    };
     let mut full_text = full_text_buf.lock().await.clone();
 
     if full_text.is_empty() {
@@ -1774,10 +1812,14 @@ pub async fn preflight_chat(
         fallback_used = %result.fallback_used,
         input_tokens = response.usage.input_tokens,
         output_tokens = response.usage.output_tokens,
+        llm_first_activity_ms = llm_timing.first_activity_ms,
+        llm_ttft_ms = llm_timing.ttft_ms,
+        llm_total_ms = llm_timing.total_ms,
+        llm_first_chunk_kind = llm_timing.first_chunk_kind.as_deref(),
         "preflight stream complete"
     );
 
-    Ok((result, response.usage))
+    Ok((result, response.usage, llm_timing))
 }
 
 // FM-15 v2.2 (S2 / FR-PF-02): `ContractData` / `build_contract_aware_planner_prompt`
@@ -1787,6 +1829,48 @@ pub async fn preflight_chat(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preflight_perf_llm_total_is_captured_after_forwarder_drains() {
+        let source = include_str!("planner.rs");
+        let function_start = source
+            .find("pub async fn preflight_chat")
+            .expect("preflight_chat should exist");
+        let function_end = source[function_start..]
+            .find("\n#[cfg(test)]")
+            .map(|offset| function_start + offset)
+            .expect("test module should follow preflight_chat");
+        let function = &source[function_start..function_end];
+
+        let forwarder_await_idx = function
+            .find("let _ = forwarder.await;")
+            .expect("preflight_chat should wait for the stream forwarder");
+        let total_capture_idx = function
+            .find("let total_ms = elapsed_ms_since(stream_started_at);")
+            .or_else(|| function.find("total_ms: elapsed_ms_since(stream_started_at),"))
+            .expect("preflight_chat should capture LLM total timing");
+        let timing_idx = function
+            .find("let llm_timing = PreflightLlmTiming")
+            .expect("preflight_chat should construct LLM timing");
+        let first_activity_idx = function
+            .find("first_activity_ms: *first_activity_ms.lock().await,")
+            .expect("preflight_chat should read first activity timing");
+        let ttft_idx = function
+            .find("ttft_ms: *ttft_ms.lock().await,")
+            .expect("preflight_chat should read TTFT timing");
+        let first_kind_idx = function
+            .find("first_chunk_kind: first_chunk_kind.lock().await.clone(),")
+            .expect("preflight_chat should read first chunk kind");
+
+        assert!(
+            forwarder_await_idx < total_capture_idx,
+            "llm_total_ms must be captured after forwarder.await so queued chunks can update TTFT first"
+        );
+        assert!(forwarder_await_idx < timing_idx);
+        assert!(forwarder_await_idx < first_activity_idx);
+        assert!(forwarder_await_idx < ttft_idx);
+        assert!(forwarder_await_idx < first_kind_idx);
+    }
 
     #[test]
     fn ut01_1_valid_json_no_deps() {

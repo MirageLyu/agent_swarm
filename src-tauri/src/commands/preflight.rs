@@ -868,7 +868,7 @@ async fn preflight_with_continuation(
             }
         }
 
-        let (response, usage) = match planner::preflight_chat(
+        let (response, usage, llm_timing) = match planner::preflight_chat(
             provider.clone(),
             model,
             mode,
@@ -919,6 +919,7 @@ async fn preflight_with_continuation(
                 return;
             }
         };
+        let _ = &llm_timing;
 
         // Accumulate text across continuation rounds
         if !response.text.trim().is_empty() {
