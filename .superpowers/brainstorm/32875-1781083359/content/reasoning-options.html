@@ -1,0 +1,82 @@
+<h2>当前问题：reasoning_delta 被静默丢弃</h2>
+<p class="subtitle">后端在流式输出 reasoning 内容，但前端完全不显示——用户看到的是长时间的空白等待</p>
+
+<div class="section">
+  <h3>现状</h3>
+  <div class="mockup">
+    <div class="mockup-header">Preflight Chat — 用户看到的状态</div>
+    <div class="mockup-body" style="padding:20px;font-family:system-ui;">
+      <div style="border:1px solid #e0e0e0;border-radius:8px;padding:12px;margin-bottom:12px;max-width:80%">
+        <div style="font-size:11px;color:#999;margin-bottom:4px">USER</div>
+        这个项目需要支持哪些登录方式？
+      </div>
+      <div style="border:1px solid #3b82f6;border-radius:8px;padding:16px;max-width:80%;background:#f8faff;display:flex;align-items:center;gap:8px">
+        <div style="display:flex;gap:3px">
+          <div class="typing-dot" style="width:6px;height:6px;border-radius:50%;background:#93c5fd;animation:pulse 1.4s infinite"></div>
+          <div class="typing-dot" style="width:6px;height:6px;border-radius:50%;background:#93c5fd;animation:pulse 1.4s infinite 0.2s"></div>
+          <div class="typing-dot" style="width:6px;height:6px;border-radius:50%;background:#93c5fd;animation:pulse 1.4s infinite 0.4s"></div>
+        </div>
+        <span style="font-size:13px;color:#6b7280">思考中...</span>
+      </div>
+      <div style="margin-top:16px;padding:8px 12px;background:#fff3cd;border-radius:6px;font-size:12px;color:#856404">
+        ⚠️ 实际等了 15-43 秒，用户不知道模型在做什么
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>三种 reasoning 展示方案</h3>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Collapsible "深度思考中" 面板</h3>
+      <p>类似 ChatGPT / Claude 的折叠区域。默认展开显示 reasoning 内容（灰色小字），用户可折叠。顶部有状态标识 "正在分析需求..."。</p>
+      <div style="margin-top:8px;padding:8px;border:1px solid #e5e7eb;border-radius:6px;font-size:12px;color:#6b7280;background:#f9fafb">
+        <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px;cursor:pointer">
+          <span>▼</span> <strong>深度思考中</strong> <span style="color:#3b82f6;font-size:11px">· 3.2s</span>
+        </div>
+        <div style="border-left:2px solid #d1d5db;padding-left:8px;color:#9ca3af">
+          首先分析用户的核心需求：登录方式的选择取决于目标用户群体和技术栈约束。需要考虑安全性、用户体验和实现复杂度...
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Inline 淡色流式文本</h3>
+      <p>reasoning 直接以浅灰色流式出现在对话气泡中，和正式回复无缝衔接。用户能看到完整的"思考→回答"过程，无折叠交互。</p>
+      <div style="margin-top:8px;padding:8px;border:1px solid #e5e7eb;border-radius:6px;font-size:12px;background:#f9fafb">
+        <div style="color:#9ca3af;margin-bottom:6px;font-style:italic">
+          首先分析用户的核心需求：登录方式的选择取决于目标用户群体和技术栈约束...
+        </div>
+        <div style="color:#1f2937">
+          建议支持以下登录方式：<br>1. 邮箱+密码<br>2. OAuth (Google/GitHub)<br>3. SSO (企业版)
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>侧边栏 Debug 面板</h3>
+      <p>reasoning 流式输出到侧边栏或底部状态栏，不干扰主对话流。适合开发调试，普通用户感知较轻。</p>
+      <div style="margin-top:8px;display:flex;gap:8px">
+        <div style="flex:1;padding:8px;border:1px solid #e5e7eb;border-radius:6px;font-size:12px">
+          <div style="font-size:10px;color:#999;margin-bottom:4px">CHAT</div>
+          <div style="color:#1f2937">建议支持邮箱+密码、OAuth 和 SSO...</div>
+        </div>
+        <div style="width:200px;padding:8px;background:#1e1e1e;border-radius:6px;font-size:11px;color:#ccc">
+          <div style="color:#569cd6;margin-bottom:4px">REASONING</div>
+          <div style="color:#6a9955">分析需求→技术栈约束→安全考量→用户体验权衡→结论</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

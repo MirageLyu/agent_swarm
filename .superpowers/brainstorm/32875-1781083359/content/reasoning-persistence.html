@@ -1,0 +1,60 @@
+<h2>Collapsible 推理面板 — 交互细节</h2>
+<p class="subtitle">确认两个关键交互行为</p>
+
+<div class="section">
+  <h3>Streaming 时的行为</h3>
+  <div class="mockup">
+    <div class="mockup-header">Preflight Chat — streaming 中</div>
+    <div class="mockup-body" style="padding:16px;font-family:system-ui;font-size:13px;">
+
+      <div style="border:1px solid #e0e0e0;border-radius:8px;padding:10px 12px;margin-bottom:12px;max-width:80%">
+        <div style="font-size:11px;color:#999;margin-bottom:4px">USER</div>
+        这个项目需要支持哪些登录方式？
+      </div>
+
+      <div style="border:1px solid #3b82f6;border-radius:8px;padding:0;max-width:85%;background:#fff;overflow:hidden">
+        <div style="background:#f0f4ff;padding:8px 12px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;border-bottom:1px solid #dbeafe">
+          <div style="display:flex;align-items:center;gap:6px">
+            <span style="font-size:14px">▼</span>
+            <span style="font-size:12px;color:#2563eb;font-weight:600">深度思考中</span>
+            <span style="font-size:11px;color:#93c5fd">· 3.2s</span>
+          </div>
+        </div>
+        <div style="padding:10px 12px;font-size:12px;color:#6b7280;border-left:2px solid #d1d5db;margin:6px 0 6px 12px;line-height:1.6">
+          首先分析用户的核心需求... 登录方式的选择取决于目标用户群体和技术栈约束。需要考虑安全性、用户体验和实现复杂度...
+        </div>
+        <div style="padding:8px 12px 12px;font-size:13px;color:#1f2937;line-height:1.6">
+          建议支持以下登录方式：<br>1. 邮箱+密码<br>2. OAuth（Google / GitHub）<span style="color:#3b82f6;animation:blink 1s infinite">|</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>关键问题：reasoning 是否需要持久化？</h3>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="persist" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>持久化到 stored_msgs + 聊天历史可见</h3>
+      <p>reasoning 随消息存入数据库，刷新页面后仍可展开查看。类似 ChatGPT 的 "Thought for X seconds"。</p>
+      <div style="margin-top:4px;font-size:11px;color:#6b7280">
+        需要改后端：done payload 加 reasoning 字段，stored_msgs 存 reasoning 内容，Frontend ChatMessage 渲染折叠面板。
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="streamonly" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>仅 streaming 期间可见，不持久化</h3>
+      <p>reasoning 面板只在当前 streaming 时显示，done 后自动消失。历史消息中不保留。类似 Perplexity 的搜索过程。</p>
+      <div style="margin-top:4px;font-size:11px;color:#6b7280">
+        零后端改动，纯前端 PreflightView + PreflightChat 的 streaming bubble 中处理。
+      </div>
+    </div>
+  </div>
+</div>

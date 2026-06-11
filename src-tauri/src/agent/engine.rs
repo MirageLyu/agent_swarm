@@ -3554,14 +3554,15 @@ impl AgentEngine {
                 {
                     let missing_required_files = missing_required_files.clone();
                     if !missing_required_files.is_empty() {
-                        let has_allowed_checkpoint_tool = tool_use_blocks.iter().any(|(_, name, input)| {
-                            artifact_checkpoint_allows_tool_for_remaining_steps(
-                                name,
-                                input,
-                                &missing_required_files,
-                                remaining_steps,
-                            )
-                        });
+                        let has_allowed_checkpoint_tool =
+                            tool_use_blocks.iter().any(|(_, name, input)| {
+                                artifact_checkpoint_allows_tool_for_remaining_steps(
+                                    name,
+                                    input,
+                                    &missing_required_files,
+                                    remaining_steps,
+                                )
+                            });
                         if !has_allowed_checkpoint_tool {
                             if let Some((_, blocked_name, _)) =
                                 tool_use_blocks.iter().find(|(_, name, input)| {
@@ -3805,7 +3806,8 @@ impl AgentEngine {
                     .iter()
                     .find(|(_, name, input)| tool_is_read_only_loop_exploration(name, input))
                 {
-                    let feedback = read_only_loop_block_feedback(blocked_name, &missing_required_files);
+                    let feedback =
+                        read_only_loop_block_feedback(blocked_name, &missing_required_files);
                     self.emit_event_with_meta(
                         agent_id,
                         step,

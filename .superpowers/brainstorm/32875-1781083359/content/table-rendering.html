@@ -1,0 +1,77 @@
+<h2>Chat 气泡 Markdown 表格渲染问题</h2>
+<p class="subtitle">表格在 chat bubble 里无法正常显示</p>
+
+<div class="section">
+  <h3>现状 vs 预期</h3>
+</div>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">现状：表格溢出被截断</div>
+    <div class="mockup-body" style="padding:12px;font-family:system-ui;font-size:12px;width:320px">
+      <div style="border:1px solid #3b82f6;border-radius:8px;padding:10px;background:#fff">
+        <div style="margin-bottom:6px;font-weight:600;font-size:13px">以下是各登录方式的对比：</div>
+        <table style="border-collapse:collapse;font-size:11px;white-space:nowrap">
+          <tr><th style="border:1px solid #ddd;padding:4px 6px;background:#f5f5f5">方式</th><th style="border:1px solid #ddd;padding:4px 6px;background:#f5f5f5">安全性</th><th style="border:1px solid #ddd;padding:4px 6px;background:#f5f5f5">实现复杂度</th><th style="border:1px solid #ddd;padding:4px 6px;background:#f5f5f5">用户体验</th><th style="border:1px solid #ddd;padding:4px 6px;background:#f5f5f5">推荐度</th></tr>
+          <tr><td style="border:1px solid #ddd;padding:4px 6px">邮箱+密码</td><td style="border:1px solid #ddd;padding:4px 6px">中</td><td style="border:1px solid #ddd;padding:4px 6px">低</td><td style="border:1px solid #ddd;padding:4px 6px">高</td><td style="border:1px solid #ddd;padding:4px 6px">⭐⭐⭐</td></tr>
+          <tr><td style="border:1px solid #ddd;padding:4px 6px">OAuth</td><td style="border:1px solid #ddd;padding:4px 6px">高</td><td style="border:1px solid #ddd;padding:4px 6px">中</td><td style="border:1px solid #ddd;padding:4px 6px">高</td><td style="border:1px solid #ddd;padding:4px 6px">⭐⭐⭐⭐</td></tr>
+          <tr><td style="border:1px solid #ddd;padding:4px 6px">SSO</td><td style="border:1px solid #ddd;padding:4px 6px">很高</td><td style="border:1px solid #ddd;padding:4px 6px">高</td><td style="border:1px solid #ddd;padding:4px 6px">中</td><td style="border:1px solid #ddd;padding:4px 6px">⭐⭐⭐</td></tr>
+        </table>
+        <div style="color:#ef4444;font-size:10px;margin-top:4px">❌ 表格溢出 bubble，无法滚动查看</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="mockup">
+    <div class="mockup-header">预期：可横向滚动 + 清晰样式</div>
+    <div class="mockup-body" style="padding:12px;font-family:system-ui;font-size:12px;width:320px">
+      <div style="border:1px solid #3b82f6;border-radius:8px;padding:10px;background:#fff">
+        <div style="margin-bottom:6px;font-weight:600;font-size:13px">以下是各登录方式的对比：</div>
+        <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+          <table style="border-collapse:collapse;font-size:11px">
+            <thead>
+              <tr><th style="border:1px solid #e5e7eb;padding:5px 8px;background:#f9fafb;font-weight:600;text-align:left">方式</th><th style="border:1px solid #e5e7eb;padding:5px 8px;background:#f9fafb;font-weight:600;text-align:left">安全性</th><th style="border:1px solid #e5e7eb;padding:5px 8px;background:#f9fafb;font-weight:600;text-align:left">复杂度</th><th style="border:1px solid #e5e7eb;padding:5px 8px;background:#f9fafb;font-weight:600;text-align:left">体验</th><th style="border:1px solid #e5e7eb;padding:5px 8px;background:#f9fafb;font-weight:600;text-align:left">推荐</th></tr>
+            </thead>
+            <tbody>
+              <tr><td style="border:1px solid #f3f4f6;padding:4px 8px">邮箱</td><td style="border:1px solid #f3f4f6;padding:4px 8px">中</td><td style="border:1px solid #f3f4f6;padding:4px 8px">低</td><td style="border:1px solid #f3f4f6;padding:4px 8px">高</td><td style="border:1px solid #f3f4f6;padding:4px 8px">⭐⭐⭐</td></tr>
+              <tr><td style="border:1px solid #f3f4f6;padding:4px 8px">OAuth</td><td style="border:1px solid #f3f4f6;padding:4px 8px">高</td><td style="border:1px solid #f3f4f6;padding:4px 8px">中</td><td style="border:1px solid #f3f4f6;padding:4px 8px">高</td><td style="border:1px solid #f3f4f6;padding:4px 8px">⭐⭐⭐⭐</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="color:#10b981;font-size:10px;margin-top:4px">✅ overflow-x: auto 可滚动</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>问题根因 & 修复方案</h3>
+  <table style="width:100%;border-collapse:collapse;font-size:13px">
+    <tr><th style="border:1px solid #e5e7eb;padding:6px 10px;text-align:left;background:#f9fafb">问题</th><th style="border:1px solid #e5e7eb;padding:6px 10px;text-align:left;background:#f9fafb">原因</th><th style="border:1px solid #e5e7eb;padding:6px 10px;text-align:left;background:#f9fafb">修复</th></tr>
+    <tr><td style="border:1px solid #f3f4f6;padding:6px 10px">表格溢出被截断</td><td style="border:1px solid #f3f4f6;padding:6px 10px">ChatMessage.module.css 零 table 样式；bubble 没有 overflow-x</td><td style="border:1px solid #f3f4f6;padding:6px 10px">.markdown 容器加 overflow-x: auto</td></tr>
+    <tr><td style="border:1px solid #f3f4f6;padding:6px 10px">表格无边框/斑马纹</td><td style="border:1px solid #f3f4f6;padding:6px 10px">浏览器默认 table 样式简陋</td><td style="border:1px solid #f3f4f6;padding:6px 10px">加 th/td border + 交替行背景色</td></tr>
+    <tr><td style="border:1px solid #f3f4f6;padding:6px 10px">streaming bubble 同样有问题</td><td style="border:1px solid #f3f4f6;padding:6px 10px">PreflightChat 的 streamingBubble 没有 table 样式</td><td style="border:1px solid #f3f4f6;padding:6px 10px">统一提取 markdown 基础样式到共享位置</td></tr>
+  </table>
+</div>
+
+<div class="section">
+  <h3>方案确认</h3>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="unified" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>统一方案：共享 markdown 基础样式 (推荐)</h3>
+      <p>提取 table/th/td/thead/tbody 通用样式到一个共享的 CSS module 或全局样式，ChatMessage 和 PreflightChat 的 streamingBubble 都复用。</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="sep" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>分别修改：各自加 CSS</h3>
+      <p>ChatMessage.module.css 和 PreflightChat.module.css 各自添加单独的 table/th/td 样式。</p>
+    </div>
+  </div>
+</div>
