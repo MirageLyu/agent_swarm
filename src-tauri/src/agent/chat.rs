@@ -308,7 +308,8 @@ impl ChatAgent {
         force_direct: bool,
     ) -> Result<ChatTurnSummary> {
         let tools = chat_agent_tools();
-        let executor = ToolExecutor::new(self.repo_path.clone());
+        let executor = ToolExecutor::new(self.repo_path.clone())
+            .with_rg_resource_dir(self.app_handle.path().resource_dir().ok());
         let mut messages = prior;
         let mut consecutive_no_tool: u32 = 0;
         let db = self.app_handle.state::<Database>();

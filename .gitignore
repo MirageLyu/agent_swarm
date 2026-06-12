@@ -22,3 +22,7 @@ src-tauri/gen/
 # Test
 coverage/
 .claude/worktrees/
+
+# Vendored tool binaries staged during build
+src-tauri/vendor/rg/bin/
+src-tauri/vendor/rg/downloads/

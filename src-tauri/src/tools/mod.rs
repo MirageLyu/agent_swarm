@@ -1,6 +1,7 @@
 mod definitions;
 mod executor;
 mod registry;
+mod ripgrep;
 
 pub use definitions::{
     ask_user_question_tool_definition, builtin_tools, chat_agent_tools,

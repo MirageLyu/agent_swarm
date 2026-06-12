@@ -1622,6 +1622,7 @@ impl AgentEngine {
         Self {
             provider,
             tool_executor: ToolExecutor::new(workspace_root.clone())
+                .with_rg_resource_dir(app_handle.path().resource_dir().ok())
                 .with_cancel_token(cancel_token.clone()),
             workspace_root,
             app_handle,

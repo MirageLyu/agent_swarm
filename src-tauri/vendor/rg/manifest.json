@@ -1,0 +1,21 @@
+{
+  "version": "14.1.1",
+  "targets": {
+    "aarch64-apple-darwin": {
+      "archive": "ripgrep-14.1.1-aarch64-apple-darwin.tar.gz",
+      "url": "https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-aarch64-apple-darwin.tar.gz",
+      "sha256": "24ad76777745fbff131c8fbc466742b011f925bfa4fffa2ded6def23b5b937be",
+      "archiveType": "tar.gz",
+      "executablePath": "ripgrep-14.1.1-aarch64-apple-darwin/rg",
+      "resourcePath": "vendor/rg/bin/aarch64-apple-darwin/rg"
+    },
+    "x86_64-apple-darwin": {
+      "archive": "ripgrep-14.1.1-x86_64-apple-darwin.tar.gz",
+      "url": "https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-x86_64-apple-darwin.tar.gz",
+      "sha256": "fc87e78f7cb3fea12d69072e7ef3b21509754717b746368fd40d88963630e2b3",
+      "archiveType": "tar.gz",
+      "executablePath": "ripgrep-14.1.1-x86_64-apple-darwin/rg",
+      "resourcePath": "vendor/rg/bin/x86_64-apple-darwin/rg"
+    }
+  }
+}

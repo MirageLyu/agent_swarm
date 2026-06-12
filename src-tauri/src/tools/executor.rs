@@ -10,6 +10,8 @@ use tauri::Emitter;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
+use super::ripgrep::{resolve_rg_command, GREP_MAX_LINE_CHARS, GREP_MAX_OUTPUT_CHARS};
+
 /// `agent-tool-stream` 事件载荷：让前端 Workspace 视图实时拼接 shell 输出。
 /// 同一 agent_id 的连续 chunk 按 stream 分流（stdout / stderr 各自一条流）。
 #[derive(Debug, Clone, Serialize)]
@@ -51,8 +53,6 @@ const SHELL_LONG_IDLE_SECS: u64 = 120;
 const SHELL_LONG_WALL_SECS: u64 = 1800;
 const READ_FILE_MAX_OUTPUT_CHARS: usize = 120 * 1024;
 const READ_FILE_MAX_LINE_CHARS: usize = 4 * 1024;
-const GREP_MAX_OUTPUT_CHARS: usize = 80 * 1024;
-const GREP_MAX_LINE_CHARS: usize = 2 * 1024;
 const LIST_FILES_DEFAULT_LIMIT: usize = 200;
 const LIST_FILES_HARD_LIMIT: usize = 1000;
 const NOTEBOOK_READ_CELLS_DEFAULT_LIMIT: usize = 50;
@@ -115,6 +115,7 @@ fn default_evidence_root(workspace_root: &std::path::Path) -> PathBuf {
 pub struct ToolExecutor {
     workspace_root: PathBuf,
     evidence_root: PathBuf,
+    rg_resource_dir: Option<PathBuf>,
     /// Single-Agent Uplift Phase 1.1 + A2: 跟踪本 ToolExecutor 实例上"agent 已知最新内容"的路径
     /// 及其 mtime，用于：
     ///   1. `edit_file` 的"必须先读"前置条件（防止 LLM 凭空臆造改动）
@@ -146,6 +147,7 @@ impl ToolExecutor {
         Self {
             evidence_root: default_evidence_root(&workspace_root),
             workspace_root,
+            rg_resource_dir: None,
             read_paths: Arc::new(Mutex::new(HashMap::new())),
             cancel_token: None,
         }
@@ -155,6 +157,12 @@ impl ToolExecutor {
     /// the workspace so internal traces do not contaminate user-visible file scans.
     pub fn with_evidence_root(mut self, evidence_root: PathBuf) -> Self {
         self.evidence_root = evidence_root;
+        self
+    }
+
+    /// Builder: provide Tauri's resource directory so packaged builds can prefer bundled tools.
+    pub fn with_rg_resource_dir(mut self, resource_dir: Option<PathBuf>) -> Self {
+        self.rg_resource_dir = resource_dir;
         self
     }
 
@@ -1038,7 +1046,16 @@ impl ToolExecutor {
         args.push("-e".into());
         args.push(pattern.into());
 
-        let mut child = match Command::new("rg")
+        let rg_command = resolve_rg_command(self.rg_resource_dir.clone());
+        tracing::debug!(
+            tool = "grep",
+            rg_path = %rg_command.path.display(),
+            rg_source = ?rg_command.source,
+            workspace = %search_path.display(),
+            "spawning ripgrep"
+        );
+
+        let mut child = match Command::new(&rg_command.path)
             .args(&args)
             .current_dir(&search_path)
             .stdout(Stdio::piped())
@@ -1049,14 +1066,16 @@ impl ToolExecutor {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return ToolOutput::error(
                     "dependency_missing",
-                    "grep requires ripgrep (`rg`) so regex semantics stay consistent; install rg or use shell_exec with an available search tool",
+                    &format!(
+                        "grep requires bundled ripgrep or ripgrep (`rg`) on PATH; failed to launch rg: {e}. Run `node scripts/fetch-rg.mjs` before packaging or install rg for development."
+                    ),
                 );
             }
             Err(e) => {
                 return capability_tool_error(
                     "grep",
                     "dependency_spawn_failure",
-                    format!("failed to spawn rg: {e}"),
+                    format!("failed to spawn rg at {}: {e}", rg_command.path.display()),
                 )
             }
         };
@@ -1633,7 +1652,6 @@ impl ToolExecutor {
 
     async fn list_files(&self, input: &serde_json::Value) -> ToolOutput {
         let rel_path = input["path"].as_str().unwrap_or(".");
-        let explicit_path = input["path"].as_str().is_some();
         let limit = input
             .get("limit")
             .and_then(|v| v.as_u64())
@@ -1644,6 +1662,7 @@ impl ToolExecutor {
             Ok(p) => p,
             Err(e) => return ToolOutput::error("sandbox_violation", &e.to_string()),
         };
+        let base_scope = self.path_scope(&full_path);
 
         let mut dir = match tokio::fs::read_dir(&full_path).await {
             Ok(d) => d,
@@ -1665,7 +1684,7 @@ impl ToolExecutor {
                         Err(_) => continue,
                     };
                     let name = entry.file_name().to_string_lossy().to_string();
-                    if !explicit_path
+                    if !matches!(base_scope, PathScope::Evidence)
                         && is_internal_evidence_or_persisted_path(
                             &entry.path(),
                             &self.workspace_root,
@@ -4294,9 +4313,6 @@ mod tests {
 
     #[tokio::test]
     async fn default_search_glob_and_list_skip_internal_evidence_dirs() {
-        if !rg_available() {
-            return;
-        }
         let (dir, exec) = setup();
         fs::write(dir.path().join("visible.txt"), "needle\n").unwrap();
         fs::create_dir_all(dir.path().join(".miragenty-evidence/run/step")).unwrap();
@@ -4349,9 +4365,6 @@ mod tests {
 
     #[tokio::test]
     async fn default_discovery_skips_mirrored_benchmark_assets() {
-        if !rg_available() {
-            return;
-        }
         let (dir, exec) = setup();
         let workspace_name = dir
             .path()
@@ -4419,15 +4432,12 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_evidence_path_can_be_read_grepped_and_listed() {
-        if !rg_available() {
-            return;
-        }
         let (dir, exec) = setup();
         let evidence_root = dir.path().join("evidence-root");
         fs::create_dir_all(&evidence_root).unwrap();
         fs::write(
             evidence_root.join("stdout.txt"),
-            "needle evidence\n".repeat(300),
+            "needle evidence\n".repeat(700),
         )
         .unwrap();
         let exec = exec.with_evidence_root(evidence_root.clone());
@@ -4505,19 +4515,8 @@ mod tests {
         );
     }
 
-    fn rg_available() -> bool {
-        std::process::Command::new("rg")
-            .arg("--version")
-            .output()
-            .is_ok()
-    }
-
     #[tokio::test]
     async fn search_files_files_with_matches_mode() {
-        if !rg_available() {
-            eprintln!("[skip] ripgrep (`rg`) not on PATH; skipping search_files tests");
-            return;
-        }
         let (dir, exec) = setup();
         fs::write(dir.path().join("a.rs"), "let foo = 1;\n").unwrap();
         fs::write(dir.path().join("b.rs"), "let bar = 2;\n").unwrap();
@@ -4537,9 +4536,6 @@ mod tests {
 
     #[tokio::test]
     async fn search_files_glob_filters() {
-        if !rg_available() {
-            return;
-        }
         let (dir, exec) = setup();
         fs::write(dir.path().join("x.rs"), "needle here\n").unwrap();
         fs::write(dir.path().join("x.txt"), "needle here\n").unwrap();
@@ -4561,9 +4557,6 @@ mod tests {
 
     #[tokio::test]
     async fn search_files_no_match_returns_friendly_message() {
-        if !rg_available() {
-            return;
-        }
         let (dir, exec) = setup();
         fs::write(dir.path().join("x.txt"), "alpha\n").unwrap();
         let out = exec
@@ -4582,10 +4575,6 @@ mod tests {
 
     #[tokio::test]
     async fn grep_content_mode_returns_line_numbers() {
-        if !rg_available() {
-            eprintln!("[skip] ripgrep (`rg`) not on PATH; skipping grep tests");
-            return;
-        }
         let (dir, exec) = setup();
         fs::write(
             dir.path().join("a.rs"),
@@ -4604,9 +4593,6 @@ mod tests {
 
     #[tokio::test]
     async fn grep_count_mode_aggregates_per_file() {
-        if !rg_available() {
-            return;
-        }
         let (dir, exec) = setup();
         fs::write(dir.path().join("a.rs"), "foo\nfoo\nbar\n").unwrap();
         fs::write(dir.path().join("b.rs"), "foo\n").unwrap();
@@ -4628,9 +4614,6 @@ mod tests {
 
     #[tokio::test]
     async fn grep_truncates_long_matching_lines() {
-        if !rg_available() {
-            return;
-        }
         let (dir, exec) = setup();
         let line = format!("needle-{}-TAIL\n", "x".repeat(GREP_MAX_LINE_CHARS + 512));
         fs::write(dir.path().join("long.txt"), line).unwrap();
@@ -4646,9 +4629,6 @@ mod tests {
 
     #[tokio::test]
     async fn grep_head_limit_stops_after_requested_lines() {
-        if !rg_available() {
-            return;
-        }
         let (dir, exec) = setup();
         fs::write(dir.path().join("many.txt"), "needle\n".repeat(1000)).unwrap();
 
@@ -4677,9 +4657,6 @@ mod tests {
     /// 否则 alias 兼容性是假的。
     #[tokio::test]
     async fn grep_and_search_files_alias_produce_identical_output() {
-        if !rg_available() {
-            return;
-        }
         let (dir, exec) = setup();
         fs::write(dir.path().join("file1.rs"), "hello world\n").unwrap();
         fs::write(dir.path().join("file2.rs"), "hello again\n").unwrap();
