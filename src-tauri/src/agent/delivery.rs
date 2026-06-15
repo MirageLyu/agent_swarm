@@ -547,8 +547,17 @@ pub fn generate_degraded_delivery_snapshot(
     let mut source_task_ids = Vec::new();
     for row in handoffs {
         match serde_json::from_str::<TaskHandoffPacket>(&row.packet_json) {
-            Ok(packet) => {
-                source_task_ids.push(packet.task_id.clone());
+            Ok(mut packet) => {
+                if packet.task_id != row.task_id {
+                    tracing::warn!(
+                        mission_id = %mission_id,
+                        row_task_id = %row.task_id,
+                        packet_task_id = %packet.task_id,
+                        "task handoff packet task_id mismatches authoritative row task_id; using row task_id for delivery sources"
+                    );
+                    packet.task_id = row.task_id.clone();
+                }
+                source_task_ids.push(row.task_id.clone());
                 candidates.extend(candidates_from_handoff(&packet));
             }
             Err(err) => tracing::warn!(
@@ -594,6 +603,21 @@ pub fn persist_delivery_snapshot(
 ) -> Result<()> {
     let snapshot_json = serde_json::to_string(snapshot)?;
     let source_task_ids = source_task_ids_json(source_task_ids)?;
+    if let Some(existing) = queries::get_mission_delivery(conn, &snapshot.mission_id)? {
+        if generation_status == "degraded"
+            && existing.generation_status == "generated"
+            && !existing.stale
+            && existing.version >= snapshot.schema_version as i64
+        {
+            tracing::debug!(
+                mission_id = %snapshot.mission_id,
+                existing_version = existing.version,
+                snapshot_version = snapshot.schema_version,
+                "skipping degraded delivery persistence because a non-stale generated snapshot already exists"
+            );
+            return Ok(());
+        }
+    }
     queries::upsert_mission_delivery(
         conn,
         &snapshot.mission_id,
@@ -607,14 +631,109 @@ pub fn persist_delivery_snapshot(
     )
 }
 
+pub fn mark_mission_delivery_stale_best_effort(
+    conn: &Connection,
+    mission_id: &str,
+    reason: &str,
+) -> bool {
+    match queries::mark_mission_delivery_stale(conn, mission_id) {
+        Ok(marked) => marked,
+        Err(err) => {
+            tracing::warn!(
+                mission_id = %mission_id,
+                reason = %reason,
+                error = %err,
+                "failed to mark mission delivery stale after source input change"
+            );
+            false
+        }
+    }
+}
+
 fn candidates_from_handoff(packet: &TaskHandoffPacket) -> Vec<DeliveryCandidate> {
     let mut candidates = packet
         .artifacts
         .iter()
         .map(|artifact| DeliveryCandidate::from_artifact(&packet.task_id, artifact))
         .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        if let Some(candidate) = handoff_summary_candidate(packet) {
+            candidates.push(candidate);
+        }
+    }
     candidates.sort_by(compare_delivery_candidates);
     candidates
+}
+
+fn handoff_summary_candidate(packet: &TaskHandoffPacket) -> Option<DeliveryCandidate> {
+    let mut summary_parts = Vec::new();
+    push_non_empty(&mut summary_parts, packet.summary.trim());
+    for file in &packet.changed_files {
+        let mut line = String::new();
+        if !file.path.trim().is_empty() {
+            line.push_str(file.path.trim());
+        }
+        if !file.summary.trim().is_empty() {
+            if !line.is_empty() {
+                line.push_str(": ");
+            }
+            line.push_str(file.summary.trim());
+        }
+        push_non_empty(&mut summary_parts, line.trim());
+    }
+    for command in &packet.commands {
+        let mut line = command.command.trim().to_string();
+        if !command.summary.trim().is_empty() {
+            if !line.is_empty() {
+                line.push_str(": ");
+            }
+            line.push_str(command.summary.trim());
+        }
+        push_non_empty(&mut summary_parts, line.trim());
+    }
+    for context in &packet.direct_context {
+        push_non_empty(&mut summary_parts, context.trim());
+    }
+    for caveat in &packet.caveats {
+        push_non_empty(&mut summary_parts, caveat.trim());
+    }
+    for next_step in &packet.next_steps {
+        push_non_empty(&mut summary_parts, next_step.trim());
+    }
+
+    if summary_parts.is_empty() {
+        return None;
+    }
+
+    let mut file_paths = packet
+        .changed_files
+        .iter()
+        .map(|file| file.path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .collect::<Vec<_>>();
+    sort_and_dedup_strings(&mut file_paths);
+
+    Some(DeliveryCandidate {
+        id: format!("{}.handoff", safe_id_part(&packet.task_id)),
+        source: DeliveryCandidateSource::Handoff,
+        title: format!(
+            "{} task output",
+            non_empty_or(packet.task_title.clone(), || packet.task_id.clone())
+        ),
+        summary: summary_parts.join(" "),
+        file_paths,
+        confidence: match packet.confidence {
+            HandoffConfidence::High => DeliveryConfidence::Medium,
+            HandoffConfidence::Medium => DeliveryConfidence::Low,
+            HandoffConfidence::Low => DeliveryConfidence::Low,
+        },
+    })
+}
+
+fn push_non_empty(out: &mut Vec<String>, value: &str) {
+    if !value.trim().is_empty() {
+        out.push(value.trim().to_string());
+    }
 }
 
 fn parse_artifact_file_paths(file_paths_json: &str, artifact_id: &str) -> Vec<String> {
@@ -1390,6 +1509,177 @@ mod tests {
             err.to_string().contains("not ready for delivery"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn degraded_generation_does_not_overwrite_non_stale_generated_delivery() {
+        let conn = setup_delivery_db();
+        insert_mission(&conn, "mission-1", "Ship CLI", "completed");
+        let curated = MissionDeliverySnapshot {
+            schema_version: DELIVERY_SNAPSHOT_SCHEMA_VERSION,
+            mission_id: "mission-1".to_string(),
+            status: DeliveryStatus::Completed,
+            confidence: DeliveryConfidence::High,
+            overview: DeliveryOverview {
+                title: "Curated delivery".to_string(),
+                summary: "Curated generated snapshot should survive degraded refresh.".to_string(),
+                status: DeliveryStatus::Completed,
+                confidence: DeliveryConfidence::High,
+            },
+            items: vec![DeliveryItem {
+                id: "curated-item".to_string(),
+                source: DeliveryCandidateSource::ModelHint,
+                title: "Curated output".to_string(),
+                summary: "Generated curator output.".to_string(),
+                file_paths: vec!["dist/curated.md".to_string()],
+                confidence: DeliveryConfidence::High,
+            }],
+            how_to_use: vec![],
+            validation: vec![],
+            changes: vec![],
+            caveats: vec![],
+            next_steps: vec![],
+        };
+        persist_delivery_snapshot(&conn, &curated, "generated", Some("claude-curator"), &[])
+            .expect("curated snapshot persists");
+
+        let degraded = MissionDeliverySnapshot::degraded("mission-1", vec![]);
+        persist_delivery_snapshot(&conn, &degraded, "degraded", Some("deterministic"), &[])
+            .expect("degraded persistence is allowed to no-op");
+
+        let row = queries::get_mission_delivery(&conn, "mission-1")
+            .unwrap()
+            .expect("delivery row exists");
+        let persisted: MissionDeliverySnapshot =
+            serde_json::from_str(&row.snapshot_json).expect("persisted snapshot parses");
+        assert_eq!(row.generation_status, "generated");
+        assert_eq!(row.curator_model.as_deref(), Some("claude-curator"));
+        assert!(!row.stale);
+        assert_eq!(persisted.overview.title, "Curated delivery");
+        assert_eq!(persisted.items[0].id, "curated-item");
+    }
+
+    #[test]
+    fn generate_degraded_delivery_snapshot_uses_row_task_id_for_handoff_sources() {
+        let conn = setup_delivery_db();
+        insert_mission(&conn, "mission-1", "Ship CLI", "completed");
+        insert_task(
+            &conn,
+            "db-task",
+            "mission-1",
+            "Publish manifest",
+            "completed",
+        );
+        let mut packet = TaskHandoffPacket::fallback(
+            "mission-1",
+            "embedded-task",
+            "Publish manifest",
+            "Manifest is ready.",
+            vec![],
+        );
+        packet
+            .direct_context
+            .push("Use dist/manifest.json downstream.".to_string());
+        queries::upsert_task_handoff_packet(
+            &conn,
+            "db-task",
+            "mission-1",
+            &serde_json::to_string(&packet).unwrap(),
+            "agent_authored",
+        )
+        .unwrap();
+
+        let generation = generate_degraded_delivery_snapshot(&conn, "mission-1")
+            .expect("snapshot generation succeeds");
+
+        assert_eq!(generation.source_task_ids, vec!["db-task".to_string()]);
+        assert!(generation
+            .snapshot
+            .items
+            .iter()
+            .any(|item| item.id.starts_with("db-task")
+                && item.source == DeliveryCandidateSource::Handoff));
+    }
+
+    #[test]
+    fn handoff_without_artifacts_still_contributes_visible_delivery_candidate() {
+        let conn = setup_delivery_db();
+        insert_mission(&conn, "mission-1", "Ship CLI", "completed");
+        insert_task(
+            &conn,
+            "task-1",
+            "mission-1",
+            "Document behavior",
+            "completed",
+        );
+        let packet = TaskHandoffPacket {
+            mission_id: "mission-1".to_string(),
+            task_id: "task-1".to_string(),
+            task_title: "Document behavior".to_string(),
+            summary: "Documented the handoff-only behavior.".to_string(),
+            confidence: HandoffConfidence::High,
+            changed_files: vec![ChangedFileSummary {
+                path: "src/lib.rs".to_string(),
+                summary: "Updated delivery logic.".to_string(),
+                change_type: Some("modified".to_string()),
+            }],
+            decisions: vec![],
+            commands: vec![CommandRunSummary {
+                command: "cargo test delivery_snapshot --lib".to_string(),
+                status: CommandResultStatus::Passed,
+                summary: "Delivery tests passed.".to_string(),
+                exit_code: Some(0),
+            }],
+            artifacts: vec![],
+            direct_context: vec!["No artifact was produced; use the task output.".to_string()],
+            caveats: vec!["Manual review recommended.".to_string()],
+            next_steps: vec!["Proceed to downstream delivery.".to_string()],
+        };
+        queries::upsert_task_handoff_packet(
+            &conn,
+            "task-1",
+            "mission-1",
+            &serde_json::to_string(&packet).unwrap(),
+            "agent_authored",
+        )
+        .unwrap();
+
+        let generation = generate_degraded_delivery_snapshot(&conn, "mission-1")
+            .expect("snapshot generation succeeds");
+
+        let item = generation
+            .snapshot
+            .items
+            .iter()
+            .find(|item| item.source == DeliveryCandidateSource::Handoff)
+            .expect("handoff-only packet contributes a visible delivery item");
+        assert_eq!(item.id, "task-1.handoff");
+        assert!(item.title.contains("Document behavior"));
+        assert!(item
+            .summary
+            .contains("Documented the handoff-only behavior"));
+        assert!(item.summary.contains("No artifact was produced"));
+        assert_eq!(item.file_paths, vec!["src/lib.rs".to_string()]);
+    }
+
+    #[test]
+    fn stale_helper_marks_existing_delivery_stale_after_source_change() {
+        let conn = setup_delivery_db();
+        insert_mission(&conn, "mission-1", "Ship CLI", "completed");
+        let snapshot = MissionDeliverySnapshot::degraded("mission-1", vec![]);
+        persist_delivery_snapshot(&conn, &snapshot, "degraded", Some("deterministic"), &[])
+            .expect("snapshot persists");
+
+        assert!(mark_mission_delivery_stale_best_effort(
+            &conn,
+            "mission-1",
+            "test source change"
+        ));
+
+        let row = queries::get_mission_delivery(&conn, "mission-1")
+            .unwrap()
+            .expect("delivery row exists");
+        assert!(row.stale);
     }
 
     #[test]

@@ -31,7 +31,8 @@ use crate::tools::{coding_agent_tools_with_artifact_support, ToolExecutor, TASK_
 use super::budget_tracker::{BudgetDecision, BudgetTracker};
 use super::codebase_intel;
 use super::delivery::{
-    task_complete_handoff_is_agent_authored, DeliveryArtifactRef, TaskHandoffPacket,
+    mark_mission_delivery_stale_best_effort, task_complete_handoff_is_agent_authored,
+    DeliveryArtifactRef, TaskHandoffPacket,
 };
 use super::guardrail::{self, Guardrail, GuardrailContext};
 use super::recovery_log::{
@@ -5085,7 +5086,7 @@ impl AgentEngine {
                 .unwrap_or_else(|_| "[]".to_string());
             let decls: Vec<crate::agent::artifacts::ArtifactDecl> =
                 serde_json::from_str(&decls_json).unwrap_or_default();
-            record_publish(
+            let artifact = record_publish(
                 conn,
                 &workspace,
                 &mission_id,
@@ -5093,8 +5094,13 @@ impl AgentEngine {
                 &parsed_for_db,
                 Some(&decls),
             )
-            .map(Some)
-            .map_err(|e| anyhow::anyhow!(e.to_string()))
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            mark_mission_delivery_stale_best_effort(
+                conn,
+                &mission_id,
+                "artifact publish succeeded",
+            );
+            Ok(Some(artifact))
         });
         match result {
             Ok(Some(artifact)) => {
@@ -5934,6 +5940,11 @@ impl AgentEngine {
                 &packet_json,
                 generation_status,
             )?;
+            mark_mission_delivery_stale_best_effort(
+                conn,
+                &mission_id,
+                "task handoff persistence changed",
+            );
             Ok(())
         }) {
             tracing::warn!(agent_id = %agent_id, "Failed to persist task handoff packet: {e}");
