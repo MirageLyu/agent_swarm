@@ -631,6 +631,22 @@ pub fn persist_delivery_snapshot(
     )
 }
 
+pub fn generate_and_persist_degraded_delivery(
+    db: &crate::db::Database,
+    mission_id: &str,
+) -> Result<()> {
+    db.with_conn(|conn| {
+        let generation = generate_degraded_delivery_snapshot(conn, mission_id)?;
+        persist_delivery_snapshot(
+            conn,
+            &generation.snapshot,
+            "degraded",
+            Some("deterministic"),
+            &generation.source_task_ids,
+        )
+    })
+}
+
 pub fn mark_mission_delivery_stale_best_effort(
     conn: &Connection,
     mission_id: &str,
@@ -975,7 +991,7 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{migrations_run_on, queries};
+    use crate::db::{migrations_run_on, queries, Database};
     use rusqlite::Connection;
 
     fn setup_delivery_db() -> Connection {
@@ -1555,6 +1571,81 @@ mod tests {
         assert_eq!(row.generation_status, "generated");
         assert_eq!(row.curator_model.as_deref(), Some("claude-curator"));
         assert!(!row.stale);
+        assert_eq!(persisted.overview.title, "Curated delivery");
+        assert_eq!(persisted.items[0].id, "curated-item");
+    }
+
+    #[test]
+    fn degraded_generation_helper_persists_terminal_snapshot_without_overwriting_generated() {
+        let db = Database::open_in_memory().expect("open in-memory db");
+        db.with_conn(|conn| {
+            insert_mission(conn, "mission-1", "Ship CLI", "completed");
+            insert_task(conn, "task-1", "mission-1", "Publish manifest", "completed");
+            insert_artifact_row(
+                conn,
+                "artifact-1",
+                "mission-1",
+                "task-1",
+                "manifest",
+                "Release manifest for operators.",
+                r#"[\"dist/manifest.json\"]"#,
+            );
+            Ok(())
+        })
+        .expect("seed delivery inputs");
+
+        generate_and_persist_degraded_delivery(&db, "mission-1")
+            .expect("terminal snapshot generation persists");
+
+        let degraded_row = db
+            .with_conn(|conn| queries::get_mission_delivery(conn, "mission-1"))
+            .expect("read degraded delivery")
+            .expect("degraded delivery row exists");
+        assert_eq!(degraded_row.generation_status, "degraded");
+        assert_eq!(degraded_row.curator_model.as_deref(), Some("deterministic"));
+        assert!(!degraded_row.stale);
+
+        let curated = MissionDeliverySnapshot {
+            schema_version: DELIVERY_SNAPSHOT_SCHEMA_VERSION,
+            mission_id: "mission-1".to_string(),
+            status: DeliveryStatus::Completed,
+            confidence: DeliveryConfidence::High,
+            overview: DeliveryOverview {
+                title: "Curated delivery".to_string(),
+                summary: "Curated generated snapshot should survive degraded refresh.".to_string(),
+                status: DeliveryStatus::Completed,
+                confidence: DeliveryConfidence::High,
+            },
+            items: vec![DeliveryItem {
+                id: "curated-item".to_string(),
+                source: DeliveryCandidateSource::ModelHint,
+                title: "Curated output".to_string(),
+                summary: "Generated curator output.".to_string(),
+                file_paths: vec!["dist/curated.md".to_string()],
+                confidence: DeliveryConfidence::High,
+            }],
+            how_to_use: vec![],
+            validation: vec![],
+            changes: vec![],
+            caveats: vec![],
+            next_steps: vec![],
+        };
+        db.with_conn(|conn| {
+            persist_delivery_snapshot(conn, &curated, "generated", Some("claude-curator"), &[])
+        })
+        .expect("curated snapshot persists");
+
+        generate_and_persist_degraded_delivery(&db, "mission-1")
+            .expect("degraded generation no-ops over fresh generated snapshot");
+
+        let row = db
+            .with_conn(|conn| queries::get_mission_delivery(conn, "mission-1"))
+            .expect("read final delivery")
+            .expect("delivery row exists");
+        let persisted: MissionDeliverySnapshot =
+            serde_json::from_str(&row.snapshot_json).expect("persisted snapshot parses");
+        assert_eq!(row.generation_status, "generated");
+        assert_eq!(row.curator_model.as_deref(), Some("claude-curator"));
         assert_eq!(persisted.overview.title, "Curated delivery");
         assert_eq!(persisted.items[0].id, "curated-item");
     }

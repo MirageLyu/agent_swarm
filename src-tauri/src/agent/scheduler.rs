@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::agent::conflict_resolver::LlmProviderResolver;
+use crate::agent::delivery::generate_and_persist_degraded_delivery;
 use crate::agent::engine::AgentRunOptions;
 use crate::agent::guardrail::{parse_guardrails, Guardrail};
 use crate::agent::{AgentEngine, AgentRegistry, AgentStatus, EvaluatorAgent};
@@ -249,8 +250,26 @@ impl Scheduler {
                     to: new_status.clone(),
                 },
             );
+            if new_status == "failed" {
+                let mid = mission_id.to_string();
+                let app_clone = app.clone();
+                tokio::spawn(async move {
+                    Self::generate_terminal_delivery_best_effort(&app_clone, &mid);
+                });
+            }
         }
         Ok(terminal.is_some())
+    }
+
+    fn generate_terminal_delivery_best_effort(app: &tauri::AppHandle, mission_id: &str) {
+        let db = app.state::<Database>();
+        if let Err(err) = generate_and_persist_degraded_delivery(&db, mission_id) {
+            tracing::warn!(
+                mission_id = %mission_id,
+                error = %err,
+                "failed to generate terminal mission delivery snapshot"
+            );
+        }
     }
 
     /// FM-15 Phase 2 (FR-08): mission 终态合并 —— frontier merge。
@@ -579,6 +598,7 @@ impl Scheduler {
             )
             .await;
         }
+        Self::generate_terminal_delivery_best_effort(app, mission_id);
     }
 
     /// FM-15 v2.2 P4-S4: 聚合 deliverables 并广播 mission-delivered 事件。
