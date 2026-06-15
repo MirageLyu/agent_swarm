@@ -1,4 +1,6 @@
+use crate::db::queries;
 use anyhow::Result;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
@@ -408,6 +410,15 @@ pub struct MissionDeliverySnapshot {
 
 impl MissionDeliverySnapshot {
     pub fn degraded(mission_id: impl Into<String>, candidates: Vec<DeliveryCandidate>) -> Self {
+        Self::degraded_with_mission_status(mission_id, None::<String>, None::<String>, candidates)
+    }
+
+    pub fn degraded_with_mission_status(
+        mission_id: impl Into<String>,
+        mission_title: Option<impl Into<String>>,
+        mission_status: Option<impl AsRef<str>>,
+        candidates: Vec<DeliveryCandidate>,
+    ) -> Self {
         let mission_id = mission_id.into();
         let mut items = candidates
             .into_iter()
@@ -433,18 +444,28 @@ impl MissionDeliverySnapshot {
             .first()
             .map(|item| item.title.clone())
             .unwrap_or_else(|| "Delivery summary".to_string());
+        let mission_title = mission_title
+            .map(Into::into)
+            .map(|title| non_empty_or(title, || mission_id.clone()));
+        let mission_label = mission_title.as_deref().unwrap_or(&mission_id).to_string();
+        let status = match mission_status.as_ref().map(|status| status.as_ref()) {
+            Some("failed") => DeliveryStatus::Failed,
+            Some("completed") => DeliveryStatus::CompletedWithWarnings,
+            _ => DeliveryStatus::CompletedWithWarnings,
+        };
+        let overview_summary = format!(
+            "Deterministic fallback snapshot for `{mission_label}` with {item_count} deliverable candidate(s). Primary candidate: {primary_title}."
+        );
 
         Self {
             schema_version: DELIVERY_SNAPSHOT_SCHEMA_VERSION,
             mission_id,
-            status: DeliveryStatus::CompletedWithWarnings,
+            status,
             confidence: DeliveryConfidence::Low,
             overview: DeliveryOverview {
                 title: "Degraded mission delivery snapshot".to_string(),
-                summary: format!(
-                    "Deterministic fallback snapshot with {item_count} deliverable candidate(s). Primary candidate: {primary_title}."
-                ),
-                status: DeliveryStatus::CompletedWithWarnings,
+                summary: overview_summary,
+                status,
                 confidence: DeliveryConfidence::Low,
             },
             items,
@@ -474,6 +495,128 @@ impl MissionDeliverySnapshot {
             ],
         }
     }
+}
+
+pub fn candidates_from_artifacts(artifacts: &[queries::ArtifactRow]) -> Vec<DeliveryCandidate> {
+    let mut candidates = artifacts
+        .iter()
+        .map(|artifact| {
+            let mut file_paths = parse_artifact_file_paths(&artifact.file_paths, &artifact.id);
+            sort_and_dedup_strings(&mut file_paths);
+            DeliveryCandidate {
+                id: artifact.id.trim().to_string(),
+                source: DeliveryCandidateSource::Artifact,
+                title: non_empty_or(artifact.local_name.clone(), || "artifact".to_string()),
+                summary: artifact.summary.clone(),
+                file_paths,
+                confidence: DeliveryConfidence::Medium,
+            }
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(compare_delivery_candidates);
+    candidates
+}
+
+pub fn generate_degraded_delivery_snapshot(
+    conn: &Connection,
+    mission_id: &str,
+) -> Result<MissionDeliverySnapshot> {
+    let (mission_title, mission_status): (String, String) = conn
+        .query_row(
+            "SELECT title, status FROM missions WHERE id = ?1",
+            [mission_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("mission not found: {mission_id}"))?;
+
+    let handoffs = queries::list_task_handoff_packets_for_mission(conn, mission_id)?;
+    let mut candidates = Vec::new();
+    for row in handoffs {
+        match serde_json::from_str::<TaskHandoffPacket>(&row.packet_json) {
+            Ok(packet) => candidates.extend(candidates_from_handoff(&packet)),
+            Err(err) => tracing::warn!(
+                mission_id = %mission_id,
+                task_id = %row.task_id,
+                error = %err,
+                "skipping corrupt task handoff packet during delivery snapshot generation"
+            ),
+        }
+    }
+
+    let artifacts = queries::list_artifacts_for_mission(conn, mission_id)?;
+    candidates.extend(candidates_from_artifacts(&artifacts));
+
+    Ok(MissionDeliverySnapshot::degraded_with_mission_status(
+        mission_id.to_string(),
+        Some(mission_title),
+        Some(mission_status),
+        candidates,
+    ))
+}
+
+pub fn persist_delivery_snapshot(
+    conn: &Connection,
+    snapshot: &MissionDeliverySnapshot,
+    generation_status: &str,
+    curator_model: Option<&str>,
+) -> Result<()> {
+    let snapshot_json = serde_json::to_string(snapshot)?;
+    let source_task_ids = source_task_ids_json(snapshot)?;
+    queries::upsert_mission_delivery(
+        conn,
+        &snapshot.mission_id,
+        snapshot.schema_version as i64,
+        &snapshot_json,
+        generation_status,
+        curator_model,
+        &source_task_ids,
+        "[]",
+        false,
+    )
+}
+
+fn candidates_from_handoff(packet: &TaskHandoffPacket) -> Vec<DeliveryCandidate> {
+    let mut candidates = packet
+        .artifacts
+        .iter()
+        .map(|artifact| DeliveryCandidate::from_artifact(&packet.task_id, artifact))
+        .collect::<Vec<_>>();
+    candidates.sort_by(compare_delivery_candidates);
+    candidates
+}
+
+fn parse_artifact_file_paths(file_paths_json: &str, artifact_id: &str) -> Vec<String> {
+    match serde_json::from_str::<Vec<String>>(file_paths_json) {
+        Ok(paths) => paths
+            .into_iter()
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+            .collect(),
+        Err(err) => {
+            tracing::warn!(
+                artifact_id = %artifact_id,
+                error = %err,
+                "skipping malformed artifact file_paths JSON during delivery snapshot generation"
+            );
+            Vec::new()
+        }
+    }
+}
+
+fn source_task_ids_json(snapshot: &MissionDeliverySnapshot) -> Result<String> {
+    let mut ids = snapshot
+        .items
+        .iter()
+        .filter(|item| item.source == DeliveryCandidateSource::Artifact)
+        .filter_map(|item| {
+            item.id
+                .split_once('.')
+                .map(|(task_id, _)| task_id.to_string())
+        })
+        .collect::<Vec<_>>();
+    sort_and_dedup_strings(&mut ids);
+    serde_json::to_string(&ids).map_err(Into::into)
 }
 
 pub fn render_handoffs_for_prompt(handoffs: &[TaskHandoffPacket], max_chars: usize) -> String {
@@ -595,6 +738,13 @@ fn compare_delivery_items(a: &DeliveryItem, b: &DeliveryItem) -> Ordering {
         .then_with(|| a.title.cmp(&b.title))
 }
 
+fn compare_delivery_candidates(a: &DeliveryCandidate, b: &DeliveryCandidate) -> Ordering {
+    source_rank(a.source)
+        .cmp(&source_rank(b.source))
+        .then_with(|| a.id.cmp(&b.id))
+        .then_with(|| a.title.cmp(&b.title))
+}
+
 fn source_rank(source: DeliveryCandidateSource) -> u8 {
     match source {
         DeliveryCandidateSource::Artifact => 0,
@@ -680,6 +830,48 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{migrations_run_on, queries};
+    use rusqlite::Connection;
+
+    fn setup_delivery_db() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        migrations_run_on(&conn).expect("run migrations");
+        conn
+    }
+
+    fn insert_mission(conn: &Connection, id: &str, title: &str, status: &str) {
+        conn.execute(
+            "INSERT INTO missions (id, title, description, status) VALUES (?1, ?2, 'Build delivery outputs', ?3)",
+            rusqlite::params![id, title, status],
+        )
+        .unwrap();
+    }
+
+    fn insert_task(conn: &Connection, id: &str, mission_id: &str, title: &str, status: &str) {
+        conn.execute(
+            "INSERT INTO tasks (id, mission_id, title, description, status) VALUES (?1, ?2, ?3, 'Produce output', ?4)",
+            rusqlite::params![id, mission_id, title, status],
+        )
+        .unwrap();
+    }
+
+    fn insert_artifact_row(
+        conn: &Connection,
+        id: &str,
+        mission_id: &str,
+        task_id: &str,
+        local_name: &str,
+        summary: &str,
+        file_paths_json: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO artifacts (id, mission_id, producer_task_id, type, local_name, summary, file_paths, published)
+             VALUES (?1, ?2, ?3, 'report', ?4, ?5, ?6, 1)",
+            rusqlite::params![id, mission_id, task_id, local_name, summary, file_paths_json],
+        )
+        .unwrap();
+    }
 
     fn artifact(local_name: &str, summary: &str, paths: &[&str]) -> DeliveryArtifactRef {
         DeliveryArtifactRef {
@@ -885,6 +1077,154 @@ mod tests {
             .caveats
             .iter()
             .any(|caveat| caveat.contains("fallback")));
+    }
+
+    #[test]
+    fn delivery_snapshot_round_trips_json_for_frontend() {
+        let snapshot = MissionDeliverySnapshot::degraded(
+            "mission-1",
+            vec![DeliveryCandidate::from_artifact(
+                "task-1",
+                &artifact(
+                    "release_notes",
+                    "Markdown release notes for operators.",
+                    &["dist/release-notes.md"],
+                ),
+            )],
+        );
+
+        let json = serde_json::to_value(&snapshot).expect("snapshot serializes");
+        assert_eq!(json["schema_version"], DELIVERY_SNAPSHOT_SCHEMA_VERSION);
+        assert_eq!(json["mission_id"], "mission-1");
+        assert_eq!(json["status"], "completed_with_warnings");
+        assert_eq!(json["confidence"], "low");
+        assert_eq!(json["overview"]["status"], "completed_with_warnings");
+        assert_eq!(json["overview"]["confidence"], "low");
+        assert_eq!(json["items"][0]["source"], "artifact");
+        assert_eq!(json["items"][0]["confidence"], "medium");
+        assert_eq!(json["validation"][0]["status"], "not_run");
+
+        let round_tripped: MissionDeliverySnapshot =
+            serde_json::from_value(json).expect("frontend JSON shape deserializes");
+        assert_eq!(round_tripped, snapshot);
+    }
+
+    #[test]
+    fn candidates_from_artifacts_parses_paths_and_skips_malformed_path_lists() {
+        let artifacts = vec![
+            queries::ArtifactRow {
+                id: "artifact-b".to_string(),
+                mission_id: "mission-1".to_string(),
+                producer_task_id: "task-b".to_string(),
+                artifact_type: "report".to_string(),
+                local_name: "beta".to_string(),
+                summary: "Beta report".to_string(),
+                file_paths: "[\"dist/beta.md\", \"dist/beta.md\", \"\"]".to_string(),
+                published: true,
+                created_at: "2026-06-15 10:00:00".to_string(),
+            },
+            queries::ArtifactRow {
+                id: "artifact-a".to_string(),
+                mission_id: "mission-1".to_string(),
+                producer_task_id: "task-a".to_string(),
+                artifact_type: "report".to_string(),
+                local_name: "alpha".to_string(),
+                summary: "Alpha report".to_string(),
+                file_paths: "not json".to_string(),
+                published: true,
+                created_at: "2026-06-15 09:00:00".to_string(),
+            },
+        ];
+
+        let candidates = candidates_from_artifacts(&artifacts);
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].id, "artifact-a");
+        assert_eq!(candidates[0].title, "alpha");
+        assert!(candidates[0].file_paths.is_empty());
+        assert_eq!(candidates[1].id, "artifact-b");
+        assert_eq!(candidates[1].file_paths, vec!["dist/beta.md"]);
+    }
+
+    #[test]
+    fn generate_degraded_delivery_snapshot_collects_artifacts_handoffs_and_failed_status() {
+        let conn = setup_delivery_db();
+        insert_mission(&conn, "mission-1", "Ship CLI", "failed");
+        insert_task(
+            &conn,
+            "task-1",
+            "mission-1",
+            "Write release notes",
+            "completed",
+        );
+        insert_task(
+            &conn,
+            "task-2",
+            "mission-1",
+            "Write malformed handoff",
+            "completed",
+        );
+        insert_artifact_row(
+            &conn,
+            "artifact-1",
+            "mission-1",
+            "task-1",
+            "release_notes",
+            "Markdown release notes for operators.",
+            "[\"dist/release-notes.md\"]",
+        );
+        queries::upsert_task_handoff_packet(
+            &conn,
+            "task-1",
+            "mission-1",
+            &serde_json::to_string(&TaskHandoffPacket::fallback(
+                "mission-1",
+                "task-1",
+                "Write release notes",
+                "Release notes are ready.",
+                vec![artifact(
+                    "handoff_manifest",
+                    "Manifest from handoff.",
+                    &["dist/manifest.json"],
+                )],
+            ))
+            .unwrap(),
+            "generated",
+        )
+        .unwrap();
+        queries::upsert_task_handoff_packet(&conn, "task-2", "mission-1", "not json", "generated")
+            .unwrap();
+
+        let snapshot = generate_degraded_delivery_snapshot(&conn, "mission-1")
+            .expect("snapshot generation succeeds with corrupt handoff skipped");
+
+        assert_eq!(snapshot.mission_id, "mission-1");
+        assert_eq!(snapshot.status, DeliveryStatus::Failed);
+        assert_eq!(snapshot.overview.status, DeliveryStatus::Failed);
+        assert!(snapshot.overview.summary.contains("Ship CLI"));
+        assert!(snapshot.items.iter().any(
+            |item| item.id == "artifact-1" && item.file_paths == vec!["dist/release-notes.md"]
+        ));
+    }
+
+    #[test]
+    fn persist_delivery_snapshot_upserts_frontend_json() {
+        let conn = setup_delivery_db();
+        insert_mission(&conn, "mission-1", "Ship CLI", "completed");
+        let snapshot = MissionDeliverySnapshot::degraded("mission-1", vec![]);
+
+        persist_delivery_snapshot(&conn, &snapshot, "degraded", Some("deterministic"))
+            .expect("snapshot persists");
+
+        let row = queries::get_mission_delivery(&conn, "mission-1")
+            .unwrap()
+            .expect("delivery row exists");
+        assert_eq!(row.generation_status, "degraded");
+        assert_eq!(row.curator_model.as_deref(), Some("deterministic"));
+        assert!(!row.stale);
+        let persisted: MissionDeliverySnapshot =
+            serde_json::from_str(&row.snapshot_json).expect("persisted snapshot JSON parses");
+        assert_eq!(persisted, snapshot);
     }
 
     #[test]

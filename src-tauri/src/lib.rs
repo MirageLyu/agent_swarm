@@ -207,6 +207,8 @@ pub fn run() {
             commands::list_skills,
             commands::list_mission_artifacts,
             commands::list_task_artifacts,
+            commands::get_mission_delivery,
+            commands::generate_mission_delivery,
             commands::confirm_planner_fetch,
             commands::start_preflight,
             commands::send_preflight_message,

@@ -696,6 +696,85 @@ export interface ListArtifactsResponse {
   artifacts: ArtifactInfo[];
 }
 
+// ---------- Mission Delivery Plane ----------
+
+export type DeliveryStatus = "completed" | "completed_with_warnings" | "failed";
+export type DeliveryConfidence = "high" | "medium" | "low";
+export type ValidationResultStatus = "passed" | "failed" | "not_run" | "unknown";
+export type DeliveryCandidateSource =
+  | "artifact"
+  | "handoff"
+  | "git"
+  | "filesystem"
+  | "manifest"
+  | "model_hint";
+
+export interface DeliveryItem {
+  id: string;
+  source: DeliveryCandidateSource;
+  title: string;
+  summary: string;
+  file_paths: string[];
+  confidence: DeliveryConfidence;
+}
+
+export interface DeliveryOverview {
+  title: string;
+  summary: string;
+  status: DeliveryStatus;
+  confidence: DeliveryConfidence;
+}
+
+export interface HowToUseStep {
+  title: string;
+  detail: string;
+}
+
+export interface ValidationEvidence {
+  status: ValidationResultStatus;
+  summary: string;
+  command?: string | null;
+}
+
+export interface ChangeSummary {
+  title: string;
+  detail: string;
+  files: string[];
+}
+
+export interface MissionDeliverySnapshot {
+  schema_version: number;
+  mission_id: string;
+  status: DeliveryStatus;
+  confidence: DeliveryConfidence;
+  overview: DeliveryOverview;
+  items: DeliveryItem[];
+  how_to_use: HowToUseStep[];
+  validation: ValidationEvidence[];
+  changes: ChangeSummary[];
+  caveats: string[];
+  next_steps: string[];
+}
+
+export interface MissionDeliveryView {
+  mission_id: string;
+  version: number;
+  generation_status: string;
+  curator_model: string | null;
+  source_task_ids: string;
+  source_event_ids: string;
+  stale: boolean;
+  created_at: string;
+  updated_at: string;
+  snapshot: MissionDeliverySnapshot;
+}
+
+export interface GenerateMissionDeliveryResponse {
+  mission_id: string;
+  generation_status: string;
+  delivery: MissionDeliveryView;
+}
+
 // ---------- FM-15 v2.2 P4-S5: Follow-up Chat ----------
 
 export type ChatMessageRole = "user" | "assistant" | "system";
@@ -1217,6 +1296,12 @@ export const commands = {
 
   listTaskArtifacts: (taskId: string) =>
     invoke<ListArtifactsResponse>("list_task_artifacts", { taskId }),
+
+  getMissionDelivery: (missionId: string) =>
+    invoke<MissionDeliveryView | null>("get_mission_delivery", { missionId }),
+
+  generateMissionDelivery: (missionId: string) =>
+    invoke<GenerateMissionDeliveryResponse>("generate_mission_delivery", { missionId }),
 
   // FM-15 FR-05.x: Planner fetch_url confirmation
   confirmPlannerFetch: (request: ConfirmPlannerFetchRequest) =>
