@@ -48,8 +48,14 @@ pub fn generate_mission_delivery(
 ) -> Result<GenerateMissionDeliveryResponse, String> {
     let db = app.state::<Database>();
     db.with_conn(|conn| {
-        let snapshot = generate_degraded_delivery_snapshot(conn, &mission_id)?;
-        persist_delivery_snapshot(conn, &snapshot, "degraded", Some("deterministic"))?;
+        let generation = generate_degraded_delivery_snapshot(conn, &mission_id)?;
+        persist_delivery_snapshot(
+            conn,
+            &generation.snapshot,
+            "degraded",
+            Some("deterministic"),
+            &generation.source_task_ids,
+        )?;
         let row = queries::get_mission_delivery(conn, &mission_id)?.ok_or_else(|| {
             anyhow::anyhow!("delivery snapshot was not persisted for mission: {mission_id}")
         })?;

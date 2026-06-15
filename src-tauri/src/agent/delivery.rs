@@ -497,6 +497,12 @@ impl MissionDeliverySnapshot {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliverySnapshotGeneration {
+    pub snapshot: MissionDeliverySnapshot,
+    pub source_task_ids: Vec<String>,
+}
+
 pub fn candidates_from_artifacts(artifacts: &[queries::ArtifactRow]) -> Vec<DeliveryCandidate> {
     let mut candidates = artifacts
         .iter()
@@ -520,7 +526,7 @@ pub fn candidates_from_artifacts(artifacts: &[queries::ArtifactRow]) -> Vec<Deli
 pub fn generate_degraded_delivery_snapshot(
     conn: &Connection,
     mission_id: &str,
-) -> Result<MissionDeliverySnapshot> {
+) -> Result<DeliverySnapshotGeneration> {
     let (mission_title, mission_status): (String, String) = conn
         .query_row(
             "SELECT title, status FROM missions WHERE id = ?1",
@@ -530,11 +536,21 @@ pub fn generate_degraded_delivery_snapshot(
         .optional()?
         .ok_or_else(|| anyhow::anyhow!("mission not found: {mission_id}"))?;
 
+    if !matches!(mission_status.as_str(), "completed" | "failed") {
+        return Err(anyhow::anyhow!(
+            "Mission `{mission_title}` is not ready for delivery yet. Delivery can be generated after the mission completes or fails."
+        ));
+    }
+
     let handoffs = queries::list_task_handoff_packets_for_mission(conn, mission_id)?;
     let mut candidates = Vec::new();
+    let mut source_task_ids = Vec::new();
     for row in handoffs {
         match serde_json::from_str::<TaskHandoffPacket>(&row.packet_json) {
-            Ok(packet) => candidates.extend(candidates_from_handoff(&packet)),
+            Ok(packet) => {
+                source_task_ids.push(packet.task_id.clone());
+                candidates.extend(candidates_from_handoff(&packet));
+            }
             Err(err) => tracing::warn!(
                 mission_id = %mission_id,
                 task_id = %row.task_id,
@@ -545,14 +561,28 @@ pub fn generate_degraded_delivery_snapshot(
     }
 
     let artifacts = queries::list_artifacts_for_mission(conn, mission_id)?;
-    candidates.extend(candidates_from_artifacts(&artifacts));
+    let published_artifacts = artifacts
+        .into_iter()
+        .filter(|artifact| artifact.published)
+        .collect::<Vec<_>>();
+    source_task_ids.extend(
+        published_artifacts
+            .iter()
+            .map(|artifact| artifact.producer_task_id.clone())
+            .filter(|task_id| !task_id.trim().is_empty()),
+    );
+    candidates.extend(candidates_from_artifacts(&published_artifacts));
+    sort_and_dedup_strings(&mut source_task_ids);
 
-    Ok(MissionDeliverySnapshot::degraded_with_mission_status(
-        mission_id.to_string(),
-        Some(mission_title),
-        Some(mission_status),
-        candidates,
-    ))
+    Ok(DeliverySnapshotGeneration {
+        snapshot: MissionDeliverySnapshot::degraded_with_mission_status(
+            mission_id.to_string(),
+            Some(mission_title),
+            Some(mission_status),
+            candidates,
+        ),
+        source_task_ids,
+    })
 }
 
 pub fn persist_delivery_snapshot(
@@ -560,9 +590,10 @@ pub fn persist_delivery_snapshot(
     snapshot: &MissionDeliverySnapshot,
     generation_status: &str,
     curator_model: Option<&str>,
+    source_task_ids: &[String],
 ) -> Result<()> {
     let snapshot_json = serde_json::to_string(snapshot)?;
-    let source_task_ids = source_task_ids_json(snapshot)?;
+    let source_task_ids = source_task_ids_json(source_task_ids)?;
     queries::upsert_mission_delivery(
         conn,
         &snapshot.mission_id,
@@ -604,16 +635,11 @@ fn parse_artifact_file_paths(file_paths_json: &str, artifact_id: &str) -> Vec<St
     }
 }
 
-fn source_task_ids_json(snapshot: &MissionDeliverySnapshot) -> Result<String> {
-    let mut ids = snapshot
-        .items
+fn source_task_ids_json(source_task_ids: &[String]) -> Result<String> {
+    let mut ids = source_task_ids
         .iter()
-        .filter(|item| item.source == DeliveryCandidateSource::Artifact)
-        .filter_map(|item| {
-            item.id
-                .split_once('.')
-                .map(|(task_id, _)| task_id.to_string())
-        })
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
         .collect::<Vec<_>>();
     sort_and_dedup_strings(&mut ids);
     serde_json::to_string(&ids).map_err(Into::into)
@@ -865,10 +891,40 @@ mod tests {
         summary: &str,
         file_paths_json: &str,
     ) {
+        insert_artifact_row_with_published(
+            conn,
+            id,
+            mission_id,
+            task_id,
+            local_name,
+            summary,
+            file_paths_json,
+            true,
+        );
+    }
+
+    fn insert_artifact_row_with_published(
+        conn: &Connection,
+        id: &str,
+        mission_id: &str,
+        task_id: &str,
+        local_name: &str,
+        summary: &str,
+        file_paths_json: &str,
+        published: bool,
+    ) {
         conn.execute(
             "INSERT INTO artifacts (id, mission_id, producer_task_id, type, local_name, summary, file_paths, published)
-             VALUES (?1, ?2, ?3, 'report', ?4, ?5, ?6, 1)",
-            rusqlite::params![id, mission_id, task_id, local_name, summary, file_paths_json],
+             VALUES (?1, ?2, ?3, 'report', ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                id,
+                mission_id,
+                task_id,
+                local_name,
+                summary,
+                file_paths_json,
+                if published { 1i64 } else { 0i64 }
+            ],
         )
         .unwrap();
     }
@@ -1195,8 +1251,9 @@ mod tests {
         queries::upsert_task_handoff_packet(&conn, "task-2", "mission-1", "not json", "generated")
             .unwrap();
 
-        let snapshot = generate_degraded_delivery_snapshot(&conn, "mission-1")
+        let generation = generate_degraded_delivery_snapshot(&conn, "mission-1")
             .expect("snapshot generation succeeds with corrupt handoff skipped");
+        let snapshot = generation.snapshot;
 
         assert_eq!(snapshot.mission_id, "mission-1");
         assert_eq!(snapshot.status, DeliveryStatus::Failed);
@@ -1208,12 +1265,140 @@ mod tests {
     }
 
     #[test]
+    fn generate_degraded_delivery_snapshot_excludes_unpublished_artifacts() {
+        let conn = setup_delivery_db();
+        insert_mission(&conn, "mission-1", "Ship CLI", "completed");
+        insert_task(&conn, "task-1", "mission-1", "Write outputs", "completed");
+        insert_artifact_row_with_published(
+            &conn,
+            "published-artifact",
+            "mission-1",
+            "task-1",
+            "published_report",
+            "Visible report.",
+            "[\"dist/published.md\"]",
+            true,
+        );
+        insert_artifact_row_with_published(
+            &conn,
+            "draft-artifact",
+            "mission-1",
+            "task-1",
+            "draft_report",
+            "Planner declaration not produced by an agent yet.",
+            "[\"dist/draft.md\"]",
+            false,
+        );
+
+        let generation = generate_degraded_delivery_snapshot(&conn, "mission-1")
+            .expect("snapshot generation succeeds");
+
+        assert!(generation
+            .snapshot
+            .items
+            .iter()
+            .any(|item| item.id == "published-artifact"));
+        assert!(!generation
+            .snapshot
+            .items
+            .iter()
+            .any(|item| item.id == "draft-artifact"));
+        assert_eq!(generation.source_task_ids, vec!["task-1".to_string()]);
+    }
+
+    #[test]
+    fn delivery_source_task_ids_are_explicit_task_ids_not_parsed_item_ids() {
+        let conn = setup_delivery_db();
+        insert_mission(&conn, "mission-1", "Ship CLI", "completed");
+        insert_task(
+            &conn,
+            "real-task",
+            "mission-1",
+            "Publish report",
+            "completed",
+        );
+        insert_task(
+            &conn,
+            "handoff-task",
+            "mission-1",
+            "Publish manifest",
+            "completed",
+        );
+        insert_artifact_row(
+            &conn,
+            "artifact.id.with.dots",
+            "mission-1",
+            "real-task",
+            "release_notes",
+            "Markdown release notes for operators.",
+            "[\"dist/release-notes.md\"]",
+        );
+        queries::upsert_task_handoff_packet(
+            &conn,
+            "handoff-task",
+            "mission-1",
+            &serde_json::to_string(&TaskHandoffPacket::fallback(
+                "mission-1",
+                "handoff-task",
+                "Publish manifest",
+                "Manifest is ready.",
+                vec![DeliveryArtifactRef {
+                    artifact_id: Some("custom.handoff.item".to_string()),
+                    local_name: "handoff_manifest".to_string(),
+                    artifact_type: "report".to_string(),
+                    summary: "Manifest from handoff.".to_string(),
+                    file_paths: vec!["dist/manifest.json".to_string()],
+                }],
+            ))
+            .unwrap(),
+            "generated",
+        )
+        .unwrap();
+
+        let generation = generate_degraded_delivery_snapshot(&conn, "mission-1")
+            .expect("snapshot generation succeeds");
+        persist_delivery_snapshot(
+            &conn,
+            &generation.snapshot,
+            "degraded",
+            Some("deterministic"),
+            &generation.source_task_ids,
+        )
+        .expect("snapshot persists");
+
+        let row = queries::get_mission_delivery(&conn, "mission-1")
+            .unwrap()
+            .expect("delivery row exists");
+        let source_task_ids: Vec<String> =
+            serde_json::from_str(&row.source_task_ids).expect("source task IDs parse");
+
+        assert_eq!(
+            source_task_ids,
+            vec!["handoff-task".to_string(), "real-task".to_string()]
+        );
+    }
+
+    #[test]
+    fn generate_degraded_delivery_snapshot_rejects_nonterminal_missions() {
+        let conn = setup_delivery_db();
+        insert_mission(&conn, "mission-1", "Ship CLI", "running");
+
+        let err = generate_degraded_delivery_snapshot(&conn, "mission-1")
+            .expect_err("running mission should not generate on-demand delivery");
+
+        assert!(
+            err.to_string().contains("not ready for delivery"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn persist_delivery_snapshot_upserts_frontend_json() {
         let conn = setup_delivery_db();
         insert_mission(&conn, "mission-1", "Ship CLI", "completed");
         let snapshot = MissionDeliverySnapshot::degraded("mission-1", vec![]);
 
-        persist_delivery_snapshot(&conn, &snapshot, "degraded", Some("deterministic"))
+        persist_delivery_snapshot(&conn, &snapshot, "degraded", Some("deterministic"), &[])
             .expect("snapshot persists");
 
         let row = queries::get_mission_delivery(&conn, "mission-1")
