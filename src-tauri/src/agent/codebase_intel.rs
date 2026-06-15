@@ -1,9 +1,10 @@
 //! FM-15 FR-10: Codebase Intelligence 注入。
 //!
-//! 在 Coding Agent 启动时为 system prompt 追加四块上下文：
+//! 在 Coding Agent 启动时为 system prompt 追加五块上下文：
 //! - `[Project Structure]`：repo 顶层 ≤3 层目录树（忽略大目录）
 //! - `[Tech Stack]`：基于文件签名启发式识别语言/框架
 //! - `[Upstream Context]`：上游 task 的 completion_summary + 已发布 artifacts
+//! - `[Upstream Handoff Packets]`：直接父 task 的 handoff packets
 //! - `[Base Conflicts]`：当前 task 的 task_base_conflicts 摘要
 //!
 //! 优先级（FR-10.4）：超过总长度上限时按 Skills > Upstream > Project > Tech > BaseConflicts
@@ -40,6 +41,7 @@ pub struct CodebaseIntel {
     pub project_structure: String,
     pub tech_stack: String,
     pub upstream_context: String,
+    pub upstream_handoffs: String,
     pub base_conflicts: String,
 }
 
@@ -59,6 +61,10 @@ impl CodebaseIntel {
             out.push_str("\n\n[Upstream Context]\n");
             out.push_str(self.upstream_context.trim_end());
         }
+        if !self.upstream_handoffs.trim().is_empty() {
+            out.push_str("\n\n[Upstream Handoff Packets]\n");
+            out.push_str(self.upstream_handoffs.trim_end());
+        }
         if !self.base_conflicts.trim().is_empty() {
             out.push_str("\n\n[Base Conflicts]\n");
             out.push_str(self.base_conflicts.trim_end());
@@ -76,19 +82,21 @@ pub fn build_intel(
     let project_structure = build_project_tree(repo_root);
     let tech_stack = detect_tech_stack(repo_root);
 
-    let (upstream_context, base_conflicts) = match (task_id, db) {
+    let (upstream_context, upstream_handoffs, base_conflicts) = match (task_id, db) {
         (Some(tid), Some(db)) => {
             let upstream = build_upstream_context(db, tid);
+            let handoffs = build_upstream_handoffs(db, tid);
             let conflicts = build_base_conflicts(db, tid);
-            (upstream, conflicts)
+            (upstream, handoffs, conflicts)
         }
-        _ => (String::new(), String::new()),
+        _ => (String::new(), String::new(), String::new()),
     };
 
     CodebaseIntel {
         project_structure: truncate_block(&project_structure, PROJECT_TREE_BUDGET_CHARS),
         tech_stack: truncate_block(&tech_stack, TECH_STACK_BUDGET_CHARS),
         upstream_context: truncate_block(&upstream_context, UPSTREAM_BUDGET_CHARS),
+        upstream_handoffs: truncate_block(&upstream_handoffs, UPSTREAM_BUDGET_CHARS),
         base_conflicts: truncate_block(&base_conflicts, BASE_CONFLICTS_BUDGET_CHARS),
     }
 }
@@ -317,6 +325,43 @@ fn list_upstream_summaries(
     Ok(rows)
 }
 
+// ---- Upstream handoffs (Mission Delivery Plane Task 4) ----
+
+fn build_upstream_handoffs(db: &crate::db::Database, task_id: &str) -> String {
+    let rows =
+        match db.with_conn(|conn| crate::db::queries::list_parent_handoff_packets(conn, task_id)) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("upstream handoff fetch failed: {e}");
+                return String::new();
+            }
+        };
+
+    let handoffs = rows
+        .into_iter()
+        .filter_map(|row| {
+            match serde_json::from_str::<crate::agent::delivery::TaskHandoffPacket>(
+                &row.packet_json,
+            ) {
+                Ok(packet) => Some(packet),
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %row.task_id,
+                        "skipping corrupt upstream handoff packet: {e}"
+                    );
+                    None
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if handoffs.is_empty() {
+        return String::new();
+    }
+
+    crate::agent::delivery::render_handoffs_for_prompt(&handoffs, UPSTREAM_BUDGET_CHARS)
+}
+
 // ---- Base conflicts (FR-10.2) ----
 
 fn build_base_conflicts(db: &crate::db::Database, task_id: &str) -> String {
@@ -436,6 +481,7 @@ mod tests {
             project_structure: "root\n├── src/".into(),
             tech_stack: "Rust".into(),
             upstream_context: String::new(),
+            upstream_handoffs: String::new(),
             base_conflicts: String::new(),
         };
         let s = intel.render_system_block();
@@ -443,6 +489,42 @@ mod tests {
         assert!(s.contains("[Tech Stack]"));
         assert!(!s.contains("[Upstream Context]"));
         assert!(!s.contains("[Base Conflicts]"));
+    }
+
+    #[test]
+    fn render_system_block_includes_task_handoffs_after_upstream_context() {
+        let handoff = crate::agent::delivery::TaskHandoffPacket::fallback(
+            "mission-1",
+            "parent-1",
+            "Find API",
+            "Found the key API.",
+            vec![],
+        );
+        let intel = CodebaseIntel {
+            project_structure: String::new(),
+            tech_stack: String::new(),
+            upstream_context: "legacy upstream".into(),
+            upstream_handoffs: crate::agent::delivery::render_handoffs_for_prompt(
+                &[handoff],
+                2_000,
+            ),
+            base_conflicts: String::new(),
+        };
+
+        let s = intel.render_system_block();
+
+        let upstream_idx = s
+            .find("[Upstream Context]")
+            .expect("upstream context header");
+        let handoffs_idx = s
+            .find("[Upstream Handoff Packets]")
+            .expect("upstream handoff header");
+        assert!(
+            upstream_idx < handoffs_idx,
+            "handoffs should follow upstream context: {s}"
+        );
+        assert!(s.contains("legacy upstream"));
+        assert!(s.contains("Found the key API."));
     }
 
     #[test]
