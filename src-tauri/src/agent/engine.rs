@@ -30,7 +30,9 @@ use crate::tools::{coding_agent_tools_with_artifact_support, ToolExecutor, TASK_
 // 不直接构造 reason，所以这里不 import；`.as_str()` 通过 method dispatch 触达。
 use super::budget_tracker::{BudgetDecision, BudgetTracker};
 use super::codebase_intel;
-use super::delivery::{DeliveryArtifactRef, TaskHandoffPacket};
+use super::delivery::{
+    task_complete_handoff_is_agent_authored, DeliveryArtifactRef, TaskHandoffPacket,
+};
 use super::guardrail::{self, Guardrail, GuardrailContext};
 use super::recovery_log::{
     build_recovery_attempt_meta, build_recovery_succeeded_meta, format_attempt_content,
@@ -3393,7 +3395,6 @@ impl AgentEngine {
                     CompletionOutcome::Completed => {
                         self.emit_event(agent_id, step, "message", &summary);
                         self.persist_completion_summary(agent_id, &summary);
-                        self.persist_task_handoff_packet(agent_id, &input);
                         // P2-1 Phase B: TaskCompleted hook 调用点。guardrail 已 pass，
                         // status 即将变 completed。典型用途：publish artifact / send
                         // notification。在 status_change 之前调，让 terminal prevent 还能拦下。
@@ -3435,6 +3436,7 @@ impl AgentEngine {
                                 }
                             }
                         }
+                        self.persist_task_handoff_packet(agent_id, &input);
                         self.emit_event(agent_id, step, "status_change", "completed");
                         self.update_agent_status(agent_id, "completed");
                         self.expire_agent_notes(agent_id);
@@ -5882,7 +5884,7 @@ impl AgentEngine {
                 return Ok(());
             };
 
-            let generation_status = if input.get("handoff").is_some() {
+            let generation_status = if task_complete_handoff_is_agent_authored(&input) {
                 "agent_authored"
             } else {
                 "fallback"
