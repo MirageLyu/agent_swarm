@@ -2098,11 +2098,9 @@ mod mission_delivery_plane_migration_tests {
         );
 
         let copied_handoffs: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM task_handoff_packets",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM task_handoff_packets", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(copied_handoffs, 1);
     }

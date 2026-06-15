@@ -657,7 +657,24 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_string();
     }
-    value.chars().take(max_chars).collect()
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    const TRUNCATION_MARKER: &str = "\n…(truncated)";
+    let marker_chars = TRUNCATION_MARKER.chars().count();
+    if max_chars <= marker_chars {
+        return TRUNCATION_MARKER
+            .trim_start_matches('\n')
+            .chars()
+            .take(max_chars)
+            .collect();
+    }
+
+    let keep_chars = max_chars - marker_chars;
+    let mut truncated = value.chars().take(keep_chars).collect::<String>();
+    truncated.push_str(TRUNCATION_MARKER);
+    truncated
 }
 
 #[cfg(test)]
@@ -967,6 +984,25 @@ mod tests {
         );
 
         assert_eq!(candidate.id, "explicit-id");
+    }
+
+    #[test]
+    fn render_handoffs_for_prompt_marks_truncation() {
+        let handoff = TaskHandoffPacket::fallback(
+            "mission-1",
+            "task-1",
+            "Build CLI",
+            &"A very long summary. ".repeat(200),
+            vec![],
+        );
+
+        let rendered = render_handoffs_for_prompt(&[handoff], 120);
+
+        assert!(
+            rendered.contains("truncated") || rendered.contains('…'),
+            "truncated handoff render lacked visible marker: {rendered:?}"
+        );
+        assert!(rendered.chars().count() <= 120);
     }
 
     #[test]

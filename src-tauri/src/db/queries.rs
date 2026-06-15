@@ -3066,6 +3066,7 @@ pub fn list_parent_handoff_packets(
          JOIN tasks child ON child.id = td.task_id
          JOIN tasks parent ON parent.id = td.depends_on
             AND parent.mission_id = child.mission_id
+            AND parent.status = 'completed'
          JOIN task_handoff_packets hp ON hp.task_id = parent.id
             AND hp.mission_id = parent.mission_id
          WHERE child.id = ?1
@@ -3245,7 +3246,39 @@ mod mission_delivery_queries_tests {
 
         let rows = list_parent_handoff_packets(&conn, "child").unwrap();
 
-        assert!(rows.is_empty(), "cross-mission parent handoff leaked: {rows:#?}");
+        assert!(
+            rows.is_empty(),
+            "cross-mission parent handoff leaked: {rows:#?}"
+        );
+    }
+
+    #[test]
+    fn parent_handoff_listing_ignores_non_completed_parent_tasks() {
+        let conn = setup();
+        insert_task(&conn, "child", "m1", "pending");
+        upsert_task_handoff_packet(&conn, "t1", "m1", "{\"summary\":\"parent\"}", "generated")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO task_dependencies (task_id, depends_on) VALUES ('child', 't1')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute("UPDATE tasks SET status = 'failed' WHERE id = 't1'", [])
+            .unwrap();
+        let failed_rows = list_parent_handoff_packets(&conn, "child").unwrap();
+        assert!(
+            failed_rows.is_empty(),
+            "failed parent handoff leaked: {failed_rows:#?}"
+        );
+
+        conn.execute("UPDATE tasks SET status = 'running' WHERE id = 't1'", [])
+            .unwrap();
+        let running_rows = list_parent_handoff_packets(&conn, "child").unwrap();
+        assert!(
+            running_rows.is_empty(),
+            "running parent handoff leaked: {running_rows:#?}"
+        );
     }
 
     #[test]
@@ -3274,9 +3307,19 @@ mod mission_delivery_queries_tests {
     #[test]
     fn upserts_and_reads_task_handoff_packet() {
         let conn = setup();
-        upsert_task_handoff_packet(&conn, "t1", "m1", "{\"summary\":\"first\"}", "generated").unwrap();
-        upsert_task_handoff_packet(&conn, "t1", "m1", "{\"summary\":\"second\"}", "agent_authored").unwrap();
-        let row = get_task_handoff_packet(&conn, "t1").unwrap().expect("handoff exists");
+        upsert_task_handoff_packet(&conn, "t1", "m1", "{\"summary\":\"first\"}", "generated")
+            .unwrap();
+        upsert_task_handoff_packet(
+            &conn,
+            "t1",
+            "m1",
+            "{\"summary\":\"second\"}",
+            "agent_authored",
+        )
+        .unwrap();
+        let row = get_task_handoff_packet(&conn, "t1")
+            .unwrap()
+            .expect("handoff exists");
         assert_eq!(row.task_id, "t1");
         assert_eq!(row.mission_id, "m1");
         assert_eq!(row.packet_json, "{\"summary\":\"second\"}");
@@ -3287,8 +3330,13 @@ mod mission_delivery_queries_tests {
     fn lists_parent_handoff_packets_for_task() {
         let conn = setup();
         conn.execute("INSERT INTO tasks (id, mission_id, title, description, status) VALUES ('t2', 'm1', 'Child', 'Continue', 'pending')", []).unwrap();
-        conn.execute("INSERT INTO task_dependencies (task_id, depends_on) VALUES ('t2', 't1')", []).unwrap();
-        upsert_task_handoff_packet(&conn, "t1", "m1", "{\"summary\":\"parent\"}", "generated").unwrap();
+        conn.execute(
+            "INSERT INTO task_dependencies (task_id, depends_on) VALUES ('t2', 't1')",
+            [],
+        )
+        .unwrap();
+        upsert_task_handoff_packet(&conn, "t1", "m1", "{\"summary\":\"parent\"}", "generated")
+            .unwrap();
         let rows = list_parent_handoff_packets(&conn, "t2").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].task_id, "t1");
@@ -3298,8 +3346,21 @@ mod mission_delivery_queries_tests {
     #[test]
     fn upserts_and_reads_mission_delivery() {
         let conn = setup();
-        upsert_mission_delivery(&conn, "m1", 1, "{\"overview\":{\"title\":\"First\"}}", "degraded", Some("fallback"), "[\"t1\"]", "[]", false).unwrap();
-        let row = get_mission_delivery(&conn, "m1").unwrap().expect("delivery exists");
+        upsert_mission_delivery(
+            &conn,
+            "m1",
+            1,
+            "{\"overview\":{\"title\":\"First\"}}",
+            "degraded",
+            Some("fallback"),
+            "[\"t1\"]",
+            "[]",
+            false,
+        )
+        .unwrap();
+        let row = get_mission_delivery(&conn, "m1")
+            .unwrap()
+            .expect("delivery exists");
         assert_eq!(row.mission_id, "m1");
         assert_eq!(row.version, 1);
         assert_eq!(row.generation_status, "degraded");
@@ -3335,7 +3396,9 @@ mod mission_delivery_queries_tests {
         )
         .unwrap();
 
-        let row = get_mission_delivery(&conn, "m1").unwrap().expect("delivery exists");
+        let row = get_mission_delivery(&conn, "m1")
+            .unwrap()
+            .expect("delivery exists");
         assert_eq!(row.version, 2);
         assert!(row.snapshot_json.contains("Newer"));
         assert_eq!(row.generation_status, "generated");
@@ -3344,7 +3407,6 @@ mod mission_delivery_queries_tests {
         assert_eq!(row.source_event_ids, "[\"e2\"]");
         assert!(!row.stale);
     }
-
 }
 
 #[cfg(test)]
