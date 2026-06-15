@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
@@ -85,6 +86,77 @@ pub struct TaskHandoffPacket {
 }
 
 impl TaskHandoffPacket {
+    pub fn from_task_complete_value(
+        mission_id: impl Into<String>,
+        task_id: impl Into<String>,
+        title: impl Into<String>,
+        objective: impl Into<String>,
+        value: &serde_json::Value,
+        published_artifacts: Vec<DeliveryArtifactRef>,
+    ) -> Result<Self> {
+        let mission_id = mission_id.into();
+        let task_id = task_id.into();
+        let task_title = title.into();
+        let objective = objective.into();
+        let summary = value
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        let Some(handoff) = value.get("handoff") else {
+            return Ok(Self::fallback(
+                mission_id,
+                task_id,
+                task_title,
+                non_empty_or(summary, || objective.clone()),
+                published_artifacts,
+            ));
+        };
+
+        #[derive(Deserialize)]
+        struct TaskCompleteHandoff {
+            #[serde(default)]
+            summary: String,
+            #[serde(default)]
+            confidence: Option<HandoffConfidence>,
+            #[serde(default)]
+            changed_files: Vec<ChangedFileSummary>,
+            #[serde(default)]
+            decisions: Vec<DecisionSummary>,
+            #[serde(default)]
+            commands_run: Vec<CommandRunSummary>,
+            #[serde(default)]
+            artifacts: Vec<DeliveryArtifactRef>,
+            #[serde(default)]
+            reusable_context: Vec<String>,
+            #[serde(default)]
+            caveats: Vec<String>,
+            #[serde(default)]
+            downstream_hints: Vec<String>,
+        }
+
+        let mut parsed: TaskCompleteHandoff = serde_json::from_value(handoff.clone())
+            .context("task_complete.handoff must match the handoff packet schema")?;
+        parsed.artifacts.extend(published_artifacts);
+        parsed.artifacts.sort_by(compare_artifacts);
+        dedup_artifacts(&mut parsed.artifacts);
+
+        Ok(Self {
+            mission_id,
+            task_id,
+            task_title,
+            summary: non_empty_or(parsed.summary, || non_empty_or(summary, || objective)),
+            confidence: parsed.confidence.unwrap_or(HandoffConfidence::Medium),
+            changed_files: parsed.changed_files,
+            decisions: parsed.decisions,
+            commands: parsed.commands_run,
+            artifacts: parsed.artifacts,
+            direct_context: parsed.reusable_context,
+            caveats: parsed.caveats,
+            next_steps: parsed.downstream_hints,
+        })
+    }
     pub fn fallback(
         mission_id: impl Into<String>,
         task_id: impl Into<String>,
@@ -93,6 +165,7 @@ impl TaskHandoffPacket {
         mut artifacts: Vec<DeliveryArtifactRef>,
     ) -> Self {
         artifacts.sort_by(compare_artifacts);
+        dedup_artifacts(&mut artifacts);
 
         let mission_id = mission_id.into();
         let task_id = task_id.into();
@@ -510,8 +583,17 @@ fn source_rank(source: DeliveryCandidateSource) -> u8 {
     }
 }
 
+
 fn dedup_items(items: &mut Vec<DeliveryItem>) {
     items.dedup_by(|a, b| a.id == b.id && a.source == b.source);
+}
+
+fn dedup_artifacts(artifacts: &mut Vec<DeliveryArtifactRef>) {
+    artifacts.dedup_by(|a, b| {
+        a.artifact_id == b.artifact_id
+            && a.local_name == b.local_name
+            && a.artifact_type == b.artifact_type
+    });
 }
 
 fn sort_and_dedup_strings(values: &mut Vec<String>) {
@@ -568,6 +650,91 @@ mod tests {
             summary: summary.to_string(),
             file_paths: paths.iter().map(|path| path.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn parses_agent_authored_handoff_from_task_complete_input() {
+        let value = serde_json::json!({
+            "summary": "Implemented delivery handoff persistence.",
+            "handoff": {
+                "summary": "Task completion now records reusable handoff context.",
+                "confidence": "high",
+                "changed_files": [
+                    {
+                        "path": "src-tauri/src/agent/engine.rs",
+                        "summary": "Persists handoff packets after task_complete.",
+                        "change_type": "modified"
+                    }
+                ],
+                "decisions": [
+                    {
+                        "title": "Persist from task_complete input",
+                        "rationale": "The tool input is the agent-authored source of truth.",
+                        "tradeoffs": ["Fallback packets remain available when handoff is omitted."]
+                    }
+                ],
+                "commands_run": [
+                    {
+                        "command": "cargo test parses_agent_authored_handoff_from_task_complete_input --lib",
+                        "status": "passed",
+                        "summary": "Focused parser test passed.",
+                        "exit_code": 0
+                    }
+                ],
+                "artifacts": [
+                    {
+                        "artifact_id": "agent-artifact",
+                        "local_name": "handoff_notes",
+                        "type": "markdown",
+                        "summary": "Agent-authored handoff notes.",
+                        "file_paths": ["docs/handoff.md"]
+                    }
+                ],
+                "reusable_context": ["Engine can derive status from handoff presence."],
+                "caveats": ["Fallback rows should not overwrite agent-authored rows."],
+                "downstream_hints": ["Use this packet for child task prompts."]
+            }
+        });
+
+        let handoff = TaskHandoffPacket::from_task_complete_value(
+            "mission-1",
+            "task-1",
+            "Persist handoffs",
+            "Persist task handoff packets from task_complete.",
+            &value,
+            vec![artifact(
+                "published_report",
+                "Artifact published before completion.",
+                &["dist/report.md"],
+            )],
+        )
+        .expect("handoff parses");
+
+        assert_eq!(handoff.mission_id, "mission-1");
+        assert_eq!(handoff.task_id, "task-1");
+        assert_eq!(handoff.task_title, "Persist handoffs");
+        assert_eq!(
+            handoff.summary,
+            "Task completion now records reusable handoff context."
+        );
+        assert_eq!(handoff.confidence, HandoffConfidence::High);
+        assert_eq!(handoff.changed_files[0].path, "src-tauri/src/agent/engine.rs");
+        assert_eq!(handoff.decisions[0].title, "Persist from task_complete input");
+        assert_eq!(handoff.commands[0].status, CommandResultStatus::Passed);
+        assert_eq!(handoff.direct_context, vec!["Engine can derive status from handoff presence."]);
+        assert_eq!(
+            handoff.caveats,
+            vec!["Fallback rows should not overwrite agent-authored rows."]
+        );
+        assert_eq!(handoff.next_steps, vec!["Use this packet for child task prompts."]);
+        assert_eq!(
+            handoff
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.local_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["handoff_notes", "published_report"]
+        );
     }
 
     #[test]

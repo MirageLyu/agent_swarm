@@ -368,6 +368,95 @@ pub fn task_complete_tool_definition() -> ToolDefinition {
                 "summary": {
                     "type": "string",
                     "description": "Final response to return to the user/grader. For direct-answer tasks, this must be the exact requested answer/format (for example a JSON code block), not a prose summary. For artifact/file tasks, use a concise completion note."
+                },
+                "handoff": {
+                    "type": "object",
+                    "description": "Optional reusable handoff packet for downstream tasks. Provide this when your work creates context that child tasks should inherit.",
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": "Concise reusable summary of what changed and why. Defaults to task_complete.summary when omitted."
+                        },
+                        "confidence": {
+                            "type": "string",
+                            "enum": ["high", "medium", "low"],
+                            "description": "Confidence in this handoff packet. Defaults to medium."
+                        },
+                        "changed_files": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "path": { "type": "string" },
+                                    "summary": { "type": "string" },
+                                    "change_type": { "type": "string" }
+                                },
+                                "required": ["path"]
+                            }
+                        },
+                        "decisions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "title": { "type": "string" },
+                                    "rationale": { "type": "string" },
+                                    "tradeoffs": {
+                                        "type": "array",
+                                        "items": { "type": "string" }
+                                    }
+                                },
+                                "required": ["title"]
+                            }
+                        },
+                        "commands_run": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "command": { "type": "string" },
+                                    "status": {
+                                        "type": "string",
+                                        "enum": ["passed", "failed", "skipped", "unknown"]
+                                    },
+                                    "summary": { "type": "string" },
+                                    "exit_code": { "type": "integer" }
+                                },
+                                "required": ["command", "status"]
+                            }
+                        },
+                        "artifacts": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "artifact_id": { "type": "string" },
+                                    "local_name": { "type": "string" },
+                                    "type": { "type": "string" },
+                                    "summary": { "type": "string" },
+                                    "file_paths": {
+                                        "type": "array",
+                                        "items": { "type": "string" }
+                                    }
+                                },
+                                "required": ["local_name", "type"]
+                            }
+                        },
+                        "reusable_context": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Facts, assumptions, or implementation notes directly useful to downstream tasks."
+                        },
+                        "caveats": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "downstream_hints": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Suggested next steps or guidance for dependent tasks."
+                        }
+                    }
                 }
             },
             "required": ["summary"]

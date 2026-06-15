@@ -30,6 +30,7 @@ use crate::tools::{coding_agent_tools_with_artifact_support, ToolExecutor, TASK_
 // 不直接构造 reason，所以这里不 import；`.as_str()` 通过 method dispatch 触达。
 use super::budget_tracker::{BudgetDecision, BudgetTracker};
 use super::codebase_intel;
+use super::delivery::{DeliveryArtifactRef, TaskHandoffPacket};
 use super::guardrail::{self, Guardrail, GuardrailContext};
 use super::recovery_log::{
     build_recovery_attempt_meta, build_recovery_succeeded_meta, format_attempt_content,
@@ -3392,6 +3393,7 @@ impl AgentEngine {
                     CompletionOutcome::Completed => {
                         self.emit_event(agent_id, step, "message", &summary);
                         self.persist_completion_summary(agent_id, &summary);
+                        self.persist_task_handoff_packet(agent_id, &input);
                         // P2-1 Phase B: TaskCompleted hook 调用点。guardrail 已 pass，
                         // status 即将变 completed。典型用途：publish artifact / send
                         // notification。在 status_change 之前调，让 terminal prevent 还能拦下。
@@ -5848,6 +5850,91 @@ impl AgentEngine {
             Ok(())
         }) {
             tracing::warn!("Failed to persist completion summary: {e}");
+        }
+    }
+
+    fn persist_task_handoff_packet(&self, agent_id: &str, task_complete_input: &serde_json::Value) {
+        let db = self.app_handle.state::<Database>();
+        let agent = agent_id.to_string();
+        let input = task_complete_input.clone();
+        if let Err(e) = db.with_conn(move |conn| {
+            use rusqlite::OptionalExtension;
+
+            let Some(task_id) = queries::get_task_id_for_agent(conn, &agent)? else {
+                return Ok(());
+            };
+
+            let Some((mission_id, title, description)) = conn
+                .query_row(
+                    "SELECT mission_id, title, COALESCE(description, '') FROM tasks WHERE id = ?1",
+                    rusqlite::params![&task_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()?
+            else {
+                tracing::warn!(agent_id = %agent, task_id = %task_id, "Cannot persist handoff: task row not found");
+                return Ok(());
+            };
+
+            let generation_status = if input.get("handoff").is_some() {
+                "agent_authored"
+            } else {
+                "fallback"
+            };
+
+            if generation_status == "fallback" {
+                if let Some(existing) = queries::get_task_handoff_packet(conn, &task_id)? {
+                    if existing.generation_status == "agent_authored" {
+                        tracing::debug!(
+                            task_id = %task_id,
+                            "Skipping fallback handoff persistence because an agent-authored packet already exists"
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+
+            let published_artifacts = queries::list_artifacts_for_task(conn, &task_id)?
+                .into_iter()
+                .filter(|artifact| artifact.published)
+                .map(|artifact| {
+                    let file_paths = serde_json::from_str::<Vec<String>>(&artifact.file_paths)
+                        .unwrap_or_default();
+                    DeliveryArtifactRef {
+                        artifact_id: Some(artifact.id),
+                        local_name: artifact.local_name,
+                        artifact_type: artifact.artifact_type,
+                        summary: artifact.summary,
+                        file_paths,
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            let packet = TaskHandoffPacket::from_task_complete_value(
+                &mission_id,
+                &task_id,
+                title,
+                description,
+                &input,
+                published_artifacts,
+            )?;
+            let packet_json = serde_json::to_string(&packet)?;
+            queries::upsert_task_handoff_packet(
+                conn,
+                &task_id,
+                &mission_id,
+                &packet_json,
+                generation_status,
+            )?;
+            Ok(())
+        }) {
+            tracing::warn!(agent_id = %agent_id, "Failed to persist task handoff packet: {e}");
         }
     }
 
