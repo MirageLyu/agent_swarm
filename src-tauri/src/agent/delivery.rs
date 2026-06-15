@@ -185,8 +185,10 @@ impl DeliveryCandidate {
     pub fn from_artifact(task_id: &str, artifact: &DeliveryArtifactRef) -> Self {
         let id = artifact
             .artifact_id
-            .clone()
-            .filter(|id| !id.trim().is_empty())
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
             .unwrap_or_else(|| {
                 format!(
                     "{}.{}",
@@ -493,8 +495,8 @@ fn compare_artifacts(a: &DeliveryArtifactRef, b: &DeliveryArtifactRef) -> Orderi
 fn compare_delivery_items(a: &DeliveryItem, b: &DeliveryItem) -> Ordering {
     source_rank(a.source)
         .cmp(&source_rank(b.source))
-        .then_with(|| a.title.cmp(&b.title))
         .then_with(|| a.id.cmp(&b.id))
+        .then_with(|| a.title.cmp(&b.title))
 }
 
 fn source_rank(source: DeliveryCandidateSource) -> u8 {
@@ -643,6 +645,61 @@ mod tests {
             .caveats
             .iter()
             .any(|caveat| caveat.contains("degraded")));
+    }
+
+    #[test]
+    fn degraded_snapshot_deduplicates_same_source_and_id_even_with_interleaved_titles() {
+        let candidates = vec![
+            DeliveryCandidate {
+                id: "x".to_string(),
+                source: DeliveryCandidateSource::Artifact,
+                title: "A".to_string(),
+                summary: "First artifact candidate.".to_string(),
+                file_paths: vec!["dist/a.md".to_string()],
+                confidence: DeliveryConfidence::Medium,
+            },
+            DeliveryCandidate {
+                id: "y".to_string(),
+                source: DeliveryCandidateSource::Artifact,
+                title: "B".to_string(),
+                summary: "Different artifact candidate.".to_string(),
+                file_paths: vec!["dist/b.md".to_string()],
+                confidence: DeliveryConfidence::Medium,
+            },
+            DeliveryCandidate {
+                id: "x".to_string(),
+                source: DeliveryCandidateSource::Artifact,
+                title: "C".to_string(),
+                summary: "Duplicate artifact candidate.".to_string(),
+                file_paths: vec!["dist/c.md".to_string()],
+                confidence: DeliveryConfidence::Medium,
+            },
+        ];
+
+        let snapshot = MissionDeliverySnapshot::degraded("mission-1", candidates);
+        let duplicate_count = snapshot
+            .items
+            .iter()
+            .filter(|item| item.source == DeliveryCandidateSource::Artifact && item.id == "x")
+            .count();
+
+        assert_eq!(duplicate_count, 1);
+    }
+
+    #[test]
+    fn artifact_candidate_trims_explicit_artifact_id() {
+        let candidate = DeliveryCandidate::from_artifact(
+            "task-1",
+            &DeliveryArtifactRef {
+                artifact_id: Some("  explicit-id  ".to_string()),
+                local_name: "release_notes".to_string(),
+                artifact_type: "report".to_string(),
+                summary: "Markdown release notes for operators.".to_string(),
+                file_paths: vec!["dist/release-notes.md".to_string()],
+            },
+        );
+
+        assert_eq!(candidate.id, "explicit-id");
     }
 
     #[test]
