@@ -3063,8 +3063,12 @@ pub fn list_parent_handoff_packets(
     let mut stmt = conn.prepare(
         "SELECT hp.task_id, hp.mission_id, hp.packet_json, hp.generation_status, hp.created_at, hp.updated_at
          FROM task_dependencies td
-         JOIN task_handoff_packets hp ON hp.task_id = td.depends_on
-         WHERE td.task_id = ?1
+         JOIN tasks child ON child.id = td.task_id
+         JOIN tasks parent ON parent.id = td.depends_on
+            AND parent.mission_id = child.mission_id
+         JOIN task_handoff_packets hp ON hp.task_id = parent.id
+            AND hp.mission_id = parent.mission_id
+         WHERE child.id = ?1
          ORDER BY hp.updated_at ASC, hp.task_id ASC",
     )?;
     let rows = stmt
@@ -3078,10 +3082,12 @@ pub fn list_task_handoff_packets_for_mission(
     mission_id: &str,
 ) -> Result<Vec<TaskHandoffPacketRow>> {
     let mut stmt = conn.prepare(
-        "SELECT task_id, mission_id, packet_json, generation_status, created_at, updated_at
-         FROM task_handoff_packets
-         WHERE mission_id = ?1
-         ORDER BY updated_at ASC, task_id ASC",
+        "SELECT hp.task_id, hp.mission_id, hp.packet_json, hp.generation_status, hp.created_at, hp.updated_at
+         FROM task_handoff_packets hp
+         JOIN tasks t ON t.id = hp.task_id
+            AND t.mission_id = hp.mission_id
+         WHERE t.mission_id = ?1
+         ORDER BY hp.updated_at ASC, hp.task_id ASC",
     )?;
     let rows = stmt
         .query_map([mission_id], map_task_handoff_packet_row)?
@@ -3114,7 +3120,8 @@ pub fn upsert_mission_delivery(
            source_task_ids = excluded.source_task_ids,
            source_event_ids = excluded.source_event_ids,
            stale = excluded.stale,
-           updated_at = datetime('now')",
+           updated_at = datetime('now')
+         WHERE excluded.version >= mission_deliveries.version",
         params![
             mission_id,
             version,
@@ -3178,6 +3185,92 @@ mod mission_delivery_queries_tests {
         conn
     }
 
+    fn insert_mission(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO missions (id, title, description, status) VALUES (?1, ?2, 'Build app', 'completed')",
+            rusqlite::params![id, id],
+        )
+        .unwrap();
+    }
+
+    fn insert_task(conn: &Connection, id: &str, mission_id: &str, status: &str) {
+        conn.execute(
+            "INSERT INTO tasks (id, mission_id, title, description, status) VALUES (?1, ?2, ?3, 'Do work', ?4)",
+            rusqlite::params![id, mission_id, id, status],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn cross_mission_handoff_upsert_is_rejected() {
+        let conn = setup();
+        insert_mission(&conn, "m2");
+
+        let err = upsert_task_handoff_packet(
+            &conn,
+            "t1",
+            "m2",
+            "{\"summary\":\"wrong mission\"}",
+            "generated",
+        )
+        .expect_err("task handoff must belong to the task mission");
+
+        assert!(
+            err.to_string().contains("FOREIGN KEY")
+                || err.to_string().contains("constraint failed"),
+            "unexpected error: {err:#}"
+        );
+        assert!(get_task_handoff_packet(&conn, "t1").unwrap().is_none());
+    }
+
+    #[test]
+    fn parent_handoff_listing_ignores_cross_mission_dependencies() {
+        let conn = setup();
+        insert_mission(&conn, "m2");
+        insert_task(&conn, "child", "m1", "pending");
+        insert_task(&conn, "foreign-parent", "m2", "completed");
+        upsert_task_handoff_packet(
+            &conn,
+            "foreign-parent",
+            "m2",
+            "{\"summary\":\"foreign parent\"}",
+            "generated",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dependencies (task_id, depends_on) VALUES ('child', 'foreign-parent')",
+            [],
+        )
+        .unwrap();
+
+        let rows = list_parent_handoff_packets(&conn, "child").unwrap();
+
+        assert!(rows.is_empty(), "cross-mission parent handoff leaked: {rows:#?}");
+    }
+
+    #[test]
+    fn list_task_handoff_packets_for_mission_ignores_orphaned_wrong_mission_values() {
+        let conn = setup();
+        insert_mission(&conn, "m2");
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        conn.execute(
+            "INSERT INTO task_handoff_packets (task_id, mission_id, packet_json, generation_status)
+             VALUES ('t1', 'm2', '{\"summary\":\"bad legacy row\"}', 'generated')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+
+        let m2_rows = list_task_handoff_packets_for_mission(&conn, "m2").unwrap();
+        let m1_rows = list_task_handoff_packets_for_mission(&conn, "m1").unwrap();
+
+        assert!(m2_rows.is_empty(), "bad legacy row must not leak into m2");
+        assert!(
+            m1_rows.is_empty(),
+            "bad legacy row must not appear for m1 unless handoff mission also matches"
+        );
+    }
+
     #[test]
     fn upserts_and_reads_task_handoff_packet() {
         let conn = setup();
@@ -3213,6 +3306,45 @@ mod mission_delivery_queries_tests {
         assert_eq!(row.curator_model.as_deref(), Some("fallback"));
         assert!(!row.stale);
     }
+
+    #[test]
+    fn older_mission_delivery_version_does_not_overwrite_newer_snapshot() {
+        let conn = setup();
+        upsert_mission_delivery(
+            &conn,
+            "m1",
+            2,
+            "{\"overview\":{\"title\":\"Newer\"}}",
+            "generated",
+            Some("curator-v2"),
+            "[\"t1\"]",
+            "[\"e2\"]",
+            false,
+        )
+        .unwrap();
+        upsert_mission_delivery(
+            &conn,
+            "m1",
+            1,
+            "{\"overview\":{\"title\":\"Older\"}}",
+            "degraded",
+            Some("curator-v1"),
+            "[]",
+            "[]",
+            true,
+        )
+        .unwrap();
+
+        let row = get_mission_delivery(&conn, "m1").unwrap().expect("delivery exists");
+        assert_eq!(row.version, 2);
+        assert!(row.snapshot_json.contains("Newer"));
+        assert_eq!(row.generation_status, "generated");
+        assert_eq!(row.curator_model.as_deref(), Some("curator-v2"));
+        assert_eq!(row.source_task_ids, "[\"t1\"]");
+        assert_eq!(row.source_event_ids, "[\"e2\"]");
+        assert!(!row.stale);
+    }
+
 }
 
 #[cfg(test)]

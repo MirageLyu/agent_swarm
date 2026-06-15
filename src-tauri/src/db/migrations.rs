@@ -1198,6 +1198,9 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "042_mission_delivery_plane",
         r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_id_mission
+            ON tasks(id, mission_id);
+
         CREATE TABLE IF NOT EXISTS task_handoff_packets (
             task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
             mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
@@ -1205,7 +1208,8 @@ const MIGRATIONS: &[(&str, &str)] = &[
             generation_status TEXT NOT NULL DEFAULT 'generated'
                 CHECK (generation_status IN ('agent_authored', 'generated', 'fallback')),
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (task_id, mission_id) REFERENCES tasks(id, mission_id) ON DELETE CASCADE
         );
 
         CREATE INDEX IF NOT EXISTS idx_task_handoffs_mission
@@ -1220,7 +1224,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
             curator_model TEXT,
             source_task_ids TEXT NOT NULL DEFAULT '[]',
             source_event_ids TEXT NOT NULL DEFAULT '[]',
-            stale INTEGER NOT NULL DEFAULT 0,
+            stale INTEGER NOT NULL DEFAULT 0 CHECK (stale IN (0, 1)),
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -1898,5 +1902,65 @@ mod mission_delivery_plane_migration_tests {
             )
             .unwrap();
         assert_eq!(handoff_indexes, 1);
+
+        let tasks_mission_index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_tasks_id_mission'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tasks_mission_index_count, 1);
+        assert!(
+            handoff_sql.contains("FOREIGN KEY (task_id, mission_id)")
+                && handoff_sql.contains("REFERENCES tasks(id, mission_id)"),
+            "task_handoff_packets must enforce task_id/mission_id consistency: {handoff_sql}"
+        );
+        assert!(
+            delivery_sql.contains("CHECK (stale IN (0, 1))"),
+            "mission_deliveries.stale must be constrained to booleans: {delivery_sql}"
+        );
+    }
+
+    #[test]
+    fn migration_rejects_cross_mission_handoff_and_invalid_stale() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        run(&conn).expect("migrations run");
+        conn.execute(
+            "INSERT INTO missions (id, title, description, status) VALUES ('m1', 'Mission 1', 'Build app', 'completed')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO missions (id, title, description, status) VALUES ('m2', 'Mission 2', 'Build app', 'completed')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, mission_id, title, description, status) VALUES ('t1', 'm1', 'Task', 'Do work', 'completed')",
+            [],
+        )
+        .unwrap();
+
+        let cross_mission = conn.execute(
+            "INSERT INTO task_handoff_packets (task_id, mission_id, packet_json, generation_status)
+             VALUES ('t1', 'm2', '{\"summary\":\"wrong mission\"}', 'generated')",
+            [],
+        );
+        assert!(
+            cross_mission.is_err(),
+            "handoff for a task must not be attachable to a different mission"
+        );
+
+        let invalid_stale = conn.execute(
+            "INSERT INTO mission_deliveries (mission_id, version, snapshot_json, generation_status, stale)
+             VALUES ('m1', 1, '{}', 'generated', 2)",
+            [],
+        );
+        assert!(
+            invalid_stale.is_err(),
+            "mission_deliveries.stale must reject non-boolean values"
+        );
     }
 }
