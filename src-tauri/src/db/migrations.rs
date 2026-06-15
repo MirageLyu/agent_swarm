@@ -1195,6 +1195,40 @@ const MIGRATIONS: &[(&str, &str)] = &[
         PRAGMA foreign_keys=ON;
         "#,
     ),
+    (
+        "042_mission_delivery_plane",
+        r#"
+        CREATE TABLE IF NOT EXISTS task_handoff_packets (
+            task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+            mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+            packet_json TEXT NOT NULL,
+            generation_status TEXT NOT NULL DEFAULT 'generated'
+                CHECK (generation_status IN ('agent_authored', 'generated', 'fallback')),
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_task_handoffs_mission
+            ON task_handoff_packets(mission_id, updated_at);
+
+        CREATE TABLE IF NOT EXISTS mission_deliveries (
+            mission_id TEXT PRIMARY KEY REFERENCES missions(id) ON DELETE CASCADE,
+            version INTEGER NOT NULL DEFAULT 1,
+            snapshot_json TEXT NOT NULL,
+            generation_status TEXT NOT NULL DEFAULT 'generated'
+                CHECK (generation_status IN ('generated', 'degraded', 'failed')),
+            curator_model TEXT,
+            source_task_ids TEXT NOT NULL DEFAULT '[]',
+            source_event_ids TEXT NOT NULL DEFAULT '[]',
+            stale INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_mission_deliveries_status
+            ON mission_deliveries(generation_status, updated_at);
+        "#,
+    ),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
@@ -1822,5 +1856,47 @@ mod migration_041_tests {
             err.to_string().contains("CHECK constraint failed"),
             "invalid kind must be rejected by CHECK constraint, got {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod mission_delivery_plane_migration_tests {
+    use super::run;
+    use rusqlite::Connection;
+
+    #[test]
+    fn migration_creates_handoff_and_delivery_tables() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        run(&conn).expect("migrations run");
+
+        let handoff_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'task_handoff_packets'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("task_handoff_packets table exists");
+        assert!(handoff_sql.contains("packet_json"));
+        assert!(handoff_sql.contains("generation_status"));
+
+        let delivery_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'mission_deliveries'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mission_deliveries table exists");
+        assert!(delivery_sql.contains("snapshot_json"));
+        assert!(delivery_sql.contains("curator_model"));
+
+        let handoff_indexes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_task_handoffs_mission'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(handoff_indexes, 1);
     }
 }

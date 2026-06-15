@@ -2969,6 +2969,252 @@ pub fn insert_benchmark_grader_artifact(
     Ok(())
 }
 
+// ---- Mission Delivery Plane persistence helpers ----
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TaskHandoffPacketRow {
+    pub task_id: String,
+    pub mission_id: String,
+    pub packet_json: String,
+    pub generation_status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MissionDeliveryRow {
+    pub mission_id: String,
+    pub version: i64,
+    pub snapshot_json: String,
+    pub generation_status: String,
+    pub curator_model: Option<String>,
+    pub source_task_ids: String,
+    pub source_event_ids: String,
+    pub stale: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+fn map_task_handoff_packet_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskHandoffPacketRow> {
+    Ok(TaskHandoffPacketRow {
+        task_id: row.get(0)?,
+        mission_id: row.get(1)?,
+        packet_json: row.get(2)?,
+        generation_status: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+fn map_mission_delivery_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MissionDeliveryRow> {
+    Ok(MissionDeliveryRow {
+        mission_id: row.get(0)?,
+        version: row.get(1)?,
+        snapshot_json: row.get(2)?,
+        generation_status: row.get(3)?,
+        curator_model: row.get(4)?,
+        source_task_ids: row.get(5)?,
+        source_event_ids: row.get(6)?,
+        stale: row.get::<_, i64>(7)? != 0,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+pub fn upsert_task_handoff_packet(
+    conn: &Connection,
+    task_id: &str,
+    mission_id: &str,
+    packet_json: &str,
+    generation_status: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO task_handoff_packets (task_id, mission_id, packet_json, generation_status)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(task_id) DO UPDATE SET
+           mission_id = excluded.mission_id,
+           packet_json = excluded.packet_json,
+           generation_status = excluded.generation_status,
+           updated_at = datetime('now')",
+        params![task_id, mission_id, packet_json, generation_status],
+    )?;
+    Ok(())
+}
+
+pub fn get_task_handoff_packet(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Option<TaskHandoffPacketRow>> {
+    conn.query_row(
+        "SELECT task_id, mission_id, packet_json, generation_status, created_at, updated_at
+         FROM task_handoff_packets
+         WHERE task_id = ?1",
+        [task_id],
+        map_task_handoff_packet_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn list_parent_handoff_packets(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Vec<TaskHandoffPacketRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT hp.task_id, hp.mission_id, hp.packet_json, hp.generation_status, hp.created_at, hp.updated_at
+         FROM task_dependencies td
+         JOIN task_handoff_packets hp ON hp.task_id = td.depends_on
+         WHERE td.task_id = ?1
+         ORDER BY hp.updated_at ASC, hp.task_id ASC",
+    )?;
+    let rows = stmt
+        .query_map([task_id], map_task_handoff_packet_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn list_task_handoff_packets_for_mission(
+    conn: &Connection,
+    mission_id: &str,
+) -> Result<Vec<TaskHandoffPacketRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT task_id, mission_id, packet_json, generation_status, created_at, updated_at
+         FROM task_handoff_packets
+         WHERE mission_id = ?1
+         ORDER BY updated_at ASC, task_id ASC",
+    )?;
+    let rows = stmt
+        .query_map([mission_id], map_task_handoff_packet_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn upsert_mission_delivery(
+    conn: &Connection,
+    mission_id: &str,
+    version: i64,
+    snapshot_json: &str,
+    generation_status: &str,
+    curator_model: Option<&str>,
+    source_task_ids: &str,
+    source_event_ids: &str,
+    stale: bool,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO mission_deliveries
+           (mission_id, version, snapshot_json, generation_status, curator_model,
+            source_task_ids, source_event_ids, stale)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(mission_id) DO UPDATE SET
+           version = excluded.version,
+           snapshot_json = excluded.snapshot_json,
+           generation_status = excluded.generation_status,
+           curator_model = excluded.curator_model,
+           source_task_ids = excluded.source_task_ids,
+           source_event_ids = excluded.source_event_ids,
+           stale = excluded.stale,
+           updated_at = datetime('now')",
+        params![
+            mission_id,
+            version,
+            snapshot_json,
+            generation_status,
+            curator_model,
+            source_task_ids,
+            source_event_ids,
+            if stale { 1i64 } else { 0i64 },
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn get_mission_delivery(
+    conn: &Connection,
+    mission_id: &str,
+) -> Result<Option<MissionDeliveryRow>> {
+    conn.query_row(
+        "SELECT mission_id, version, snapshot_json, generation_status, curator_model,
+                source_task_ids, source_event_ids, stale, created_at, updated_at
+         FROM mission_deliveries
+         WHERE mission_id = ?1",
+        [mission_id],
+        map_mission_delivery_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn mark_mission_delivery_stale(conn: &Connection, mission_id: &str) -> Result<bool> {
+    let rows = conn.execute(
+        "UPDATE mission_deliveries
+         SET stale = 1, updated_at = datetime('now')
+         WHERE mission_id = ?1",
+        [mission_id],
+    )?;
+    Ok(rows > 0)
+}
+
+#[cfg(test)]
+mod mission_delivery_queries_tests {
+    use super::*;
+    use crate::db::migrations_run_on;
+    use rusqlite::Connection;
+
+    fn setup() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        migrations_run_on(&conn).expect("run migrations");
+        conn.execute(
+            "INSERT INTO missions (id, title, description, status) VALUES ('m1', 'Mission', 'Build app', 'completed')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, mission_id, title, description, status) VALUES ('t1', 'm1', 'Task', 'Do work', 'completed')",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn upserts_and_reads_task_handoff_packet() {
+        let conn = setup();
+        upsert_task_handoff_packet(&conn, "t1", "m1", "{\"summary\":\"first\"}", "generated").unwrap();
+        upsert_task_handoff_packet(&conn, "t1", "m1", "{\"summary\":\"second\"}", "agent_authored").unwrap();
+        let row = get_task_handoff_packet(&conn, "t1").unwrap().expect("handoff exists");
+        assert_eq!(row.task_id, "t1");
+        assert_eq!(row.mission_id, "m1");
+        assert_eq!(row.packet_json, "{\"summary\":\"second\"}");
+        assert_eq!(row.generation_status, "agent_authored");
+    }
+
+    #[test]
+    fn lists_parent_handoff_packets_for_task() {
+        let conn = setup();
+        conn.execute("INSERT INTO tasks (id, mission_id, title, description, status) VALUES ('t2', 'm1', 'Child', 'Continue', 'pending')", []).unwrap();
+        conn.execute("INSERT INTO task_dependencies (task_id, depends_on) VALUES ('t2', 't1')", []).unwrap();
+        upsert_task_handoff_packet(&conn, "t1", "m1", "{\"summary\":\"parent\"}", "generated").unwrap();
+        let rows = list_parent_handoff_packets(&conn, "t2").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].task_id, "t1");
+        assert!(rows[0].packet_json.contains("parent"));
+    }
+
+    #[test]
+    fn upserts_and_reads_mission_delivery() {
+        let conn = setup();
+        upsert_mission_delivery(&conn, "m1", 1, "{\"overview\":{\"title\":\"First\"}}", "degraded", Some("fallback"), "[\"t1\"]", "[]", false).unwrap();
+        let row = get_mission_delivery(&conn, "m1").unwrap().expect("delivery exists");
+        assert_eq!(row.mission_id, "m1");
+        assert_eq!(row.version, 1);
+        assert_eq!(row.generation_status, "degraded");
+        assert_eq!(row.curator_model.as_deref(), Some("fallback"));
+        assert!(!row.stale);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
