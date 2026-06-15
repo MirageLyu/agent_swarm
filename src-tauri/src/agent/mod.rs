@@ -6,6 +6,7 @@ pub mod budget_tracker;
 pub mod chat;
 pub mod codebase_intel;
 pub mod conflict_resolver;
+pub mod delivery;
 mod engine;
 pub mod evaluator;
 pub mod fallback;
