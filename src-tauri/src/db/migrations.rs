@@ -1233,6 +1233,96 @@ const MIGRATIONS: &[(&str, &str)] = &[
             ON mission_deliveries(generation_status, updated_at);
         "#,
     ),
+    (
+        "042_harden_mission_delivery_plane",
+        r#"
+        PRAGMA foreign_keys=OFF;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_id_mission
+            ON tasks(id, mission_id);
+
+        DROP INDEX IF EXISTS idx_task_handoffs_mission;
+        CREATE TABLE task_handoff_packets_new (
+            task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+            mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+            packet_json TEXT NOT NULL,
+            generation_status TEXT NOT NULL DEFAULT 'generated'
+                CHECK (generation_status IN ('agent_authored', 'generated', 'fallback')),
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (task_id, mission_id) REFERENCES tasks(id, mission_id) ON DELETE CASCADE
+        );
+
+        INSERT INTO task_handoff_packets_new (
+            task_id, mission_id, packet_json, generation_status, created_at, updated_at
+        )
+        SELECT
+            hp.task_id,
+            hp.mission_id,
+            hp.packet_json,
+            hp.generation_status,
+            hp.created_at,
+            hp.updated_at
+        FROM task_handoff_packets hp
+        JOIN tasks t
+            ON t.id = hp.task_id
+           AND t.mission_id = hp.mission_id;
+
+        DROP TABLE task_handoff_packets;
+        ALTER TABLE task_handoff_packets_new RENAME TO task_handoff_packets;
+
+        CREATE INDEX IF NOT EXISTS idx_task_handoffs_mission
+            ON task_handoff_packets(mission_id, updated_at);
+
+        DROP INDEX IF EXISTS idx_mission_deliveries_status;
+        CREATE TABLE mission_deliveries_new (
+            mission_id TEXT PRIMARY KEY REFERENCES missions(id) ON DELETE CASCADE,
+            version INTEGER NOT NULL DEFAULT 1,
+            snapshot_json TEXT NOT NULL,
+            generation_status TEXT NOT NULL DEFAULT 'generated'
+                CHECK (generation_status IN ('generated', 'degraded', 'failed')),
+            curator_model TEXT,
+            source_task_ids TEXT NOT NULL DEFAULT '[]',
+            source_event_ids TEXT NOT NULL DEFAULT '[]',
+            stale INTEGER NOT NULL DEFAULT 0 CHECK (stale IN (0, 1)),
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        INSERT INTO mission_deliveries_new (
+            mission_id,
+            version,
+            snapshot_json,
+            generation_status,
+            curator_model,
+            source_task_ids,
+            source_event_ids,
+            stale,
+            created_at,
+            updated_at
+        )
+        SELECT
+            mission_id,
+            version,
+            snapshot_json,
+            generation_status,
+            curator_model,
+            source_task_ids,
+            source_event_ids,
+            CASE WHEN stale = 0 THEN 0 ELSE 1 END,
+            created_at,
+            updated_at
+        FROM mission_deliveries;
+
+        DROP TABLE mission_deliveries;
+        ALTER TABLE mission_deliveries_new RENAME TO mission_deliveries;
+
+        CREATE INDEX IF NOT EXISTS idx_mission_deliveries_status
+            ON mission_deliveries(generation_status, updated_at);
+
+        PRAGMA foreign_keys=ON;
+        "#,
+    ),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
@@ -1867,6 +1957,155 @@ mod migration_041_tests {
 mod mission_delivery_plane_migration_tests {
     use super::run;
     use rusqlite::Connection;
+
+    fn recreate_weak_041_tables(conn: &Connection) {
+        conn.execute_batch(
+            r#"
+            PRAGMA foreign_keys=OFF;
+
+            DROP TABLE IF EXISTS task_handoff_packets;
+            DROP TABLE IF EXISTS mission_deliveries;
+            DROP INDEX IF EXISTS idx_task_handoffs_mission;
+            DROP INDEX IF EXISTS idx_mission_deliveries_status;
+
+            CREATE TABLE task_handoff_packets (
+                task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+                mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+                packet_json TEXT NOT NULL,
+                generation_status TEXT NOT NULL DEFAULT 'generated'
+                    CHECK (generation_status IN ('agent_authored', 'generated', 'fallback')),
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX idx_task_handoffs_mission
+                ON task_handoff_packets(mission_id, updated_at);
+
+            CREATE TABLE mission_deliveries (
+                mission_id TEXT PRIMARY KEY REFERENCES missions(id) ON DELETE CASCADE,
+                version INTEGER NOT NULL DEFAULT 1,
+                snapshot_json TEXT NOT NULL,
+                generation_status TEXT NOT NULL DEFAULT 'generated'
+                    CHECK (generation_status IN ('generated', 'degraded', 'failed')),
+                curator_model TEXT,
+                source_task_ids TEXT NOT NULL DEFAULT '[]',
+                source_event_ids TEXT NOT NULL DEFAULT '[]',
+                stale INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX idx_mission_deliveries_status
+                ON mission_deliveries(generation_status, updated_at);
+
+            INSERT OR IGNORE INTO schema_migrations (name)
+                VALUES ('041_mission_delivery_plane');
+            DELETE FROM schema_migrations
+                WHERE name = '042_harden_mission_delivery_plane';
+
+            PRAGMA foreign_keys=ON;
+            "#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn hardening_migration_repairs_already_applied_weak_041() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        run(&conn).expect("base migrations run");
+        recreate_weak_041_tables(&conn);
+
+        conn.execute(
+            "INSERT INTO missions (id, title, description, status) VALUES ('m1', 'Mission 1', 'Build app', 'completed')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO missions (id, title, description, status) VALUES ('m2', 'Mission 2', 'Build app', 'completed')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, mission_id, title, description, status) VALUES ('t1', 'm1', 'Task', 'Do work', 'completed')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO tasks (id, mission_id, title, description, status) VALUES ('t2', 'm1', 'Task 2', 'Do more work', 'completed')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO task_handoff_packets (task_id, mission_id, packet_json, generation_status)
+             VALUES ('t1', 'm1', '{\"summary\":\"valid\"}', 'generated')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_handoff_packets (task_id, mission_id, packet_json, generation_status)
+             VALUES ('t2', 'm2', '{\"summary\":\"wrong mission\"}', 'generated')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mission_deliveries (mission_id, version, snapshot_json, generation_status, stale)
+             VALUES ('m1', 1, '{}', 'generated', 2)",
+            [],
+        )
+        .unwrap();
+
+        run(&conn).expect("hardening migration runs");
+
+        let hardening_applied: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE name = '042_harden_mission_delivery_plane'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hardening_applied, 1);
+
+        let stale: i64 = conn
+            .query_row(
+                "SELECT stale FROM mission_deliveries WHERE mission_id = 'm1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale, 1);
+
+        let invalid_stale = conn.execute(
+            "INSERT INTO mission_deliveries (mission_id, version, snapshot_json, generation_status, stale)
+             VALUES ('m2', 1, '{}', 'generated', 2)",
+            [],
+        );
+        assert!(
+            invalid_stale.is_err(),
+            "hardened mission_deliveries.stale must reject non-boolean values"
+        );
+
+        let cross_mission = conn.execute(
+            "INSERT INTO task_handoff_packets (task_id, mission_id, packet_json, generation_status)
+             VALUES ('t1', 'm2', '{\"summary\":\"wrong mission\"}', 'generated')",
+            [],
+        );
+        assert!(
+            cross_mission.is_err(),
+            "hardened handoff table must reject task/mission mismatches"
+        );
+
+        let copied_handoffs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_handoff_packets",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(copied_handoffs, 1);
+    }
 
     #[test]
     fn migration_creates_handoff_and_delivery_tables() {
