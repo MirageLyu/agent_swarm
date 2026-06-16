@@ -1,6 +1,4 @@
-use crate::agent::delivery::{
-    generate_degraded_delivery_snapshot, persist_delivery_snapshot, MissionDeliverySnapshot,
-};
+use crate::agent::delivery::{generate_and_persist_degraded_delivery, MissionDeliverySnapshot};
 use crate::db::{queries, Database};
 use serde::Serialize;
 use tauri::Manager;
@@ -47,15 +45,8 @@ pub fn generate_mission_delivery(
     mission_id: String,
 ) -> Result<GenerateMissionDeliveryResponse, String> {
     let db = app.state::<Database>();
+    generate_and_persist_degraded_delivery(&db, &mission_id).map_err(|e| e.to_string())?;
     db.with_conn(|conn| {
-        let generation = generate_degraded_delivery_snapshot(conn, &mission_id)?;
-        persist_delivery_snapshot(
-            conn,
-            &generation.snapshot,
-            "degraded",
-            Some("deterministic"),
-            &generation.source_task_ids,
-        )?;
         let row = queries::get_mission_delivery(conn, &mission_id)?.ok_or_else(|| {
             anyhow::anyhow!("delivery snapshot was not persisted for mission: {mission_id}")
         })?;
