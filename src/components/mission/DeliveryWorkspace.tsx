@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "../ui";
 import {
   commands,
-  type MissionDeliveryItem,
-  type MissionDeliverySnapshot,
+  type DeliveryItem,
+  type HowToUseStep,
+  type MissionDeliveryView,
   type MissionStatus,
+  type ValidationEvidence,
+  type ChangeSummary,
 } from "../../ipc/commands";
 import { formatBackendError } from "../../i18n/format-error";
 import { useUiStore } from "../../stores/ui-store";
@@ -15,15 +18,19 @@ import styles from "./DeliveryWorkspace.module.css";
 interface DeliveryWorkspaceProps {
   missionId: string;
   missionStatus: Extract<MissionStatus, "completed" | "failed">;
-  onFollowupCreated?: (childMissionId: string) => void;
+  refreshKey?: number;
+  onFollowupCreated?: (childMissionId: string, repoPath: string) => void;
 }
 
-type RenderableEntry = string | MissionDeliveryItem;
-
-export function DeliveryWorkspace({ missionId, missionStatus, onFollowupCreated }: DeliveryWorkspaceProps) {
+export function DeliveryWorkspace({
+  missionId,
+  missionStatus,
+  refreshKey = 0,
+  onFollowupCreated,
+}: DeliveryWorkspaceProps) {
   const { t } = useTranslation("mission");
   const openMissionReport = useUiStore((s) => s.openMissionReport);
-  const [snapshot, setSnapshot] = useState<MissionDeliverySnapshot | null>(null);
+  const [delivery, setDelivery] = useState<MissionDeliveryView | null>(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -33,9 +40,8 @@ export function DeliveryWorkspace({ missionId, missionStatus, onFollowupCreated 
     if (persisted) return persisted;
 
     setGenerating(true);
-    await nextTick();
-    await commands.generateMissionDelivery(missionId);
-    return commands.getMissionDelivery(missionId);
+    const generated = await commands.generateMissionDelivery(missionId);
+    return generated.delivery;
   }, [missionId]);
 
   useEffect(() => {
@@ -43,11 +49,11 @@ export function DeliveryWorkspace({ missionId, missionStatus, onFollowupCreated 
     setLoading(true);
     setGenerating(false);
     setError(null);
-    setSnapshot(null);
+    setDelivery(null);
 
     loadDelivery()
       .then((loaded) => {
-        if (!cancelled) setSnapshot(loaded);
+        if (!cancelled) setDelivery(loaded);
       })
       .catch((err) => {
         if (!cancelled) setError(formatBackendError(err));
@@ -62,16 +68,14 @@ export function DeliveryWorkspace({ missionId, missionStatus, onFollowupCreated 
     return () => {
       cancelled = true;
     };
-  }, [loadDelivery]);
+  }, [loadDelivery, refreshKey]);
 
-  const warnings = useMemo(() => normalizeEntries(snapshot?.warnings), [snapshot]);
-  const hasPrimaryDelivery = Boolean(getPath(snapshot?.primary_delivery) || getLabel(snapshot?.primary_delivery));
-  const hasSupportingDeliverables = (snapshot?.supporting_deliverables?.length ?? 0) > 0;
-  const shouldWarnNoPackage = !loading && !error && Boolean(snapshot) && !hasPrimaryDelivery && !hasSupportingDeliverables;
-  const timeline = useMemo(
-    () => normalizeEntries([...(snapshot?.what_changed ?? []), ...(snapshot?.handoff_timeline ?? [])]),
-    [snapshot],
-  );
+  const snapshot = delivery?.snapshot ?? null;
+  const primaryItem = snapshot?.items[0] ?? null;
+  const supportingItems = snapshot?.items.slice(1) ?? [];
+  const hasPrimaryDelivery = Boolean(primaryItem?.title || primaryItem?.file_paths.length);
+  const shouldWarnNoPackage = !loading && !error && Boolean(snapshot) && !hasPrimaryDelivery;
+  const reportId = snapshot?.items.find((item) => item.source === "manifest" && item.title.toLowerCase().includes("report"))?.id;
 
   return (
     <div className={styles.workspace} data-testid="delivery-workspace">
@@ -86,7 +90,7 @@ export function DeliveryWorkspace({ missionId, missionStatus, onFollowupCreated 
                 : t("deliveryWorkspace.completedSubtitle")}
             </p>
           </div>
-          {snapshot?.report_id ? (
+          {reportId ? (
             <Button variant="primary" size="sm" onClick={() => openMissionReport(missionId)}>
               {t("viewFullReport")}
             </Button>
@@ -110,13 +114,11 @@ export function DeliveryWorkspace({ missionId, missionStatus, onFollowupCreated 
           <div className={styles.contentGrid}>
             <section className={styles.sectionWide}>
               <h3>{t("deliveryWorkspace.sections.overview")}</h3>
-              <p>{snapshot.overview || snapshot.result || t("deliveryWorkspace.emptyOverview")}</p>
-              {snapshot.result && snapshot.overview ? (
-                <p className={styles.resultText}>{snapshot.result}</p>
-              ) : null}
+              <p>{snapshot.overview.summary || t("deliveryWorkspace.emptyOverview")}</p>
+              <p className={styles.resultText}>{snapshot.overview.title}</p>
             </section>
 
-            {warnings.length > 0 || shouldWarnNoPackage || missionStatus === "failed" ? (
+            {snapshot.caveats.length > 0 || shouldWarnNoPackage || missionStatus === "failed" ? (
               <section className={styles.sectionWide}>
                 <h3>{t("deliveryWorkspace.sections.warnings")}</h3>
                 <div className={styles.warningStack}>
@@ -126,9 +128,9 @@ export function DeliveryWorkspace({ missionId, missionStatus, onFollowupCreated 
                   {shouldWarnNoPackage ? (
                     <div className={styles.warning}>{t("deliveryWorkspace.noPackageWarning")}</div>
                   ) : null}
-                  {warnings.map((warning, index) => (
+                  {snapshot.caveats.map((warning, index) => (
                     <div className={styles.warning} key={`warning-${index}`}>
-                      {renderEntry(warning)}
+                      {warning}
                     </div>
                   ))}
                 </div>
@@ -137,30 +139,22 @@ export function DeliveryWorkspace({ missionId, missionStatus, onFollowupCreated 
 
             <section className={styles.sectionWide}>
               <h3>{t("deliveryWorkspace.sections.primaryDelivery")}</h3>
-              {hasPrimaryDelivery && snapshot.primary_delivery ? (
-                <DeliverableCard item={snapshot.primary_delivery} primary />
+              {primaryItem ? (
+                <DeliverableCard item={primaryItem} primary />
               ) : (
                 <div className={styles.empty}>{t("deliveryWorkspace.noPrimaryDelivery")}</div>
               )}
             </section>
 
-            <EntryListSection
-              title={t("deliveryWorkspace.sections.howToUse")}
-              entries={normalizeEntries(snapshot.how_to_use)}
-              empty={t("deliveryWorkspace.emptyHowToUse")}
-            />
-            <EntryListSection
-              title={t("deliveryWorkspace.sections.validation")}
-              entries={normalizeEntries(snapshot.validation)}
-              empty={t("deliveryWorkspace.emptyValidation")}
-            />
+            <HowToUseSection steps={snapshot.how_to_use} empty={t("deliveryWorkspace.emptyHowToUse")} />
+            <ValidationSection entries={snapshot.validation} empty={t("deliveryWorkspace.emptyValidation")} />
 
             <section className={styles.sectionWide}>
               <h3>{t("deliveryWorkspace.sections.supportingDeliverables")}</h3>
-              {snapshot.supporting_deliverables?.length ? (
+              {supportingItems.length ? (
                 <div className={styles.cardList}>
-                  {snapshot.supporting_deliverables.map((item, index) => (
-                    <DeliverableCard item={item} key={`${getLabel(item)}-${getPath(item)}-${index}`} />
+                  {supportingItems.map((item) => (
+                    <DeliverableCard item={item} key={item.id} />
                   ))}
                 </div>
               ) : (
@@ -168,12 +162,7 @@ export function DeliveryWorkspace({ missionId, missionStatus, onFollowupCreated 
               )}
             </section>
 
-            <EntryListSection
-              title={t("deliveryWorkspace.sections.timeline")}
-              entries={timeline}
-              empty={t("deliveryWorkspace.emptyTimeline")}
-              wide
-            />
+            <ChangeTimeline entries={snapshot.changes} empty={t("deliveryWorkspace.emptyTimeline")} />
           </div>
         ) : !loading && !error ? (
           <div className={styles.empty}>{t("deliveryWorkspace.emptySnapshot")}</div>
@@ -187,24 +176,30 @@ export function DeliveryWorkspace({ missionId, missionStatus, onFollowupCreated 
   );
 }
 
-function EntryListSection({
-  title,
-  entries,
-  empty,
-  wide = false,
-}: {
-  title: string;
-  entries: RenderableEntry[];
-  empty: string;
-  wide?: boolean;
-}) {
+function DeliverableCard({ item, primary = false }: { item: DeliveryItem; primary?: boolean }) {
   return (
-    <section className={wide ? styles.sectionWide : styles.section}>
-      <h3>{title}</h3>
-      {entries.length ? (
+    <article className={primary ? `${styles.deliverable} ${styles.primaryDeliverable}` : styles.deliverable}>
+      <div className={styles.deliverableTitle}>{item.title}</div>
+      {item.summary ? <p>{item.summary}</p> : null}
+      {item.file_paths.map((path) => (
+        <code className={styles.path} key={path}>{path}</code>
+      ))}
+      <span className={styles.statusPill}>{item.confidence}</span>
+    </article>
+  );
+}
+
+function HowToUseSection({ steps, empty }: { steps: HowToUseStep[]; empty: string }) {
+  return (
+    <section className={styles.section}>
+      <h3>How to use</h3>
+      {steps.length ? (
         <ol className={styles.entryList}>
-          {entries.map((entry, index) => (
-            <li key={`${renderEntry(entry)}-${index}`}>{renderEntry(entry)}</li>
+          {steps.map((step) => (
+            <li key={`${step.title}-${step.detail}`}>
+              <strong>{step.title}</strong>
+              <p>{step.detail}</p>
+            </li>
           ))}
         </ol>
       ) : (
@@ -214,40 +209,44 @@ function EntryListSection({
   );
 }
 
-function DeliverableCard({ item, primary = false }: { item: MissionDeliveryItem; primary?: boolean }) {
-  const label = getLabel(item);
-  const path = getPath(item);
-  const detail = item.summary ?? item.detail ?? item.description ?? null;
-
+function ValidationSection({ entries, empty }: { entries: ValidationEvidence[]; empty: string }) {
   return (
-    <article className={primary ? `${styles.deliverable} ${styles.primaryDeliverable}` : styles.deliverable}>
-      {label ? <div className={styles.deliverableTitle}>{label}</div> : null}
-      {detail ? <p>{detail}</p> : null}
-      {path ? <code className={styles.path}>{path}</code> : null}
-      {item.status ? <span className={styles.statusPill}>{item.status}</span> : null}
-    </article>
+    <section className={styles.section}>
+      <h3>Validation</h3>
+      {entries.length ? (
+        <ol className={styles.entryList}>
+          {entries.map((entry, index) => (
+            <li key={`${entry.status}-${entry.summary}-${index}`}>
+              <strong>{entry.status}</strong>
+              <p>{entry.summary}</p>
+              {entry.command ? <code className={styles.path}>{entry.command}</code> : null}
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <div className={styles.empty}>{empty}</div>
+      )}
+    </section>
   );
 }
 
-function normalizeEntries(entries: Array<RenderableEntry> | null | undefined): RenderableEntry[] {
-  return entries?.filter(Boolean) ?? [];
-}
-
-function getLabel(item: MissionDeliveryItem | null | undefined): string | null {
-  return item?.label ?? item?.title ?? item?.name ?? null;
-}
-
-function getPath(item: MissionDeliveryItem | null | undefined): string | null {
-  return item?.path ?? item?.file_path ?? null;
-}
-
-function nextTick(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0));
-}
-
-function renderEntry(entry: RenderableEntry): string {
-  if (typeof entry === "string") return entry;
-  return [getLabel(entry), entry.detail ?? entry.summary ?? entry.description, getPath(entry), entry.command, entry.status]
-    .filter((part): part is string => Boolean(part))
-    .join(" · ");
+function ChangeTimeline({ entries, empty }: { entries: ChangeSummary[]; empty: string }) {
+  return (
+    <section className={styles.sectionWide}>
+      <h3>What changed</h3>
+      {entries.length ? (
+        <ol className={styles.entryList}>
+          {entries.map((entry) => (
+            <li key={`${entry.title}-${entry.detail}`}>
+              <strong>{entry.title}</strong>
+              <p>{entry.detail}</p>
+              {entry.files.map((file) => <code className={styles.path} key={file}>{file}</code>)}
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <div className={styles.empty}>{empty}</div>
+      )}
+    </section>
+  );
 }

@@ -15,8 +15,8 @@ interface MissionChatPanelProps {
   missionId: string;
   /** Mission 必须 completed/failed/running 才允许 chat。父层判断后传入 enabled。 */
   enabled: boolean;
-  /** 用户确认升级后用此回调拿到子 mission id（让父层做后续 plan_mission 跳转）。 */
-  onFollowupCreated?: (childMissionId: string) => void;
+  /** 用户确认升级后用此回调拿到子 mission id 和 repo path（让父层做后续 plan_mission 跳转）。 */
+  onFollowupCreated?: (childMissionId: string, repoPath: string) => void;
 }
 
 type PendingProposal = FollowupProposedPayload;
@@ -149,7 +149,7 @@ export function MissionChatPanel({ missionId, enabled, onFollowupCreated }: Miss
         });
         setPendingProposal(null);
         await refreshHistory();
-        onFollowupCreated?.(resp.child_mission_id);
+        onFollowupCreated?.(resp.child_mission_id, resp.repo_path);
       } catch (err) {
         setError(formatBackendError(err));
       } finally {

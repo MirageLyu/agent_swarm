@@ -63,8 +63,8 @@ export function MissionsView() {
   const [planDialogOpen, setPlanDialogOpen] = useState(false);
 
   // FM-15 v2.2 P4-S4: keep the mission-delivered subscription as a lightweight
-  // realtime hint so completed missions refresh their durable workspace.
-  const [deliveryHintTick, setDeliveryHintTick] = useState(0);
+  // realtime hint so the matching completed mission refreshes its durable workspace.
+  const [deliveryRefreshTicks, setDeliveryRefreshTicks] = useState<Record<string, number>>({});
 
   // FM-08 dialog state
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -78,6 +78,9 @@ export function MissionsView() {
   const streamTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const selectedMission = missions.find((m) => m.id === selectedMissionId);
+  const selectedDeliveryRefreshTick = selectedMissionId
+    ? (deliveryRefreshTicks[selectedMissionId] ?? 0)
+    : 0;
 
   // Load missions on mount
   useEffect(() => {
@@ -90,12 +93,19 @@ export function MissionsView() {
       setDetail([], []);
       return;
     }
+    let cancelled = false;
+    const requestedMissionId = selectedMissionId;
     commands
-      .getMissionDetail(selectedMissionId)
+      .getMissionDetail(requestedMissionId)
       .then((detail) => {
-        setDetail(detail.tasks, detail.dependencies);
+        if (!cancelled && detail.mission.id === requestedMissionId) {
+          setDetail(detail.tasks, detail.dependencies);
+        }
       })
       .catch(console.error);
+    return () => {
+      cancelled = true;
+    };
   }, [selectedMissionId, setDetail]);
 
   // Auto-select first mission
@@ -109,8 +119,11 @@ export function MissionsView() {
   // see terminal updates, but completed UI now reads the durable snapshot.
   useEffect(() => {
     let unlisten: (() => void) | null = null;
-    onMissionDelivered(() => {
-      setDeliveryHintTick((tick) => tick + 1);
+    onMissionDelivered((payload) => {
+      setDeliveryRefreshTicks((ticks) => ({
+        ...ticks,
+        [payload.missionId]: (ticks[payload.missionId] ?? 0) + 1,
+      }));
     })
       .then((fn) => {
         unlisten = fn;
@@ -555,6 +568,27 @@ export function MissionsView() {
     ? (tasks.find((t) => t.id === dagSelectedTaskId) ?? null)
     : null;
 
+  const handleFollowupCreated = useCallback(
+    async (childMissionId: string, repoPath: string) => {
+      try {
+        const detail = await commands.getMissionDetail(childMissionId);
+        addMission(detail.mission);
+        selectMission(childMissionId);
+        setDetail(detail.tasks, detail.dependencies);
+        lastPlanCreatedRef.current = {
+          ...detail.mission,
+          repo_path: repoPath,
+          repo_origin: null,
+        };
+        planCancelledRef.current = false;
+        planFlow.run();
+      } catch (e) {
+        setError(formatBackendError(e));
+      }
+    },
+    [addMission, selectMission, setDetail, setError, planFlow],
+  );
+
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
   const handleFocusTask = useCallback((taskId: string) => {
     setDagSelectedTaskId(taskId);
@@ -619,26 +653,22 @@ export function MissionsView() {
                   selectedMission.status === "failed") ? (
                   <div className={styles.deliverySection}>
                     <DeliveryWorkspace
-                      key={`${selectedMission.id}-${deliveryHintTick}`}
                       missionId={selectedMission.id}
                       missionStatus={selectedMission.status}
-                      onFollowupCreated={(childId) => {
-                        // 跳到子 mission 并自动启动 planner
-                        selectMission(childId);
-                      }}
+                      refreshKey={selectedDeliveryRefreshTick}
+                      onFollowupCreated={handleFollowupCreated}
                     />
                   </div>
-                ) : (
-                  <TaskDAG
-                    tasks={tasks}
-                    dependencies={dependencies}
-                    onEditTask={setEditingTask}
-                    onDeleteTask={handleDeleteTask}
-                    onAddTask={() => setAddDialogOpen(true)}
-                    focusNodeId={focusNodeId}
-                    onFocusHandled={() => setFocusNodeId(null)}
-                  />
-                )}
+                ) : null}
+                <TaskDAG
+                  tasks={tasks}
+                  dependencies={dependencies}
+                  onEditTask={setEditingTask}
+                  onDeleteTask={handleDeleteTask}
+                  onAddTask={() => setAddDialogOpen(true)}
+                  focusNodeId={focusNodeId}
+                  onFocusHandled={() => setFocusNodeId(null)}
+                />
               </>
             )}
           </div>

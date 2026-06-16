@@ -826,47 +826,6 @@ export interface ChatTurnSummary {
   proposed_followup?: FollowupProposedSummary | null;
 }
 
-// ---------- Task 7: Durable Mission Delivery Workspace ----------
-
-export interface MissionDeliveryItem {
-  label?: string | null;
-  name?: string | null;
-  title?: string | null;
-  path?: string | null;
-  file_path?: string | null;
-  summary?: string | null;
-  detail?: string | null;
-  description?: string | null;
-  status?: string | null;
-  command?: string | null;
-  timestamp?: string | null;
-}
-
-export interface MissionDeliverySnapshot {
-  mission_id?: string;
-  status?: MissionStatus | string;
-  generated_at?: string | null;
-  overview?: string | null;
-  result?: string | null;
-  warnings?: Array<string | MissionDeliveryItem> | null;
-  primary_delivery?: MissionDeliveryItem | null;
-  how_to_use?: Array<string | MissionDeliveryItem> | null;
-  validation?: Array<string | MissionDeliveryItem> | null;
-  supporting_deliverables?: MissionDeliveryItem[] | null;
-  what_changed?: Array<string | MissionDeliveryItem> | null;
-  handoff_timeline?: Array<string | MissionDeliveryItem> | null;
-  report_id?: string | null;
-}
-
-export interface GenerateMissionDeliveryResponse {
-  report_id?: string | null;
-  generated_at?: string | null;
-}
-
-export interface GenerateMissionDeliveryRequest {
-  mission_id: string;
-}
-
 export interface ConfirmFollowupRequest {
   parent_mission_id: string;
   title: string;
@@ -1374,15 +1333,6 @@ export const commands = {
 
   rejectFollowupProposal: (missionId: string) =>
     invoke<void>("reject_followup_proposal", { request: { mission_id: missionId } }),
-
-  // Task 7: durable delivery workspace
-  getMissionDelivery: (missionId: string) =>
-    invoke<MissionDeliverySnapshot | null>("get_mission_delivery", { missionId }),
-
-  generateMissionDelivery: (missionId: string) =>
-    invoke<GenerateMissionDeliveryResponse>("generate_mission_delivery", {
-      request: { mission_id: missionId },
-    }),
 
   // FM-14: Approval Queue
   listPendingApprovals: (missionId?: string) =>
