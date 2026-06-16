@@ -14,6 +14,7 @@ import {
   KnownLimitationsSection,
   LearningFlywheelSection,
   ContractCompareOverlay,
+  ReportDeliverySection,
 } from "../components/report";
 import styles from "./ReportView.module.css";
 
@@ -95,6 +96,11 @@ export function ReportView() {
         badge: r.task_matrix.length || undefined,
       },
       { id: "cost", label: t("tocCost") },
+      {
+        id: "delivery",
+        label: "Delivery",
+        badge: r.delivery?.items.length || undefined,
+      },
       {
         id: "limitations",
         label: t("tocLimitations"),
@@ -402,6 +408,15 @@ export function ReportView() {
               onToggle={toggleCollapse}
             >
               <CostBreakdownSection breakdown={r.cost_breakdown} />
+            </SectionWrapper>
+
+            <SectionWrapper
+              id="delivery"
+              title="Delivery"
+              collapsed={collapsed.has("delivery")}
+              onToggle={toggleCollapse}
+            >
+              <ReportDeliverySection delivery={r.delivery} />
             </SectionWrapper>
 
             <SectionWrapper

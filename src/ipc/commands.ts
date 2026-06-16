@@ -1074,6 +1074,7 @@ export interface MissionReportData {
   limitations: string[];
   contract: MissionReportContract | null;
   artifacts: MissionReportArtifact[];
+  delivery?: MissionDeliverySnapshot | null;
   learning_flywheel: MissionReportLearningFlywheel;
 }
 

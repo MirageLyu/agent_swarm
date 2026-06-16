@@ -6,3 +6,4 @@ export { CostBreakdownSection } from "./CostBreakdownSection";
 export { KnownLimitationsSection } from "./KnownLimitationsSection";
 export { LearningFlywheelSection } from "./LearningFlywheelSection";
 export { ContractCompareOverlay } from "./ContractCompareOverlay";
+export { ReportDeliverySection } from "./ReportDeliverySection";
