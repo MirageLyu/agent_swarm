@@ -1917,24 +1917,40 @@ mod tests {
     }
 
     #[test]
-    fn render_handoffs_for_prompt_mentions_direct_context() {
-        let mut handoff = TaskHandoffPacket::fallback(
-            "mission-1",
-            "task-1",
-            "Build CLI",
-            "Implemented command parsing.",
-            vec![artifact("cli_patch", "CLI patch", &["src/cli.rs"])],
-        );
-        handoff
-            .direct_context
-            .push("Direct context: pass --dry-run to preview changes.".into());
+    fn render_delivery_for_prompt_includes_primary_deliverable_and_caveat() {
+        let snapshot = MissionDeliverySnapshot {
+            schema_version: DELIVERY_SNAPSHOT_SCHEMA_VERSION,
+            mission_id: "mission-1".into(),
+            status: DeliveryStatus::CompletedWithWarnings,
+            confidence: DeliveryConfidence::Medium,
+            overview: DeliveryOverview {
+                title: "Build app".into(),
+                summary: "Packaged the app for review.".into(),
+                status: DeliveryStatus::CompletedWithWarnings,
+                confidence: DeliveryConfidence::Medium,
+            },
+            items: vec![DeliveryItem {
+                id: "app".into(),
+                source: DeliveryCandidateSource::Artifact,
+                title: "Miragenty.app".into(),
+                summary: "Runnable app bundle.".into(),
+                file_paths: vec!["target/release/bundle/macos/Miragenty.app".into()],
+                confidence: DeliveryConfidence::High,
+            }],
+            how_to_use: vec![HowToUseStep {
+                title: "Open app".into(),
+                detail: "Open the app bundle from Finder.".into(),
+            }],
+            validation: vec![],
+            changes: vec![],
+            caveats: vec!["Not notarized".into()],
+            next_steps: vec![],
+        };
 
-        let rendered = render_handoffs_for_prompt(&[handoff], 2_000);
+        let rendered = render_delivery_for_prompt(&snapshot, 2_000);
 
-        assert!(rendered.contains("Parent task handoffs"));
-        assert!(rendered.contains("task-1"));
-        assert!(rendered.contains("Direct context"));
-        assert!(rendered.contains("--dry-run"));
-        assert!(rendered.len() <= 2_000);
+        assert!(rendered.contains("Miragenty.app"));
+        assert!(rendered.contains("target/release/bundle/macos/Miragenty.app"));
+        assert!(rendered.contains("Not notarized"));
     }
 }

@@ -192,7 +192,34 @@ pub fn confirm_followup_proposal(
             ));
         }
     }
-    let description = format!("{}{artifact_md}", request.request_summary.trim());
+
+    let delivery_md = db
+        .with_conn(|c| {
+            let Some(row) = queries::get_mission_delivery(c, &request.parent_mission_id)? else {
+                return Ok(String::new());
+            };
+            let snapshot = serde_json::from_str::<crate::agent::delivery::MissionDeliverySnapshot>(
+                &row.snapshot_json,
+            )
+            .map_err(|e| anyhow::anyhow!("invalid delivery snapshot json: {e}"))?;
+            Ok(format!(
+                "\n\n## Parent Delivery Context\n{}\n",
+                crate::agent::delivery::render_delivery_for_prompt(&snapshot, 2_000)
+            ))
+        })
+        .unwrap_or_else(|err| {
+            tracing::warn!(
+                parent_mission_id = %request.parent_mission_id,
+                error = %err,
+                "failed to load parent delivery context for follow-up mission"
+            );
+            String::new()
+        });
+
+    let description = format!(
+        "{}{artifact_md}{delivery_md}",
+        request.request_summary.trim()
+    );
 
     let child_id = Uuid::new_v4().to_string();
     let repo_origin_for_child = parent_repo_origin.unwrap_or_else(|| "from_existing".to_string());

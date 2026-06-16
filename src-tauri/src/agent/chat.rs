@@ -256,6 +256,35 @@ impl ChatAgent {
             tasks_md.push_str("(no completed tasks)\n");
         }
 
+        let delivery_context = db
+            .with_conn(|c| {
+                let Some(row) = queries::get_mission_delivery(c, mission_id)? else {
+                    return Ok(String::new());
+                };
+                let snapshot = serde_json::from_str::<
+                    crate::agent::delivery::MissionDeliverySnapshot,
+                >(&row.snapshot_json)
+                .map_err(|e| anyhow!("invalid delivery snapshot json: {e}"))?;
+                Ok(crate::agent::delivery::render_delivery_for_prompt(
+                    &snapshot, 4_000,
+                ))
+            })
+            .unwrap_or_else(|err| {
+                tracing::warn!(
+                    mission_id = %mission_id,
+                    error = %err,
+                    "failed to load delivery context for follow-up chat"
+                );
+                String::new()
+            });
+
+        let mut delivery_md = String::new();
+        if !delivery_context.trim().is_empty() {
+            delivery_md.push_str("## Delivery Snapshot\n");
+            delivery_md.push_str(delivery_context.trim());
+            delivery_md.push('\n');
+        }
+
         let escalation_block = if force_direct {
             "\n\n## IMPORTANT — Escalation Override\n\
              The user has explicitly REJECTED any escalation. You MUST attempt the change \
@@ -285,6 +314,7 @@ impl ChatAgent {
              ## Mission\n**{title}**\n\n{desc}\n\n\
              ## Completed Tasks\n{tasks_md}\n\
              ## Published Artifacts\n{artifacts_md}\n\
+             {delivery_md}\
              ## Tools\n\
              - `read_file` / `write_file` / `edit_file` / `grep` / `glob` / `list_files` / `shell_exec` for code edits.\n\
              - `propose_followup_mission` to escalate large requests.\n\
@@ -296,6 +326,7 @@ impl ChatAgent {
             workdir = self.repo_path.display(),
             title = mission.0,
             desc = if mission.1.trim().is_empty() { "(no description)".to_string() } else { mission.1 },
+            delivery_md = delivery_md,
         ))
     }
 
