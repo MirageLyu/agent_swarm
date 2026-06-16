@@ -631,20 +631,25 @@ pub fn persist_delivery_snapshot(
     )
 }
 
+pub fn generate_and_persist_degraded_delivery_on_conn(
+    conn: &Connection,
+    mission_id: &str,
+) -> Result<()> {
+    let generation = generate_degraded_delivery_snapshot(conn, mission_id)?;
+    persist_delivery_snapshot(
+        conn,
+        &generation.snapshot,
+        "degraded",
+        Some("deterministic"),
+        &generation.source_task_ids,
+    )
+}
+
 pub fn generate_and_persist_degraded_delivery(
     db: &crate::db::Database,
     mission_id: &str,
 ) -> Result<()> {
-    db.with_conn(|conn| {
-        let generation = generate_degraded_delivery_snapshot(conn, mission_id)?;
-        persist_delivery_snapshot(
-            conn,
-            &generation.snapshot,
-            "degraded",
-            Some("deterministic"),
-            &generation.source_task_ids,
-        )
-    })
+    db.with_conn(|conn| generate_and_persist_degraded_delivery_on_conn(conn, mission_id))
 }
 
 pub fn mark_mission_delivery_stale_best_effort(

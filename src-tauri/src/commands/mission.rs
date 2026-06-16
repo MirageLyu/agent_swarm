@@ -994,6 +994,16 @@ pub async fn stop_mission_execution(
             "UPDATE missions SET status = 'failed', updated_at = datetime('now') WHERE id = ?1",
             [&mission_id],
         )?;
+        if let Err(err) = crate::agent::delivery::generate_and_persist_degraded_delivery_on_conn(
+            conn,
+            &mission_id,
+        ) {
+            tracing::warn!(
+                mission_id = %mission_id,
+                error = %err,
+                "mission delivery generation failed after stopped mission was marked failed"
+            );
+        }
         Ok(())
     })
     .map_err(|e| e.to_string())?;
