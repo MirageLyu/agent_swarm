@@ -84,9 +84,9 @@
 }
 
 .deliverySection {
-  padding: var(--space-3) var(--space-3) 0 var(--space-3);
-  flex-shrink: 0;
-  max-height: 50%;
+  padding: var(--space-3);
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
 }
 

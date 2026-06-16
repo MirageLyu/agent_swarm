@@ -20,9 +20,8 @@ import { TaskDetailPanel } from "../components/mission/TaskDetailPanel";
 import { PlanMissionDialog } from "../components/mission/PlanMissionDialog";
 import { PlannerStreamPanel } from "../components/mission/PlannerStreamPanel";
 import { PlannerLoopPanel } from "../components/mission/PlannerLoopPanel";
-import { MissionDeliveryPanel } from "../components/mission/MissionDeliveryPanel";
-import { MissionChatPanel } from "../components/mission/MissionChatPanel";
-import { onMissionDelivered, type MissionDeliveredPayload } from "../ipc/events";
+import { DeliveryWorkspace } from "../components/mission/DeliveryWorkspace";
+import { onMissionDelivered } from "../ipc/events";
 import { Button } from "../components/ui";
 import { useRetryableFlow } from "../hooks/useRetryableFlow";
 import styles from "./MissionsView.module.css";
@@ -63,11 +62,9 @@ export function MissionsView() {
   const [startDialogOpen, setStartDialogOpen] = useState(false);
   const [planDialogOpen, setPlanDialogOpen] = useState(false);
 
-  // FM-15 v2.2 P4-S4: mission-delivered payload 缓存，按 mission_id 索引。
-  // 在 mission 完成时显示交付面板，切换 mission 后保留——便于回头查看。
-  const [deliveredPayloads, setDeliveredPayloads] = useState<
-    Record<string, MissionDeliveredPayload>
-  >({});
+  // FM-15 v2.2 P4-S4: keep the mission-delivered subscription as a lightweight
+  // realtime hint so completed missions refresh their durable workspace.
+  const [deliveryHintTick, setDeliveryHintTick] = useState(0);
 
   // FM-08 dialog state
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -108,12 +105,12 @@ export function MissionsView() {
     }
   }, [missions, selectedMissionId, selectMission]);
 
-  // FM-15 v2.2 P4-S4: 监听 mission-delivered 事件并存进缓存，
-  // 切 view / 切 mission 不丢；多个 mission 各自独立缓存。
+  // FM-15 v2.2 P4-S4: preserve the mission-delivered realtime hint so stores
+  // see terminal updates, but completed UI now reads the durable snapshot.
   useEffect(() => {
     let unlisten: (() => void) | null = null;
-    onMissionDelivered((payload) => {
-      setDeliveredPayloads((prev) => ({ ...prev, [payload.missionId]: payload }));
+    onMissionDelivered(() => {
+      setDeliveryHintTick((tick) => tick + 1);
     })
       .then((fn) => {
         unlisten = fn;
@@ -618,37 +615,30 @@ export function MissionsView() {
             ) : (
               <>
                 {selectedMission &&
-                selectedMission.status === "completed" &&
-                deliveredPayloads[selectedMission.id] ? (
-                  <div className={styles.deliverySection}>
-                    <MissionDeliveryPanel
-                      payload={deliveredPayloads[selectedMission.id]}
-                    />
-                  </div>
-                ) : null}
-                <TaskDAG
-                  tasks={tasks}
-                  dependencies={dependencies}
-                  onEditTask={setEditingTask}
-                  onDeleteTask={handleDeleteTask}
-                  onAddTask={() => setAddDialogOpen(true)}
-                  focusNodeId={focusNodeId}
-                  onFocusHandled={() => setFocusNodeId(null)}
-                />
-                {selectedMission &&
                 (selectedMission.status === "completed" ||
                   selectedMission.status === "failed") ? (
-                  <div className={styles.chatSection}>
-                    <MissionChatPanel
+                  <div className={styles.deliverySection}>
+                    <DeliveryWorkspace
+                      key={`${selectedMission.id}-${deliveryHintTick}`}
                       missionId={selectedMission.id}
-                      enabled
+                      missionStatus={selectedMission.status}
                       onFollowupCreated={(childId) => {
                         // 跳到子 mission 并自动启动 planner
                         selectMission(childId);
                       }}
                     />
                   </div>
-                ) : null}
+                ) : (
+                  <TaskDAG
+                    tasks={tasks}
+                    dependencies={dependencies}
+                    onEditTask={setEditingTask}
+                    onDeleteTask={handleDeleteTask}
+                    onAddTask={() => setAddDialogOpen(true)}
+                    focusNodeId={focusNodeId}
+                    onFocusHandled={() => setFocusNodeId(null)}
+                  />
+                )}
               </>
             )}
           </div>
