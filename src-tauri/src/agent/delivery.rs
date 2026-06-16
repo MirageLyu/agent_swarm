@@ -671,6 +671,85 @@ pub fn mark_mission_delivery_stale_best_effort(
     }
 }
 
+pub fn parse_curator_snapshot_or_fallback(
+    raw: &str,
+    mut fallback: MissionDeliverySnapshot,
+) -> MissionDeliverySnapshot {
+    let trimmed = raw.trim();
+    let candidate = trimmed
+        .strip_prefix("```json")
+        .and_then(|value| value.strip_suffix("```"))
+        .or_else(|| {
+            trimmed
+                .strip_prefix("```")
+                .and_then(|value| value.strip_suffix("```"))
+        })
+        .map(str::trim)
+        .unwrap_or(trimmed);
+
+    match serde_json::from_str::<MissionDeliverySnapshot>(candidate) {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            fallback.caveats.push(format!(
+                "Delivery model curation output was invalid; using fallback snapshot: {err}"
+            ));
+            fallback
+        }
+    }
+}
+
+pub async fn curate_delivery_with_llm(
+    provider: std::sync::Arc<dyn crate::llm::LlmProvider>,
+    model: &str,
+    fallback: MissionDeliverySnapshot,
+) -> MissionDeliverySnapshot {
+    let prompt = format!(
+        "You are Miragenty's Delivery Curator. Decide what the user actually received and how to use it. Return ONLY JSON matching the provided MissionDeliverySnapshot schema. Preserve schema_version and mission_id. Treat listed items as broad candidates, not rigid rules.\n\nFallback snapshot JSON:\n{}",
+        serde_json::to_string_pretty(&fallback).unwrap_or_default(),
+    );
+    let request = crate::llm::LlmRequest {
+        model: model.to_string(),
+        system: Some("Return strict JSON only. Do not wrap in Markdown.".into()),
+        messages: vec![crate::llm::Message {
+            role: crate::llm::MessageRole::User,
+            content: vec![crate::llm::ContentBlock::Text { text: prompt }],
+            cache_control: None,
+        }],
+        tools: Vec::new(),
+        max_tokens: 4_000,
+        provider_extras: None,
+    };
+
+    match tokio::time::timeout(std::time::Duration::from_secs(30), provider.chat(&request)).await {
+        Ok(Ok(response)) => {
+            let raw = response
+                .content
+                .into_iter()
+                .filter_map(|block| match block {
+                    crate::llm::ContentBlock::Text { text } => Some(text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            parse_curator_snapshot_or_fallback(&raw, fallback)
+        }
+        Ok(Err(err)) => {
+            let mut snapshot = fallback;
+            snapshot.caveats.push(format!(
+                "Delivery model curation failed; using fallback snapshot: {err}"
+            ));
+            snapshot
+        }
+        Err(_) => {
+            let mut snapshot = fallback;
+            snapshot
+                .caveats
+                .push("Delivery model curation timed out; using fallback snapshot.".into());
+            snapshot
+        }
+    }
+}
+
 fn candidates_from_handoff(packet: &TaskHandoffPacket) -> Vec<DeliveryCandidate> {
     let mut candidates = packet
         .artifacts
@@ -1914,6 +1993,25 @@ mod tests {
             "truncated handoff render lacked visible marker: {rendered:?}"
         );
         assert!(rendered.chars().count() <= 120);
+    }
+
+    #[test]
+    fn invalid_curator_json_falls_back_to_degraded_snapshot() {
+        let fallback = MissionDeliverySnapshot::degraded_with_mission_status(
+            "mission-1",
+            Some("Build app"),
+            Some("completed"),
+            vec![],
+        );
+
+        let parsed = parse_curator_snapshot_or_fallback("not json", fallback.clone());
+
+        assert_eq!(parsed.mission_id, fallback.mission_id);
+        assert_eq!(parsed.status, fallback.status);
+        assert!(parsed
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("model curation output was invalid")));
     }
 
     #[test]

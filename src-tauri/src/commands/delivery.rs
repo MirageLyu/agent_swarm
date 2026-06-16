@@ -1,4 +1,4 @@
-use crate::agent::delivery::{generate_and_persist_degraded_delivery, MissionDeliverySnapshot};
+use crate::agent::delivery::{generate_degraded_delivery_snapshot, MissionDeliverySnapshot};
 use crate::db::{queries, Database};
 use serde::Serialize;
 use tauri::Manager;
@@ -40,12 +40,51 @@ pub fn get_mission_delivery(
 }
 
 #[tauri::command]
-pub fn generate_mission_delivery(
+pub async fn generate_mission_delivery(
     app: tauri::AppHandle,
     mission_id: String,
 ) -> Result<GenerateMissionDeliveryResponse, String> {
     let db = app.state::<Database>();
-    generate_and_persist_degraded_delivery(&db, &mission_id).map_err(|e| e.to_string())?;
+    let generation = db
+        .with_conn(|conn| generate_degraded_delivery_snapshot(conn, &mission_id))
+        .map_err(|e| e.to_string())?;
+
+    let (snapshot, generation_status, curator_model) =
+        match crate::commands::mission::build_provider(&app) {
+            Ok((provider, model)) => {
+                let curated = crate::agent::delivery::curate_delivery_with_llm(
+                    provider,
+                    &model,
+                    generation.snapshot.clone(),
+                )
+                .await;
+                (curated, "generated", Some(model))
+            }
+            Err(err) => {
+                tracing::warn!(
+                    mission_id = %mission_id,
+                    error = %err,
+                    "delivery curator provider unavailable; using degraded snapshot"
+                );
+                (
+                    generation.snapshot,
+                    "degraded",
+                    Some("deterministic".to_string()),
+                )
+            }
+        };
+
+    db.with_conn(|conn| {
+        crate::agent::delivery::persist_delivery_snapshot(
+            conn,
+            &snapshot,
+            generation_status,
+            curator_model.as_deref(),
+            &generation.source_task_ids,
+        )
+    })
+    .map_err(|e| e.to_string())?;
+
     db.with_conn(|conn| {
         let row = queries::get_mission_delivery(conn, &mission_id)?.ok_or_else(|| {
             anyhow::anyhow!("delivery snapshot was not persisted for mission: {mission_id}")
