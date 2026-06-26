@@ -1684,11 +1684,12 @@ impl ToolExecutor {
                         Err(_) => continue,
                     };
                     let name = entry.file_name().to_string_lossy().to_string();
+                    let entry_path = entry.path();
+                    let entry_path = entry_path
+                        .canonicalize()
+                        .unwrap_or_else(|_| Self::normalize_lexical(&entry_path));
                     if !matches!(base_scope, PathScope::Evidence)
-                        && is_internal_evidence_or_persisted_path(
-                            &entry.path(),
-                            &self.workspace_root,
-                        )
+                        && is_internal_evidence_or_persisted_path(&entry_path, &self.workspace_root)
                     {
                         continue;
                     }

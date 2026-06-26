@@ -1159,6 +1159,41 @@ const MIGRATIONS: &[(&str, &str)] = &[
         PRAGMA foreign_keys=ON;
         "#,
     ),
+    (
+        "041_add_context_stats_assistant_text_event_kinds",
+        r#"
+        PRAGMA foreign_keys=OFF;
+
+        CREATE TABLE agent_events_new (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+            step INTEGER NOT NULL DEFAULT 0,
+            kind TEXT NOT NULL
+                CHECK (kind IN (
+                    'llm_call', 'tool_use', 'tool_result', 'checkpoint',
+                    'error', 'message', 'status_change', 'review',
+                    'system_hint', 'guardrail_pass', 'guardrail_fail',
+                    'guardrail_summary', 'note_applied',
+                    'tool_progress', 'tool_summary', 'compact', 'todo_update',
+                    'recovery_attempt', 'recovery_succeeded',
+                    'hook_executed', 'hook_inject', 'hook_prevented',
+                    'tool_result_policy', 'contract_pass', 'contract_fail',
+                    'context_stats', 'assistant_text'
+                )),
+            content TEXT NOT NULL DEFAULT '',
+            meta TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        INSERT INTO agent_events_new SELECT * FROM agent_events;
+        DROP TABLE agent_events;
+        ALTER TABLE agent_events_new RENAME TO agent_events;
+
+        CREATE INDEX IF NOT EXISTS idx_agent_events_agent ON agent_events(agent_id, created_at);
+
+        PRAGMA foreign_keys=ON;
+        "#,
+    ),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

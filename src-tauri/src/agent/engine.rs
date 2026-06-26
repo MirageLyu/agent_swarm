@@ -245,7 +245,12 @@ fn urgent_artifact_checkpoint_allows_tool(
         .any(|path| path.to_ascii_lowercase().ends_with(".pptx"))
         && lower.contains("python")
         && (lower.contains("ppt") || lower.contains("presentation"))
-        && (lower.contains(".py") || lower.contains("<<"))
+        && (lower.contains("<<")
+            || lower.contains("create")
+            || lower.contains("build")
+            || lower.contains("generate")
+            || lower.contains("gen_")
+            || lower.contains("make"))
     {
         return true;
     }

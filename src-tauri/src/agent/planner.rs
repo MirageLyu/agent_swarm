@@ -630,6 +630,54 @@ pub fn build_compacted_messages(
     result
 }
 
+/// Remove orphan `ToolResult` blocks whose matching `ToolUse` was dropped during
+/// compaction / truncation.  DeepSeek models (and other strict OpenAI-compat
+/// providers) reject messages where a `role: "tool"` has no preceding
+/// `role: "assistant"` with `tool_calls`.
+pub fn strip_orphan_tool_results(messages: &[Message]) -> Vec<Message> {
+    // Collect every tool_use_id that still has a ToolUse block in the list.
+    let valid_ids: HashSet<&str> = messages
+        .iter()
+        .filter(|m| matches!(m.role, MessageRole::Assistant))
+        .flat_map(|m| {
+            m.content.iter().filter_map(|b| match b {
+                ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+        })
+        .collect();
+
+    messages
+        .iter()
+        .filter_map(|m| {
+            if !matches!(m.role, MessageRole::User) {
+                return Some(m.clone());
+            }
+            let filtered: Vec<ContentBlock> = m
+                .content
+                .iter()
+                .filter(|b| match b {
+                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                        valid_ids.contains(tool_use_id.as_str())
+                    }
+                    _ => true, // keep Text and other blocks
+                })
+                .cloned()
+                .collect();
+            if filtered.is_empty() {
+                None // drop the whole message if only orphan ToolResults remain
+            } else if filtered.len() == m.content.len() {
+                Some(m.clone())
+            } else {
+                Some(Message {
+                    content: filtered,
+                    ..m.clone()
+                })
+            }
+        })
+        .collect()
+}
+
 /// Truncation fallback: keep the latest 50% + original requirement (FR-10.5.8).
 pub fn truncate_messages(messages: &[Message]) -> Vec<Message> {
     if messages.len() <= 2 {

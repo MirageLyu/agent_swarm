@@ -914,6 +914,13 @@ async fn preflight_with_continuation(
                     }
                 }
             }
+
+            // DeepSeek models (strict OpenAI compat) reject orphan tool-result
+            // messages whose matching tool_calls was dropped during compaction.
+            // Strip any such orphan blocks to prevent 400 errors.
+            if effective_model.to_lowercase().contains("deepseek") {
+                history = planner::strip_orphan_tool_results(&history);
+            }
         }
 
         planner::emit_preflight_event_pub(app, session_id, "status", "正在等待模型响应…");
@@ -2193,7 +2200,8 @@ mod preflight_perf_payload_tests {
     fn done_payload_includes_reasoning_when_present() {
         let mut resp = sample_response();
         resp.reasoning = "Let me analyze the requirements.".into();
-        let payload = build_done_payload(&resp, &PreflightBeliefState::new(), "scenario_walk", None);
+        let payload =
+            build_done_payload(&resp, &PreflightBeliefState::new(), "scenario_walk", None);
         assert_eq!(payload["reasoning"], "Let me analyze the requirements.");
     }
 }
