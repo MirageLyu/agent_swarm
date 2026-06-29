@@ -1185,7 +1185,8 @@ const MIGRATIONS: &[(&str, &str)] = &[
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
-        INSERT INTO agent_events_new SELECT * FROM agent_events;
+        INSERT INTO agent_events_new (id, agent_id, step, kind, content, meta, created_at)
+            SELECT id, agent_id, step, kind, content, meta, created_at FROM agent_events;
         DROP TABLE agent_events;
         ALTER TABLE agent_events_new RENAME TO agent_events;
 
@@ -1610,5 +1611,216 @@ mod migration_024_tests {
                 "reference"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod migration_041_tests {
+    //! 回归测试：041 扩展 agent_events CHECK 约束，新增 context_stats 和 assistant_text。
+    //!
+    //! 测试覆盖：① 旧数据迁移后仍保留；② 新 kind 可插入；③ 旧 kind 仍可插入；④ 无效 kind 被拒绝。
+    use super::{run, MIGRATIONS};
+    use crate::db::queries::{get_events_for_agent, insert_agent, insert_event_with_meta};
+    use rusqlite::Connection;
+
+    /// 跑到 040 为止，插入旧数据，再跑 041。
+    fn setup_db_pre_041() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             CREATE TABLE IF NOT EXISTS schema_migrations (
+                 name TEXT PRIMARY KEY,
+                 applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+             );",
+        )
+        .unwrap();
+        for (name, sql) in MIGRATIONS {
+            if *name == "041_add_context_stats_assistant_text_event_kinds" {
+                break;
+            }
+            conn.execute_batch(sql).unwrap();
+            conn.execute("INSERT INTO schema_migrations (name) VALUES (?)", [*name])
+                .unwrap();
+        }
+        conn
+    }
+
+    fn event_created_at(index: usize) -> String {
+        format!("2026-01-01 00:00:{index:02}")
+    }
+
+    /// 真实 pre-041 fixture 在跑 041 之前必须还不允许新 kind。
+    #[test]
+    fn pre_041_fixture_rejects_new_kinds_before_migration() {
+        let conn = setup_db_pre_041();
+        insert_agent(&conn, "agent-pre", "test").unwrap();
+
+        let err =
+            insert_event_with_meta(&conn, "ev-pre", "agent-pre", 1, "context_stats", "x", None)
+                .unwrap_err();
+
+        assert!(
+            err.to_string().contains("CHECK constraint failed"),
+            "pre-041 schema must reject context_stats via CHECK, got {err}"
+        );
+    }
+
+    fn count_events(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM agent_events", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    /// 旧 agent_events 数据迁移后仍保留，包括 040 新增 kind 与所有复制列。
+    #[test]
+    fn preserves_old_data_after_migration() {
+        const OLD_KINDS: &[&str] = &[
+            "llm_call",
+            "tool_use",
+            "tool_result",
+            "checkpoint",
+            "error",
+            "message",
+            "status_change",
+            "review",
+            "system_hint",
+            "guardrail_pass",
+            "guardrail_fail",
+            "guardrail_summary",
+            "note_applied",
+            "tool_progress",
+            "tool_summary",
+            "compact",
+            "todo_update",
+            "recovery_attempt",
+            "recovery_succeeded",
+            "hook_executed",
+            "hook_inject",
+            "hook_prevented",
+            "tool_result_policy",
+            "contract_pass",
+            "contract_fail",
+        ];
+
+        let conn = setup_db_pre_041();
+        insert_agent(&conn, "agent-1", "test").unwrap();
+        for (idx, kind) in OLD_KINDS.iter().enumerate() {
+            let id = format!("ev-old-{idx}");
+            let content = format!("content-{kind}");
+            let meta = format!(r#"{{"kind":"{kind}","idx":{idx}}}"#);
+            insert_event_with_meta(
+                &conn,
+                &id,
+                "agent-1",
+                idx as i64 + 10,
+                kind,
+                &content,
+                Some(&meta),
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE agent_events SET created_at = ? WHERE id = ?",
+                rusqlite::params![event_created_at(idx), id],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            count_events(&conn),
+            OLD_KINDS.len() as i64,
+            "events before migration"
+        );
+
+        run(&conn).unwrap();
+
+        let events = get_events_for_agent(&conn, "agent-1").unwrap();
+        assert_eq!(
+            events.len(),
+            OLD_KINDS.len(),
+            "all events survive migration"
+        );
+        for (idx, kind) in OLD_KINDS.iter().enumerate() {
+            let event = events
+                .iter()
+                .find(|event| event.id == format!("ev-old-{idx}"))
+                .unwrap_or_else(|| panic!("missing ev-old-{idx}"));
+            assert_eq!(event.agent_id, "agent-1");
+            assert_eq!(event.step, idx as i64 + 10);
+            assert_eq!(event.kind, *kind);
+            assert_eq!(event.content, format!("content-{kind}"));
+            assert_eq!(
+                event.meta.as_deref(),
+                Some(format!(r#"{{"kind":"{kind}","idx":{idx}}}"#).as_str())
+            );
+            assert_eq!(event.created_at, event_created_at(idx));
+        }
+    }
+
+    /// 新 kind context_stats 和 assistant_text 可以通过真实 query helper 插入读取。
+    #[test]
+    fn allows_new_kinds_context_stats_and_assistant_text() {
+        let conn = setup_db_pre_041();
+        run(&conn).unwrap();
+        insert_agent(&conn, "agent-2", "test").unwrap();
+
+        insert_event_with_meta(
+            &conn,
+            "ev-cs",
+            "agent-2",
+            1,
+            "context_stats",
+            r#"{"tokens":100}"#,
+            Some(r#"{"source":"test"}"#),
+        )
+        .unwrap();
+        insert_event_with_meta(
+            &conn,
+            "ev-at",
+            "agent-2",
+            2,
+            "assistant_text",
+            "hello",
+            None,
+        )
+        .unwrap();
+
+        let events = get_events_for_agent(&conn, "agent-2").unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, "context_stats");
+        assert_eq!(events[0].content, r#"{"tokens":100}"#);
+        assert_eq!(events[0].meta.as_deref(), Some(r#"{"source":"test"}"#));
+        assert_eq!(events[1].kind, "assistant_text");
+        assert_eq!(events[1].content, "hello");
+    }
+
+    /// 040 新增 kind 迁移后仍可插入。
+    #[test]
+    fn allows_contract_validation_kinds_after_migration() {
+        let conn = setup_db_pre_041();
+        run(&conn).unwrap();
+        insert_agent(&conn, "agent-3", "test").unwrap();
+
+        insert_event_with_meta(&conn, "ev-pass", "agent-3", 1, "contract_pass", "ok", None)
+            .unwrap();
+        insert_event_with_meta(&conn, "ev-fail", "agent-3", 2, "contract_fail", "bad", None)
+            .unwrap();
+
+        let events = get_events_for_agent(&conn, "agent-3").unwrap();
+        assert_eq!(events[0].kind, "contract_pass");
+        assert_eq!(events[1].kind, "contract_fail");
+    }
+
+    /// 无效 kind 被 CHECK 约束拒绝。
+    #[test]
+    fn rejects_invalid_kind() {
+        let conn = setup_db_pre_041();
+        run(&conn).unwrap();
+        insert_agent(&conn, "agent-4", "test").unwrap();
+
+        let err = insert_event_with_meta(&conn, "ev-bad", "agent-4", 1, "invalid_kind", "x", None)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("CHECK constraint failed"),
+            "invalid kind must be rejected by CHECK constraint, got {err}"
+        );
     }
 }
