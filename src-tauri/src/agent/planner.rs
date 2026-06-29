@@ -2388,4 +2388,210 @@ mod tests {
         assert!(prompt.contains("自建认证"));
         assert!(prompt.contains("第3轮否决"));
     }
+
+    // -- strip_orphan_tool_results tests --
+
+    fn make_msg(role: MessageRole, blocks: Vec<ContentBlock>) -> Message {
+        Message {
+            role,
+            content: blocks,
+            cache_control: None,
+        }
+    }
+
+    fn text_block(text: &str) -> ContentBlock {
+        ContentBlock::Text {
+            text: text.to_string(),
+        }
+    }
+
+    fn tool_use_block(id: &str, name: &str) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: id.to_string(),
+            name: name.to_string(),
+            input: serde_json::json!({}),
+        }
+    }
+
+    fn tool_result_block(tool_use_id: &str, content: &str) -> ContentBlock {
+        ContentBlock::ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content: content.to_string(),
+            is_error: false,
+        }
+    }
+
+    fn assert_text(block: &ContentBlock, expected: &str) {
+        match block {
+            ContentBlock::Text { text } => assert_eq!(text, expected),
+            other => panic!("expected text block {expected:?}, got {other:?}"),
+        }
+    }
+
+    fn assert_tool_result(block: &ContentBlock, expected_id: &str, expected_content: &str) {
+        match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, expected_id);
+                assert_eq!(content, expected_content);
+                assert!(!is_error);
+            }
+            other => panic!("expected tool_result block {expected_id:?}, got {other:?}"),
+        }
+    }
+
+    fn assert_tool_use(block: &ContentBlock, expected_id: &str, expected_name: &str) {
+        match block {
+            ContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, expected_id);
+                assert_eq!(name, expected_name);
+                assert_eq!(input, &serde_json::json!({}));
+            }
+            other => panic!("expected tool_use block {expected_id:?}, got {other:?}"),
+        }
+    }
+
+    /// Matching ToolResult kept when its ToolUse exists in an Assistant message.
+    #[test]
+    fn strip_orphan_keeps_matching_tool_result() {
+        let messages = vec![
+            make_msg(MessageRole::Assistant, vec![tool_use_block("a", "read")]),
+            make_msg(
+                MessageRole::User,
+                vec![text_block("ok"), tool_result_block("a", "result")],
+            ),
+        ];
+        let result = strip_orphan_tool_results(&messages);
+        assert_eq!(result.len(), 2, "both messages kept");
+        let user = &result[1];
+        assert_eq!(
+            user.content.len(),
+            2,
+            "text + matching tool_result both kept"
+        );
+        assert_text(&user.content[0], "ok");
+        assert_tool_result(&user.content[1], "a", "result");
+    }
+
+    /// Orphan ToolResult (no matching ToolUse) removed from User message.
+    #[test]
+    fn strip_orphan_removes_orphan_tool_result() {
+        let messages = vec![make_msg(
+            MessageRole::User,
+            vec![text_block("keep me"), tool_result_block("orphan", "gone")],
+        )];
+        let result = strip_orphan_tool_results(&messages);
+        assert_eq!(result.len(), 1, "user message kept (has text)");
+        let user = &result[0];
+        assert_eq!(user.content.len(), 1, "orphan tool_result removed");
+        assert_text(&user.content[0], "keep me");
+    }
+
+    /// User message with only orphan ToolResults is dropped entirely.
+    #[test]
+    fn strip_orphan_drops_message_with_only_orphans() {
+        let messages = vec![make_msg(
+            MessageRole::User,
+            vec![tool_result_block("orphan", "gone")],
+        )];
+        let result = strip_orphan_tool_results(&messages);
+        assert!(result.is_empty(), "orphan-only user message dropped");
+    }
+
+    /// Plain text blocks in User messages are never affected.
+    #[test]
+    fn strip_orphan_text_blocks_unaffected() {
+        let messages = vec![make_msg(
+            MessageRole::User,
+            vec![text_block("hello"), text_block("world")],
+        )];
+        let result = strip_orphan_tool_results(&messages);
+        assert_eq!(result.len(), 1, "message kept");
+        assert_eq!(result[0].content.len(), 2, "both text blocks kept");
+        assert_text(&result[0].content[0], "hello");
+        assert_text(&result[0].content[1], "world");
+    }
+
+    /// Assistant messages always pass through unchanged.
+    #[test]
+    fn strip_orphan_assistant_messages_passthrough() {
+        let messages = vec![make_msg(
+            MessageRole::Assistant,
+            vec![text_block("thinking...")],
+        )];
+        let result = strip_orphan_tool_results(&messages);
+        assert_eq!(result.len(), 1, "assistant message kept");
+        assert_text(&result[0].content[0], "thinking...");
+    }
+
+    /// Mixed: matching kept, orphan-only dropped, across multiple User messages.
+    #[test]
+    fn strip_orphan_mixed_keep_and_drop() {
+        let messages = vec![
+            make_msg(MessageRole::Assistant, vec![tool_use_block("a", "read")]),
+            make_msg(
+                MessageRole::User,
+                vec![text_block("ok"), tool_result_block("a", "result")],
+            ),
+            make_msg(MessageRole::User, vec![tool_result_block("orphan", "gone")]),
+        ];
+        let result = strip_orphan_tool_results(&messages);
+        assert_eq!(
+            result.len(),
+            2,
+            "assistant + matching user kept, orphan-only dropped"
+        );
+        assert!(matches!(result[0].role, MessageRole::Assistant));
+        assert!(matches!(result[1].role, MessageRole::User));
+        assert_eq!(
+            result[1].content.len(),
+            2,
+            "matching user keeps both blocks"
+        );
+        assert_text(&result[1].content[0], "ok");
+        assert_tool_result(&result[1].content[1], "a", "result");
+    }
+
+    /// Current helper uses global id membership, not provider sequencing validation.
+    #[test]
+    fn strip_orphan_keeps_out_of_order_matching_tool_result() {
+        let messages = vec![
+            make_msg(MessageRole::Assistant, vec![tool_use_block("a", "read")]),
+            make_msg(
+                MessageRole::User,
+                vec![text_block("interleaving user text")],
+            ),
+            make_msg(
+                MessageRole::User,
+                vec![tool_result_block("a", "late result")],
+            ),
+        ];
+
+        let result = strip_orphan_tool_results(&messages);
+
+        assert_eq!(
+            result.len(),
+            3,
+            "global matching id keeps the later tool_result"
+        );
+        assert_text(&result[1].content[0], "interleaving user text");
+        assert_tool_result(&result[2].content[0], "a", "late result");
+    }
+
+    /// Current helper does not remove assistant ToolUse blocks even if no result remains.
+    #[test]
+    fn strip_orphan_assistant_tool_use_passthrough_without_result() {
+        let messages = vec![make_msg(
+            MessageRole::Assistant,
+            vec![tool_use_block("a", "read")],
+        )];
+
+        let result = strip_orphan_tool_results(&messages);
+
+        assert_eq!(result.len(), 1, "assistant message is preserved");
+        assert_tool_use(&result[0].content[0], "a", "read");
+    }
 }
