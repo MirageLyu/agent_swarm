@@ -519,7 +519,12 @@ mod tests {
             .expect("src-tauri has repo parent")
             .to_path_buf();
         let reg = build_registry(Some(&repo_root));
-        for expected in ["handoff", "handoff-project", "transfer-context", "handoffplan"] {
+        for expected in [
+            "handoff",
+            "handoff-project",
+            "transfer-context",
+            "handoffplan",
+        ] {
             let skill = reg
                 .get(expected)
                 .unwrap_or_else(|| panic!("missing project handoff skill: {expected}"));
