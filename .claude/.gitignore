@@ -1,0 +1,8 @@
+# Runtime/generated Claude Code state
+worktrees/
+handoffs/
+context-transfers/
+
+# Keep project handoff skills and hook templates trackable
+!skills/
+!hooks/

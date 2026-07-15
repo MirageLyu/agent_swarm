@@ -513,6 +513,26 @@ mod tests {
     }
 
     #[test]
+    fn project_registry_discovers_handoff_skills() {
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri has repo parent")
+            .to_path_buf();
+        let reg = build_registry(Some(&repo_root));
+        for expected in ["handoff", "handoff-project", "transfer-context", "handoffplan"] {
+            let skill = reg
+                .get(expected)
+                .unwrap_or_else(|| panic!("missing project handoff skill: {expected}"));
+            assert_eq!(skill.source, SkillSource::Project);
+            assert!(
+                skill.source_path.contains(".claude/skills"),
+                "unexpected source path for {expected}: {}",
+                skill.source_path
+            );
+        }
+    }
+
+    #[test]
     fn metas_omits_body() {
         let reg = build_registry(None);
         let metas = reg.metas();
