@@ -1558,6 +1558,67 @@ mod tests {
     }
 
     #[test]
+    fn stopped_mission_update_persists_delivery_snapshot() {
+        let conn = setup_db();
+        conn.execute(
+            "INSERT INTO missions (id, title, status) VALUES ('m-stop', 'Stopped Mission', 'running')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, mission_id, title, status) VALUES ('t-running', 'm-stop', 'Running Task', 'running')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO artifacts (id, mission_id, producer_task_id, type, local_name, summary, file_paths, published)
+             VALUES ('artifact-stop', 'm-stop', 't-running', 'report', 'stop-report', 'Partial output from stopped mission.', '[\"dist/partial.md\"]', 1)",
+            [],
+        )
+        .unwrap();
+
+        crate::db::queries::reset_orphaned_running_tasks(&conn, "m-stop").unwrap();
+        conn.execute(
+            "UPDATE missions SET status = 'failed', updated_at = datetime('now') WHERE id = 'm-stop'",
+            [],
+        )
+        .unwrap();
+        crate::agent::delivery::generate_and_persist_degraded_delivery_on_conn(&conn, "m-stop")
+            .expect("stop terminal DB update persists a delivery snapshot");
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM missions WHERE id = 'm-stop'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        let task_status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE id = 't-running'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(task_status, "ready");
+
+        let row = crate::db::queries::get_mission_delivery(&conn, "m-stop")
+            .unwrap()
+            .expect("stop path persisted a delivery snapshot before emitting status");
+        assert_eq!(row.generation_status, "degraded");
+        let snapshot: crate::agent::delivery::MissionDeliverySnapshot =
+            serde_json::from_str(&row.snapshot_json).unwrap();
+        assert_eq!(
+            snapshot.status,
+            crate::agent::delivery::DeliveryStatus::Failed
+        );
+        assert!(snapshot.items.iter().any(|item| {
+            item.id == "artifact-stop" && item.file_paths == vec!["dist/partial.md"]
+        }));
+    }
+
+    #[test]
     fn ut03_1_create_mission_and_tasks() {
         let conn = setup_db();
         let mid = "m1";

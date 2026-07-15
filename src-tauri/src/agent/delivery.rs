@@ -1660,6 +1660,40 @@ mod tests {
     }
 
     #[test]
+    fn degraded_generation_conn_helper_persists_terminal_snapshot_without_database_relock() {
+        let db = Database::open_in_memory().expect("open in-memory db");
+        db.with_conn(|conn| {
+            insert_mission(conn, "mission-1", "Ship CLI", "failed");
+            insert_task(conn, "task-1", "mission-1", "Publish manifest", "completed");
+            insert_artifact_row(
+                conn,
+                "artifact-1",
+                "mission-1",
+                "task-1",
+                "manifest",
+                "Release manifest for operators.",
+                r#"[\"dist/manifest.json\"]"#,
+            );
+
+            generate_and_persist_degraded_delivery_on_conn(conn, "mission-1")
+                .expect("terminal snapshot generation persists with existing connection");
+
+            let row =
+                queries::get_mission_delivery(conn, "mission-1")?.expect("delivery row exists");
+            assert_eq!(row.generation_status, "degraded");
+            assert_eq!(row.curator_model.as_deref(), Some("deterministic"));
+            let persisted: MissionDeliverySnapshot =
+                serde_json::from_str(&row.snapshot_json).expect("persisted snapshot parses");
+            assert_eq!(persisted.status, DeliveryStatus::Failed);
+            assert!(persisted.items.iter().any(|item| {
+                item.id == "artifact-1" && item.file_paths == vec!["dist/manifest.json"]
+            }));
+            Ok(())
+        })
+        .expect("connection-level generation succeeds without re-locking database");
+    }
+
+    #[test]
     fn degraded_generation_helper_persists_terminal_snapshot_without_overwriting_generated() {
         let db = Database::open_in_memory().expect("open in-memory db");
         db.with_conn(|conn| {
