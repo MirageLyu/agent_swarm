@@ -1672,7 +1672,7 @@ mod tests {
                 "task-1",
                 "manifest",
                 "Release manifest for operators.",
-                r#"[\"dist/manifest.json\"]"#,
+                r#"["dist/manifest.json"]"#,
             );
 
             generate_and_persist_degraded_delivery_on_conn(conn, "mission-1")
